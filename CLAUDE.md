@@ -97,7 +97,9 @@ same layout; differences are noted per module.
   types and `build_catalog(harness, dir)`, which groups sessions by project and
   nests Claude subagent transcripts under their parent; record parsing is in
   `providers/<harness>/history.rs`. `--dump-history` (hidden) prints the
-  catalog as JSON for regression checks. `catalog.rs` does
+  catalog as JSON for regression checks. `catalog.rs` links sessions to
+  repositories from structured tool-call arguments only (Codex function calls,
+  Claude `tool_use` blocks), never from prose or tool output. `catalog.rs` does
   Strict/Deep/Full discovery. Deep and Full crawl only the roots listed in
   `history_project_roots`, and only after the user confirms. `tui.rs` holds
   the browser state.

@@ -1,3 +1,4 @@
+use crate::harness::Harness;
 use crate::read::scan::{Catalog, SessionSummary};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -316,13 +317,14 @@ where
             Some(cached) if size > cached.file_size => {
                 let mut evidence = cached.evidence.clone();
                 evidence.extend(extract_evidence_bounded(
+                    session.harness,
                     path,
                     cached.file_size,
                     config.cancelled.as_ref(),
                 )?);
                 evidence
             }
-            _ => extract_evidence_bounded(path, 0, config.cancelled.as_ref())?,
+            _ => extract_evidence_bounded(session.harness, path, 0, config.cancelled.as_ref())?,
         };
         sessions_scanned = sessions_scanned.saturating_add(1);
         evidence_by_session.insert(cache_key.clone(), (size, mtime_ms, evidence.clone()));
@@ -674,16 +676,23 @@ fn remote_display_name(remote: &str) -> String {
 }
 
 #[cfg(test)]
-fn extract_structured_evidence(path: &Path) -> Result<Vec<PathEvidence>> {
-    extract_structured_evidence_from(path, 0)
+fn extract_structured_evidence(harness: Harness, path: &Path) -> Result<Vec<PathEvidence>> {
+    extract_structured_evidence_from(harness, path, 0)
 }
 
 #[cfg(test)]
-fn extract_structured_evidence_from(path: &Path, offset: u64) -> Result<Vec<PathEvidence>> {
-    extract_structured_evidence_from_cancellable(path, offset, None)
+fn extract_structured_evidence_from(
+    harness: Harness,
+    path: &Path,
+    offset: u64,
+) -> Result<Vec<PathEvidence>> {
+    extract_structured_evidence_from_cancellable(harness, path, offset, None)
 }
 
+/// Collects path evidence from structured tool calls only: never from prose,
+/// tool outputs, or prompts.
 fn extract_structured_evidence_from_cancellable(
+    harness: Harness,
     path: &Path,
     offset: u64,
     cancelled: Option<&AtomicBool>,
@@ -709,26 +718,10 @@ fn extract_structured_evidence_from_cancellable(
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if value.get("type").and_then(Value::as_str) != Some("response_item") {
-            continue;
+        match harness {
+            Harness::Codex => codex_tool_call_evidence(&value, &mut evidence),
+            Harness::Claude => claude_tool_call_evidence(&value, &mut evidence),
         }
-        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
-            continue;
-        };
-        if payload.get("type").and_then(Value::as_str) != Some("function_call") {
-            continue;
-        }
-        let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
-        let Some(arguments_raw) = payload.get("arguments").and_then(Value::as_str) else {
-            continue;
-        };
-        if arguments_raw.len() > MAX_COMMAND_BYTES.saturating_mul(2) {
-            continue;
-        }
-        let Ok(arguments) = serde_json::from_str::<Value>(arguments_raw) else {
-            continue;
-        };
-        extract_argument_evidence(name, &arguments, &mut evidence);
         if evidence.len() >= MAX_RELATED_PROJECTS_PER_SESSION.saturating_mul(8) {
             break;
         }
@@ -736,20 +729,82 @@ fn extract_structured_evidence_from_cancellable(
     Ok(evidence)
 }
 
+/// Codex: `response_item` function calls with JSON-encoded arguments.
+fn codex_tool_call_evidence(value: &Value, evidence: &mut Vec<PathEvidence>) {
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return;
+    }
+    let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+        return;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("function_call") {
+        return;
+    }
+    let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
+    let Some(arguments_raw) = payload.get("arguments").and_then(Value::as_str) else {
+        return;
+    };
+    if arguments_raw.len() > MAX_COMMAND_BYTES.saturating_mul(2) {
+        return;
+    }
+    let Ok(arguments) = serde_json::from_str::<Value>(arguments_raw) else {
+        return;
+    };
+    extract_argument_evidence(Harness::Codex, name, &arguments, evidence);
+}
+
+/// Claude Code: `tool_use` blocks of assistant records. Claude tools resolve
+/// relative paths against the record cwd, which acts as the tool workdir.
+fn claude_tool_call_evidence(value: &Value, evidence: &mut Vec<PathEvidence>) {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let record_cwd = value
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| valid_absolute_path(cwd));
+    let blocks = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array);
+    for block in blocks.into_iter().flatten() {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+        let Some(input) = block.get("input").and_then(Value::as_object) else {
+            continue;
+        };
+        let mut arguments = input.clone();
+        if let Some(cwd) = record_cwd {
+            arguments
+                .entry("cwd")
+                .or_insert_with(|| Value::String(cwd.to_string()));
+        }
+        extract_argument_evidence(Harness::Claude, name, &Value::Object(arguments), evidence);
+    }
+}
+
 fn extract_evidence_bounded(
+    harness: Harness,
     path: &Path,
     offset: u64,
     cancelled: &AtomicBool,
 ) -> Result<Vec<PathEvidence>> {
-    match extract_structured_evidence_from_cancellable(path, offset, Some(cancelled)) {
+    match extract_structured_evidence_from_cancellable(harness, path, offset, Some(cancelled)) {
         Ok(evidence) => Ok(evidence),
         Err(error) if cancelled.load(Ordering::Relaxed) => Err(error),
         Err(_) => Ok(Vec::new()),
     }
 }
 
-fn extract_argument_evidence(name: &str, arguments: &Value, out: &mut Vec<PathEvidence>) {
-    if !is_evidence_tool(name) {
+fn extract_argument_evidence(
+    harness: Harness,
+    name: &str,
+    arguments: &Value,
+    out: &mut Vec<PathEvidence>,
+) {
+    if !is_evidence_tool(harness, name) {
         return;
     }
     let Some(object) = arguments.as_object() else {
@@ -763,11 +818,19 @@ fn extract_argument_evidence(name: &str, arguments: &Value, out: &mut Vec<PathEv
         push_evidence(out, workdir, SOURCE_WORKDIR, 80);
     }
 
-    let modifying = name.contains("patch")
-        || name.contains("write")
-        || name.contains("edit")
-        || name.contains("create");
-    for key in ["path", "file_path", "target_path"] {
+    let modifying = match harness {
+        Harness::Codex => {
+            name.contains("patch")
+                || name.contains("write")
+                || name.contains("edit")
+                || name.contains("create")
+        }
+        Harness::Claude => {
+            let lower_name = name.to_ascii_lowercase();
+            lower_name.contains("write") || lower_name.contains("edit")
+        }
+    };
+    for key in ["path", "file_path", "notebook_path", "target_path"] {
         if let Some(raw) = object.get(key).and_then(Value::as_str) {
             if let Some(path) = resolve_evidence_path(raw, trusted_workdir) {
                 push_evidence(
@@ -854,21 +917,36 @@ fn looks_like_command_path(token: &str) -> bool {
         || Path::new(token).extension().is_some()
 }
 
-fn is_evidence_tool(name: &str) -> bool {
+/// Tools whose structured arguments name files or directories.
+fn is_evidence_tool(harness: Harness, name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    [
-        "exec_command",
-        "shell_command",
-        "apply_patch",
-        "write_file",
-        "edit_file",
-        "create_file",
-        "read_file",
-        "read_text_file",
-        "view_image",
-    ]
-    .iter()
-    .any(|allowed| name == *allowed || name.ends_with(&format!("__{allowed}")))
+    match harness {
+        Harness::Codex => [
+            "exec_command",
+            "shell_command",
+            "apply_patch",
+            "write_file",
+            "edit_file",
+            "create_file",
+            "read_file",
+            "read_text_file",
+            "view_image",
+        ]
+        .iter()
+        .any(|allowed| name == *allowed || name.ends_with(&format!("__{allowed}"))),
+        Harness::Claude => [
+            "bash",
+            "read",
+            "edit",
+            "multiedit",
+            "write",
+            "notebookedit",
+            "glob",
+            "grep",
+            "ls",
+        ]
+        .contains(&name.as_str()),
+    }
 }
 
 fn resolve_evidence_path(raw: &str, workdir: Option<&str>) -> Option<String> {
@@ -1502,13 +1580,56 @@ mod tests {
             })
         );
         std::fs::write(&session, body).expect("write session");
-        let evidence = extract_structured_evidence(&session).expect("evidence");
+        let evidence = extract_structured_evidence(Harness::Codex, &session).expect("evidence");
         assert!(evidence.iter().any(|item| item.path == "/safe/project"));
         assert!(evidence
             .iter()
             .any(|item| item.path == "/safe/project/src/main.rs"));
         assert!(!evidence.iter().any(|item| item.path == "/safe/project/sed"));
         assert!(!evidence.iter().any(|item| item.path.contains("secret")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_structured_evidence_ignores_prose_and_outputs() {
+        let root = temp_dir("claude-evidence");
+        let session = root.join("session.jsonl");
+        let body = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "cwd": "/safe/project",
+                "message": {"role": "user", "content": "/secret/prose/project"}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "cwd": "/safe/project",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": "t", "content": "/secret/output/project"
+                }]}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "cwd": "/safe/project",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "sed -n 1,10p src/main.rs"}
+                }]}
+            })
+        );
+        std::fs::write(&session, body).expect("write session");
+        let evidence = extract_structured_evidence(Harness::Claude, &session).expect("evidence");
+        assert!(evidence.iter().any(|item| item.path == "/safe/project"));
+        assert!(evidence
+            .iter()
+            .any(|item| item.path == "/safe/project/src/main.rs"));
+        assert!(!evidence.iter().any(|item| item.path == "/safe/project/sed"));
+        assert!(!evidence.iter().any(|item| item.path.contains("secret")));
+        // Codex records in a Claude transcript (and the reverse) are ignored.
+        assert!(extract_structured_evidence(Harness::Codex, &session)
+            .expect("codex evidence")
+            .is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1567,6 +1688,74 @@ mod tests {
                 .expect("strict catalog");
         let config = CatalogScanConfig {
             harness: crate::harness::Harness::Codex,
+            sessions_dir: sessions_root.clone(),
+            search_roots: vec![root.clone()],
+            excluded_roots: vec![sessions_root],
+            max_depth: 2,
+            max_candidates: 100,
+            progress_interval_ms: 25,
+            cache_db_path: root.join("cache/llmon.db"),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let snapshot = scan_project_catalog(&config, &strict, |_| {}).expect("catalog scan");
+        assert_eq!(snapshot.checkouts.len(), 1);
+        assert_eq!(
+            snapshot.checkouts[0].stable_id,
+            "remote:example.com/team/project"
+        );
+        assert!(snapshot.checkouts[0].deep_eligible);
+        assert_eq!(snapshot.links.len(), 1);
+        assert_eq!(snapshot.links[0].confidence, 80);
+
+        let cached = load_catalog_cache(&config.cache_db_path)
+            .expect("load cache")
+            .expect("cached snapshot");
+        assert_eq!(cached.checkouts.len(), 1);
+        assert_eq!(cached.links.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_catalog_scan_links_record_cwd_and_round_trips_sqlite() {
+        let root = temp_dir("claude-round-trip");
+        let project = root.join("project");
+        let sessions = root.join("projects/-launcher");
+        std::fs::create_dir_all(project.join(".git")).expect("project git dir");
+        std::fs::write(
+            project.join(".git/config"),
+            "[remote \"origin\"]\n\turl = git@example.com:team/project.git\n",
+        )
+        .expect("git config");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        let project_workdir =
+            std::fs::canonicalize(&project).expect("canonicalize project workdir");
+        let session_path = sessions.join("session.jsonl");
+        let body = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user",
+                "sessionId": "session",
+                "timestamp": "2026-07-29T10:00:00Z",
+                "cwd": root.join("launcher"),
+                "message": {"role": "user", "content": "run the tests"}
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-07-29T10:00:05Z",
+                "cwd": project_workdir,
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": "cargo test"}
+                }]}
+            })
+        );
+        std::fs::write(&session_path, body).expect("session file");
+        let sessions_root = root.join("projects");
+        let strict = crate::read::scan::build_catalog(Harness::Claude, &sessions_root)
+            .expect("strict catalog");
+        let config = CatalogScanConfig {
+            harness: Harness::Claude,
             sessions_dir: sessions_root.clone(),
             search_roots: vec![root.clone()],
             excluded_roots: vec![sessions_root],
