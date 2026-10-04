@@ -428,7 +428,7 @@ pub(crate) struct AppState {
     pub(crate) mouse_position: Option<(u16, u16)>,
     pub(crate) ui_hit_targets: Vec<UiHitTarget>,
 
-    pub(crate) usage: Option<LocalUsageSnapshot>,
+    pub(crate) usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
     pub(crate) usage_updated_at: Option<Instant>,
     pub(crate) usage_error: Option<String>,
 
@@ -2272,7 +2272,7 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
                     {
                         state.no_sessions_confirm_open = true;
                     }
-                    state.usage = Some(snapshot);
+                    state.usage = Some(std::sync::Arc::new(snapshot));
                     state.usage_error = None;
                     state.usage_updated_at = Some(Instant::now());
                 }

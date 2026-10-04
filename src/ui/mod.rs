@@ -28,6 +28,7 @@ use ratatui::{
 };
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -249,7 +250,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 frame,
                 inner,
                 &mut state.read_browser,
-                state.usage.as_ref(),
+                state.usage.as_deref(),
                 state.usage_error.as_deref(),
                 formatter,
                 accent_text_color,
@@ -428,7 +429,7 @@ fn usage_scan_status_label(state: &AppState) -> Option<String> {
     let updated = state
         .usage_updated_label()
         .or_else(|| state.limits_updated_label())?;
-    let Some(snapshot) = state.usage.as_ref() else {
+    let Some(snapshot) = state.usage.as_deref() else {
         return Some(updated);
     };
     let status = if snapshot.scan_pending_files == 0 {
@@ -2045,7 +2046,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let cards_height = usage_cards_height(state, area.width);
+    let panel = UsagePanel {
+        snapshot: state.usage.clone(),
+    };
+    let cards_height = usage_cards_height(state, &panel, area.width);
     let reset_summary = reset_summary_text(state);
     let reset_button = reset_summary
         .as_ref()
@@ -2064,12 +2068,17 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         reset_summary.as_deref(),
         reset_button.as_ref(),
     );
-    let weekly_hover = render_usage_cards(frame, chunks[1], state);
-    render_usage_chart(frame, chunks[2], state);
-    render_top_models(frame, chunks[3], state);
+    let weekly_hover = render_usage_cards(frame, chunks[1], state, &panel);
+    render_usage_chart(frame, chunks[2], state, &panel);
+    render_top_models(frame, chunks[3], state, &panel);
     if let Some(hover) = reset_hover.or(weekly_hover) {
         render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
     }
+}
+
+/// One harness's usage data as the USAGE cards, chart, and top models read it.
+struct UsagePanel {
+    snapshot: Option<Arc<crate::usage::LocalUsageSnapshot>>,
 }
 
 fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4] {
@@ -2090,7 +2099,10 @@ fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4
 }
 
 fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let cards_height = usage_cards_height(state, area.width);
+    let panel = UsagePanel {
+        snapshot: state.usage.clone(),
+    };
+    let cards_height = usage_cards_height(state, &panel, area.width);
     let reset_summary = reset_summary_text(state);
     let controls_height = activity_controls_height(reset_summary.as_deref(), area.width);
     let chunks = Layout::default()
@@ -2103,7 +2115,7 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .split(area);
 
     render_activity_controls(frame, chunks[0], state, reset_summary.as_deref());
-    let weekly_hover = render_usage_cards(frame, chunks[1], state);
+    let weekly_hover = render_usage_cards(frame, chunks[1], state, &panel);
     render_activity_heatmaps(frame, chunks[2], state);
     if let Some(hover) = weekly_hover {
         render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
@@ -2216,7 +2228,7 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
     );
     if let Some((indexed, total)) = state
         .usage
-        .as_ref()
+        .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files > 0)
         .map(|snapshot| (snapshot.scan_indexed_files, snapshot.scan_total_files))
     {
@@ -2316,7 +2328,7 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
     }
     let inner = chart_inner;
 
-    let Some(snapshot) = state.usage.as_ref() else {
+    let Some(snapshot) = state.usage.as_deref() else {
         render_activity_message(frame, inner, "Loading activity...");
         return;
     };
@@ -3083,9 +3095,9 @@ fn limits_card_content(state: &AppState, compact: bool) -> (String, Vec<String>)
     (value, captions)
 }
 
-fn usage_card_specs(state: &AppState, card_width: u16) -> Vec<CardSpec> {
+fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Vec<CardSpec> {
     let formatter = state.formatter();
-    let snapshot = state.usage.as_ref();
+    let snapshot = panel.snapshot.as_deref();
     let totals = snapshot
         .map(|snapshot| snapshot.totals_view_for_zone(state.metric, formatter, state.usage_zone));
     let today = snapshot.and_then(|snapshot| snapshot.days_for_zone(state.usage_zone).last());
@@ -3324,10 +3336,10 @@ fn usage_card_specs(state: &AppState, card_width: u16) -> Vec<CardSpec> {
     cards
 }
 
-fn usage_card_row_heights(state: &AppState, width: u16) -> Vec<u16> {
+fn usage_card_row_heights(state: &AppState, panel: &UsagePanel, width: u16) -> Vec<u16> {
     let layout = usage_card_layout(width);
     let card_width = layout.min_card_width.max(1);
-    let cards = usage_card_specs(state, card_width);
+    let cards = usage_card_specs(state, panel, card_width);
     let mut row_heights = Vec::with_capacity(cards.len().div_ceil(layout.columns));
     for row in cards.chunks(layout.columns) {
         row_heights.push(card_row_height(row, card_width));
@@ -3343,9 +3355,9 @@ fn card_row_height(cards: &[CardSpec], card_width: u16) -> u16 {
     height
 }
 
-fn usage_cards_height(state: &AppState, width: u16) -> u16 {
+fn usage_cards_height(state: &AppState, panel: &UsagePanel, width: u16) -> u16 {
     let mut total = 0_u16;
-    for height in usage_card_row_heights(state, width) {
+    for height in usage_card_row_heights(state, panel, width) {
         total = total.saturating_add(height);
     }
     total
@@ -3355,6 +3367,7 @@ fn render_usage_cards(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    panel: &UsagePanel,
 ) -> Option<WeeklyPaceHover> {
     let mut weekly_hover: Option<WeeklyPaceHover> = None;
     let formatter = state.formatter();
@@ -3364,7 +3377,7 @@ fn render_usage_cards(
     };
     let today_title = today_card_title(formatter, today_now);
     let card_layout = usage_card_layout(area.width);
-    let row_heights = usage_card_row_heights(state, area.width);
+    let row_heights = usage_card_row_heights(state, panel, area.width);
     let two_rows = row_heights.len() > 1;
     let (row1, row2) = if two_rows {
         let rows = Layout::default()
@@ -3379,14 +3392,14 @@ fn render_usage_cards(
         (Some(area), None)
     };
 
-    let snapshot = state.usage.as_ref();
+    let snapshot = panel.snapshot.as_deref();
     let totals =
         snapshot.map(|s| s.totals_view_for_zone(state.metric, formatter, state.usage_zone));
     let today = snapshot.and_then(|s| s.days_for_zone(state.usage_zone).last());
 
-    if let Some(pending) = state
-        .usage
-        .as_ref()
+    if let Some(pending) = panel
+        .snapshot
+        .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files > 0)
     {
         let progress = format!(
@@ -3587,6 +3600,7 @@ fn render_usage_cards(
                         frame,
                         cards[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -3639,6 +3653,7 @@ fn render_usage_cards(
                         frame,
                         top[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -3737,6 +3752,7 @@ fn render_usage_cards(
                         frame,
                         cards[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -3786,6 +3802,7 @@ fn render_usage_cards(
                         frame,
                         top[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -3922,6 +3939,7 @@ fn render_usage_cards(
                         frame,
                         cards[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -3968,6 +3986,7 @@ fn render_usage_cards(
                         frame,
                         top[1],
                         state,
+                        panel,
                         &today_title,
                         &today_value,
                         Some(&today_caption1),
@@ -4125,7 +4144,7 @@ fn format_usage_period_tooltip(
     }
 }
 
-fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, panel: &UsagePanel) {
     // Note: We draw bars manually to control label placement and padding.
     let (accent_color, accent_bright_color) = state.accent_colors();
     let range_label = match state.range {
@@ -4144,9 +4163,9 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         },
     );
 
-    if let Some(pending) = state
-        .usage
-        .as_ref()
+    if let Some(pending) = panel
+        .snapshot
+        .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files > 0)
     {
         state.usage_period_offset = 0;
@@ -4192,9 +4211,9 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         return;
     }
 
-    let all_days = state
-        .usage
-        .as_ref()
+    let all_days = panel
+        .snapshot
+        .as_deref()
         .map(|snapshot| aggregate_usage_days(snapshot.days_for_zone(state.usage_zone), state.range))
         .unwrap_or_default();
     let visible_capacity = match state.orientation {
@@ -5084,11 +5103,11 @@ fn format_minutes_hhmm(total_minutes: u64) -> String {
     format!("{:02}:{:02}", hours, minutes)
 }
 
-fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, panel: &UsagePanel) {
     let formatter = state.formatter();
-    let snapshot = state
-        .usage
-        .as_ref()
+    let snapshot = panel
+        .snapshot
+        .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files == 0);
     let models = snapshot
         .map(|s| s.top_models_for_zone(state.usage_zone).to_vec())
@@ -5099,9 +5118,9 @@ fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         Style::default().fg(Color::Gray),
     )];
     if models.is_empty() {
-        if state
-            .usage
-            .as_ref()
+        if panel
+            .snapshot
+            .as_deref()
             .is_some_and(|snapshot| snapshot.scan_pending_files > 0)
         {
             spans.push(Span::raw("INDEXING... PLEASE WAIT"));
@@ -5768,18 +5787,20 @@ fn card(
     card_with_captions(title, value, &[caption1, caption2])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_today_card(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    panel: &UsagePanel,
     title: &str,
     value: &str,
     caption1: Option<&str>,
     caption2: Option<&str>,
 ) {
-    let today_hit_rate = state
-        .usage
-        .as_ref()
+    let today_hit_rate = panel
+        .snapshot
+        .as_deref()
         .and_then(|snapshot| snapshot.days_for_zone(state.usage_zone).last())
         .map(|day| {
             cache_hit_rate_label(
@@ -7328,7 +7349,7 @@ mod tests {
         for (width, height) in [(200_u16, 50_u16), (120, 40), (90, 32)] {
             for orientation in [ChartOrientation::Horizontal, ChartOrientation::Vertical] {
                 let mut state = AppState::for_tests();
-                state.usage = Some(snapshot.clone());
+                state.usage = Some(Arc::new(snapshot.clone()));
                 state.orientation = orientation;
                 let text = render_screen_text(&mut state, width, height);
                 let name = format!("usage-{width}x{height}-{orientation:?}.txt").to_lowercase();
