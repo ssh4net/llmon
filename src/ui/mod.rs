@@ -379,6 +379,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 
     let title = "USAGE_SNAPSHOT :: ";
     let views = [
+        ("COMBINED", HarnessView::Combined),
         ("CODEX", HarnessView::Codex),
         ("CLAUDE", HarnessView::Claude),
     ];
@@ -406,8 +407,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let left = Paragraph::new(Line::from(spans)).alignment(Alignment::Left);
     frame.render_widget(left, row[0]);
 
-    let updated = usage_scan_status_label(state, usage_view_harness(state.harness_view))
-        .unwrap_or_else(|| "Updated --".to_string());
+    let updated = match usage_view_harness(state.harness_view) {
+        Some(harness) => usage_scan_status_label(state, harness),
+        None => combined_scan_status_label(state),
+    }
+    .unwrap_or_else(|| "Updated --".to_string());
 
     let right = Paragraph::new(updated).alignment(Alignment::Right);
     frame.render_widget(right, row[1]);
@@ -448,6 +452,29 @@ fn render_activity_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         usage_scan_status_label(state, Harness::Codex).unwrap_or_else(|| "Updated --".to_string());
     let right = Paragraph::new(updated).alignment(Alignment::Right);
     frame.render_widget(right, row[1]);
+}
+
+/// Header status of the combined view: the latest refresh, and indexing
+/// progress over both harnesses.
+fn combined_scan_status_label(state: &AppState) -> Option<String> {
+    let updated_at = [state.codex_usage_updated_at, state.claude_usage_updated_at]
+        .into_iter()
+        .flatten()
+        .max()?;
+    let updated = format_updated_label(updated_at);
+    let mut indexed = 0_usize;
+    let mut total = 0_usize;
+    let mut pending = 0_usize;
+    for snapshot in [state.codex_usage.as_deref(), state.claude_usage.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        indexed = indexed.saturating_add(snapshot.scan_indexed_files);
+        total = total.saturating_add(snapshot.scan_total_files);
+        pending = pending.saturating_add(snapshot.scan_pending_files);
+    }
+    let status = if pending == 0 { "COMPLETE" } else { "PARTIAL" };
+    Some(format!("{updated} | {status} {indexed}/{total}"))
 }
 
 fn usage_scan_status_label(state: &AppState, harness: Harness) -> Option<String> {
@@ -837,7 +864,9 @@ fn render_api_stat_card_row(
     let mut hover = None;
     for (index, (title, spec)) in cards.iter().enumerate() {
         if *title == "LIMITS" {
-            if let Some(next) = render_limits_card(frame, areas[index], state, compact_limits) {
+            if let Some(next) =
+                render_limits_card(frame, areas[index], state, "LIMITS", compact_limits)
+            {
                 hover = Some(next);
             }
             continue;
@@ -2010,7 +2039,7 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: View [h] (codex/claude), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: View [h] (combined/codex/claude), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
             "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -2078,7 +2107,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let panel = usage_panel(state, usage_view_harness(state.harness_view));
+    match usage_view_harness(state.harness_view) {
+        Some(harness) => render_single_usage(frame, area, state, harness),
+        None => render_combined_usage(frame, area, state),
+    }
+}
+
+fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, harness: Harness) {
+    let panel = usage_panel(state, harness);
     let cards_height = usage_cards_height(state, &panel, area.width);
     // Limit reset credits exist only for Codex.
     let reset_summary = match panel.harness {
@@ -2103,9 +2139,121 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         reset_button.as_ref(),
     );
     let weekly_hover = render_usage_cards(frame, chunks[1], state, &panel);
-    render_usage_chart(frame, chunks[2], state, &panel);
-    render_top_models(frame, chunks[3], state, &panel);
+    let days = panel
+        .snapshot
+        .as_deref()
+        .map(|snapshot| aggregate_usage_days(snapshot.days_for_zone(state.usage_zone), state.range))
+        .unwrap_or_default();
+    render_usage_chart(
+        frame,
+        chunks[2],
+        state,
+        &panel,
+        UsageChartInput {
+            days: &days,
+            owns_viewport: true,
+        },
+    );
+    render_top_models(frame, chunks[3], state, &panel, true);
     if let Some(hover) = reset_hover.or(weekly_hover) {
+        render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
+    }
+}
+
+/// Splits an area into two halves of equal width; an odd leftover column is
+/// a gap between them.
+fn equal_halves(area: Rect) -> (Rect, Rect) {
+    let half = area.width / 2;
+    let left = Rect::new(area.x, area.y, half, area.height);
+    let right = Rect::new(
+        area.x.saturating_add(area.width).saturating_sub(half),
+        area.y,
+        half,
+        area.height,
+    );
+    (left, right)
+}
+
+/// Codex cards, Claude cards, then the Codex chart on the left and the
+/// Claude chart on the right with the same days in the same rows.
+fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    let codex = labeled_usage_panel(state, Harness::Codex);
+    let claude = labeled_usage_panel(state, Harness::Claude);
+    let codex_cards_height = usage_cards_height(state, &codex, area.width);
+    let claude_cards_height = usage_cards_height(state, &claude, area.width);
+    let reset_summary = reset_summary_text(state);
+    let reset_button = reset_summary
+        .as_ref()
+        .map(|_| limit_reset_button_view(state));
+    let controls_height = usage_controls_height(
+        reset_summary.as_deref(),
+        area.width,
+        reset_button.as_ref().map(LimitResetButtonView::width),
+    );
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(controls_height),
+            Constraint::Length(codex_cards_height),
+            Constraint::Length(claude_cards_height),
+            // As in `usage_layout`: the cards keep their height and the
+            // charts take what is left.
+            Constraint::Fill(1),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let reset_hover = render_usage_controls(
+        frame,
+        chunks[0],
+        state,
+        reset_summary.as_deref(),
+        reset_button.as_ref(),
+    );
+    let codex_hover = render_usage_cards(frame, chunks[1], state, &codex);
+    let claude_hover = render_usage_cards(frame, chunks[2], state, &claude);
+
+    let zone = state.usage_zone;
+    let (codex_days, claude_days) = aligned_usage_days(
+        codex
+            .snapshot
+            .as_deref()
+            .map_or(&[][..], |snapshot| snapshot.days_for_zone(zone)),
+        claude
+            .snapshot
+            .as_deref()
+            .map_or(&[][..], |snapshot| snapshot.days_for_zone(zone)),
+    );
+    let codex_periods = aggregate_usage_days(&codex_days, state.range);
+    let claude_periods = aggregate_usage_days(&claude_days, state.range);
+    let (codex_area, claude_area) = equal_halves(chunks[3]);
+    render_usage_chart(
+        frame,
+        codex_area,
+        state,
+        &codex,
+        UsageChartInput {
+            days: &codex_periods,
+            owns_viewport: false,
+        },
+    );
+    render_usage_chart(
+        frame,
+        claude_area,
+        state,
+        &claude,
+        UsageChartInput {
+            days: &claude_periods,
+            owns_viewport: false,
+        },
+    );
+    // Both charts scroll together; the wheel works over either one.
+    state.usage_scroll_area = Some(chunks[3]);
+
+    let (codex_models, claude_models) = equal_halves(chunks[4]);
+    render_top_models(frame, codex_models, state, &codex, false);
+    render_top_models(frame, claude_models, state, &claude, true);
+    if let Some(hover) = reset_hover.or(codex_hover).or(claude_hover) {
         render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
     }
 }
@@ -2114,6 +2262,9 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 struct UsagePanel {
     harness: Harness,
     snapshot: Option<Arc<crate::usage::LocalUsageSnapshot>>,
+    /// Harness name shown in the LIMITS card and chart titles when two
+    /// panels share the screen.
+    label: Option<&'static str>,
 }
 
 fn usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
@@ -2123,15 +2274,87 @@ fn usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
             Harness::Codex => state.codex_usage.clone(),
             Harness::Claude => state.claude_usage.clone(),
         },
+        label: None,
     }
 }
 
-/// The harness the USAGE screen shows in the current view.
-fn usage_view_harness(view: HarnessView) -> Harness {
-    match view {
-        HarnessView::Codex => Harness::Codex,
-        HarnessView::Claude => Harness::Claude,
+fn labeled_usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
+    UsagePanel {
+        label: Some(match harness {
+            Harness::Codex => "CODEX",
+            Harness::Claude => "CLAUDE",
+        }),
+        ..usage_panel(state, harness)
     }
+}
+
+/// The harness of a single-harness USAGE view, or `None` for the combined
+/// view.
+fn usage_view_harness(view: HarnessView) -> Option<Harness> {
+    match view {
+        HarnessView::Combined => None,
+        HarnessView::Codex => Some(Harness::Codex),
+        HarnessView::Claude => Some(Harness::Claude),
+    }
+}
+
+/// Card columns of a panel: a labeled (combined view) panel keeps all six
+/// cards in one row at any width, so both card groups leave room for the
+/// charts.
+fn panel_card_layout(panel: &UsagePanel, width: u16) -> UsageCardLayout {
+    if panel.label.is_some() {
+        UsageCardLayout {
+            columns: 6,
+            min_card_width: width.saturating_mul(16) / 100,
+        }
+    } else {
+        usage_card_layout(width)
+    }
+}
+
+/// Pads two day lists to the same consecutive date range, so their charts
+/// show the same days in the same rows.
+fn aligned_usage_days(left: &[UsageDay], right: &[UsageDay]) -> (Vec<UsageDay>, Vec<UsageDay>) {
+    let parse = |day: &UsageDay| NaiveDate::parse_from_str(&day.day, "%Y-%m-%d").ok();
+    let mut first: Option<NaiveDate> = None;
+    let mut last: Option<NaiveDate> = None;
+    for day in left.iter().chain(right) {
+        if let Some(date) = parse(day) {
+            first = Some(first.map_or(date, |current| current.min(date)));
+            last = Some(last.map_or(date, |current| current.max(date)));
+        }
+    }
+    let (Some(first), Some(last)) = (first, last) else {
+        return (left.to_vec(), right.to_vec());
+    };
+    let pad = |days: &[UsageDay]| -> Vec<UsageDay> {
+        let by_day: BTreeMap<&str, &UsageDay> =
+            days.iter().map(|day| (day.day.as_str(), day)).collect();
+        let mut out = Vec::new();
+        let mut date = first;
+        while date <= last {
+            let key = date.format("%Y-%m-%d").to_string();
+            out.push(match by_day.get(key.as_str()) {
+                Some(day) => (*day).clone(),
+                None => UsageDay {
+                    day: key,
+                    input_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    agent_time_ms: 0,
+                    agent_runs: 0,
+                },
+            });
+            date = match date.succ_opt() {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        out
+    };
+    (pad(left), pad(right))
 }
 
 fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4] {
@@ -3394,7 +3617,7 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
 }
 
 fn usage_card_row_heights(state: &AppState, panel: &UsagePanel, width: u16) -> Vec<u16> {
-    let layout = usage_card_layout(width);
+    let layout = panel_card_layout(panel, width);
     let card_width = layout.min_card_width.max(1);
     let cards = usage_card_specs(state, panel, card_width);
     let mut row_heights = Vec::with_capacity(cards.len().div_ceil(layout.columns));
@@ -3433,7 +3656,7 @@ fn render_usage_cards(
         UsageZone::Utc => Utc::now().naive_utc(),
     };
     let today_title = today_card_title(formatter, today_now);
-    let card_layout = usage_card_layout(area.width);
+    let card_layout = panel_card_layout(panel, area.width);
     let row_heights = usage_card_row_heights(state, panel, area.width);
     let two_rows = row_heights.len() > 1;
     let (row1, row2) = if two_rows {
@@ -4209,7 +4432,22 @@ fn format_usage_period_tooltip(
     }
 }
 
-fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, panel: &UsagePanel) {
+/// Chart inputs: the (aggregated) periods to draw, and whether this chart
+/// may reset the shared scroll position while its harness is still indexing.
+/// Side-by-side charts get the same periods and equal widths, so they show
+/// the same days in the same rows.
+struct UsageChartInput<'a> {
+    days: &'a [UsageDay],
+    owns_viewport: bool,
+}
+
+fn render_usage_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    panel: &UsagePanel,
+    input: UsageChartInput<'_>,
+) {
     // Note: We draw bars manually to control label placement and padding.
     let (accent_color, accent_bright_color) = state.accent_colors();
     let range_label = match state.range {
@@ -4233,10 +4471,12 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
         .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files > 0)
     {
-        state.usage_period_offset = 0;
-        state.usage_visible_periods = 0;
-        state.usage_total_periods = 0;
-        state.usage_scroll_area = Some(area);
+        if input.owns_viewport {
+            state.usage_period_offset = 0;
+            state.usage_visible_periods = 0;
+            state.usage_total_periods = 0;
+            state.usage_scroll_area = Some(area);
+        }
         let formatter = state.formatter();
         let block = Block::default()
             .borders(Borders::ALL)
@@ -4276,11 +4516,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
         return;
     }
 
-    let all_days = panel
-        .snapshot
-        .as_deref()
-        .map(|snapshot| aggregate_usage_days(snapshot.days_for_zone(state.usage_zone), state.range))
-        .unwrap_or_default();
+    let all_days = input.days;
     let visible_capacity = match state.orientation {
         ChartOrientation::Vertical => vertical_bar_capacity(inner.width),
         ChartOrientation::Horizontal => {
@@ -4297,15 +4533,28 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
     let (start, end) = update_usage_viewport(state, area, all_days.len(), visible_capacity);
     let days = &all_days[start..end];
     let formatter = state.formatter();
-    let metric_label = usage_chart_metric_label(state.metric, panel.harness);
+    let range_label = match panel.label {
+        Some(label) => format!("{label} :: {range_label}"),
+        None => range_label.to_string(),
+    };
     let range_title = if all_days.len() == days.len() {
-        range_label.to_string()
+        range_label.clone()
     } else {
         format!(
             "{range_label} :: {}",
             viewport_label(all_days.len(), start, end, formatter)
         )
     };
+    let full_metric_label = usage_chart_metric_label(state.metric, panel.harness);
+    let title_cells = UnicodeWidthStr::width(range_title.as_str())
+        .saturating_add(UnicodeWidthStr::width(full_metric_label))
+        .saturating_add(8);
+    let metric_label =
+        if state.metric == UsageMetric::Tokens && title_cells > usize::from(area.width) {
+            short_token_heading(panel.harness)
+        } else {
+            full_metric_label
+        };
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -4761,6 +5010,14 @@ fn token_column_layout(harness: Harness) -> (usize, &'static str) {
     }
 }
 
+/// Token heading for a chart too narrow for the full one.
+fn short_token_heading(harness: Harness) -> &'static str {
+    match harness {
+        Harness::Codex => "TOKENS (IN / NC / OUT)",
+        Harness::Claude => "TOKENS (IN / CW / CR / OUT)",
+    }
+}
+
 fn token_column_separators_width(count: usize) -> usize {
     count.saturating_sub(1).saturating_mul(3)
 }
@@ -5180,7 +5437,13 @@ fn format_minutes_hhmm(total_minutes: u64) -> String {
     format!("{:02}:{:02}", hours, minutes)
 }
 
-fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, panel: &UsagePanel) {
+fn render_top_models(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    panel: &UsagePanel,
+    show_style_selector: bool,
+) {
     let formatter = state.formatter();
     let snapshot = panel
         .snapshot
@@ -5226,7 +5489,7 @@ fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pa
             .unwrap_or(u16::MAX)
             .saturating_mul(swatch_width),
     );
-    let selector_visible = area.width > selector_width;
+    let selector_visible = show_style_selector && area.width > selector_width;
     let models_area = Rect {
         width: area.width.saturating_sub(if selector_visible {
             selector_width.saturating_add(1)
@@ -5305,7 +5568,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
     let text = match screen {
         ActiveScreen::Usage => Text::from(vec![
             Line::from("Keys:"),
-            Line::from("  h    - switch view (Codex/Claude)"),
+            Line::from("  h    - switch view (Combined/Codex/Claude)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  g/w  - group by day/ISO week/month"),
             Line::from("  f    - toggle layout (Horz/Vert)"),
@@ -6971,6 +7234,7 @@ fn format_weekly_pace_tooltip(
 
 fn limits_card_paragraph(
     state: &AppState,
+    title: &str,
     compact: bool,
     content_width: u16,
 ) -> (Paragraph<'static>, Option<usize>, usize, Option<String>) {
@@ -6984,7 +7248,7 @@ fn limits_card_paragraph(
             bottom: 0,
         })
         .title(Span::styled(
-            " LIMITS ".to_string(),
+            format!(" {title} "),
             Style::default().fg(Color::Gray),
         ));
 
@@ -7068,9 +7332,13 @@ fn render_panel_limits_card(
     panel: &UsagePanel,
     compact: bool,
 ) -> Option<WeeklyPaceHover> {
+    let title = match panel.label {
+        Some(label) => format!("{label} LIMITS"),
+        None => "LIMITS".to_string(),
+    };
     match panel.harness {
-        Harness::Codex => render_limits_card(frame, area, state, compact),
-        Harness::Claude => render_claude_limits_card(frame, area, state),
+        Harness::Codex => render_limits_card(frame, area, state, &title, compact),
+        Harness::Claude => render_claude_limits_card(frame, area, state, &title),
     }
 }
 
@@ -7231,12 +7499,14 @@ fn format_reset_countdown(secs: i64) -> String {
     }
 }
 
-/// Column layout of the gauge rows: label width, gauge width, and whether
-/// the reset countdown fits.
+/// Column layout of the gauge rows: label width, gauge width (0 when no
+/// gauge fits, so rows show only the label and percent), and whether the
+/// reset countdown fits.
 fn claude_gauge_columns(lines: &[ClaudeLimitLine], content_width: u16) -> (usize, u16, bool) {
     const PERCENT_WIDTH: u16 = 4;
     const RESET_WIDTH: u16 = 6;
     const MIN_GAUGE_WIDTH: u16 = 5;
+    const MIN_PLAIN_GAUGE_WIDTH: u16 = 3;
     let mut label_width = 2_usize;
     for line in lines {
         if let ClaudeLimitLine::Gauge { label, .. } = line {
@@ -7252,8 +7522,10 @@ fn claude_gauge_columns(lines: &[ClaudeLimitLine], content_width: u16) -> (usize
     let with_reset = without_reset.saturating_sub(1).saturating_sub(RESET_WIDTH);
     if with_reset >= MIN_GAUGE_WIDTH {
         (label_width, with_reset, true)
+    } else if without_reset >= MIN_PLAIN_GAUGE_WIDTH {
+        (label_width, without_reset, false)
     } else {
-        (label_width, without_reset.max(1), false)
+        (label_width, 0, false)
     }
 }
 
@@ -7278,10 +7550,14 @@ fn claude_limit_line_texts(lines: &[ClaudeLimitLine], content_width: u16, now: i
                 } else {
                     String::new()
                 };
-                format!(
-                    "{label:<label_width$} {} {percent}{reset}",
-                    " ".repeat(usize::from(gauge_width))
-                )
+                if gauge_width == 0 {
+                    format!("{label:<label_width$} {percent}")
+                } else {
+                    format!(
+                        "{label:<label_width$} {} {percent}{reset}",
+                        " ".repeat(usize::from(gauge_width))
+                    )
+                }
             }
             ClaudeLimitLine::Text { text, .. } => text.clone(),
         })
@@ -7301,6 +7577,7 @@ fn render_claude_limits_card(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    title: &str,
 ) -> Option<WeeklyPaceHover> {
     let now = now_unix_secs();
     let content_width = area.width.saturating_sub(5).max(1);
@@ -7317,7 +7594,10 @@ fn render_claude_limits_card(
             top: 1,
             bottom: 0,
         })
-        .title(Span::styled(" LIMITS ", Style::default().fg(Color::Gray)));
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(Color::Gray),
+        ));
     let mut rendered: Vec<Line<'static>> = Vec::with_capacity(lines.len() + 1);
     for (line, text) in lines.iter().zip(&texts) {
         let style = match line {
@@ -7339,6 +7619,9 @@ fn render_claude_limits_card(
     let mut hover = None;
     let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
     for (index, line) in lines.iter().enumerate() {
+        if gauge_width == 0 {
+            break;
+        }
         let ClaudeLimitLine::Gauge {
             window, segments, ..
         } = line
@@ -7355,8 +7638,19 @@ fn render_claude_limits_card(
             GaugeSegments::Days => weekly_gauge_pacing(window, now),
             GaugeSegments::Hours | GaugeSegments::Single => (None, None),
         };
+        // A segment needs two cells to read as one; narrower gauges are plain.
+        let segment_count = match segments {
+            GaugeSegments::Days => WEEKLY_GAUGE_DAYS,
+            GaugeSegments::Hours => 5,
+            GaugeSegments::Single => 1,
+        };
+        let drawn = if usize::from(gauge_area.width) >= segment_count * 2 {
+            *segments
+        } else {
+            GaugeSegments::Single
+        };
         let buffer = frame.buffer_mut();
-        match segments {
+        match drawn {
             GaugeSegments::Days => render_segmented_usage_gauge::<WEEKLY_GAUGE_DAYS>(
                 buffer,
                 gauge_area,
@@ -7375,8 +7669,8 @@ fn render_claude_limits_card(
                 buffer,
                 gauge_area,
                 window.used_percent,
-                None,
-                None,
+                band,
+                marker,
             ),
         }
         if *segments == GaugeSegments::Days && hover.is_none() {
@@ -7397,11 +7691,12 @@ fn render_limits_card(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    title: &str,
     compact: bool,
 ) -> Option<WeeklyPaceHover> {
     let content_width = area.width.saturating_sub(5).max(1);
     let (paragraph, weekly_line_index, gauge_line_index, tooltip) =
-        limits_card_paragraph(state, compact, content_width);
+        limits_card_paragraph(state, title, compact, content_width);
     frame.render_widget(paragraph, area);
 
     let limits = state
@@ -7673,6 +7968,9 @@ fn inset_with_border_and_padding(area: Rect, padding: Padding) -> Rect {
 mod tests {
     use super::*;
 
+    /// Unique temp directory names for synthetic logs of parallel tests.
+    static SYNTHETIC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     /// Renders the whole frame and returns it as text, one line per row.
     fn render_screen_text(state: &mut AppState, width: u16, height: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
@@ -7692,8 +7990,11 @@ mod tests {
     /// Usage snapshot from synthetic Codex logs: one session per day for the
     /// last `days` days, with token counts that vary by day.
     fn synthetic_codex_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
-        let root =
-            std::env::temp_dir().join(format!("llmon-ui-codex-{}-{}", std::process::id(), days));
+        let root = std::env::temp_dir().join(format!(
+            "llmon-ui-codex-{}-{}",
+            std::process::id(),
+            SYNTHETIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&sessions).expect("create sessions");
@@ -7748,8 +8049,11 @@ mod tests {
     /// Usage snapshot from synthetic Claude Code transcripts: one session
     /// per day for the last `days` days.
     fn synthetic_claude_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
-        let root =
-            std::env::temp_dir().join(format!("llmon-ui-claude-{}-{}", std::process::id(), days));
+        let root = std::env::temp_dir().join(format!(
+            "llmon-ui-claude-{}-{}",
+            std::process::id(),
+            SYNTHETIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let projects = root.join("projects").join("-work-app");
         std::fs::create_dir_all(&projects).expect("create projects");
@@ -7843,7 +8147,11 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dump dir");
         let codex = Arc::new(synthetic_codex_snapshot(45));
         let claude = Arc::new(synthetic_claude_snapshot(12));
-        for view in [HarnessView::Codex, HarnessView::Claude] {
+        for view in [
+            HarnessView::Combined,
+            HarnessView::Codex,
+            HarnessView::Claude,
+        ] {
             for (width, height) in [(200_u16, 50_u16), (120, 40), (90, 32)] {
                 for orientation in [ChartOrientation::Horizontal, ChartOrientation::Vertical] {
                     let mut state = AppState::for_tests();
@@ -7907,6 +8215,96 @@ mod tests {
             .all(|text| UnicodeWidthStr::width(text.as_str()) <= 40));
         assert!(texts.iter().any(|text| text == "Extra 3.20 / 50.00 USD"));
         assert!(texts.iter().any(|text| text.starts_with("OAuth 1m ago")));
+    }
+
+    #[test]
+    fn narrow_claude_limits_card_keeps_one_line_per_limit() {
+        let mut state = AppState::for_tests();
+        state.claude_limits = Some(synthetic_claude_limits());
+        let now = now_unix_secs();
+        let lines = claude_limit_lines(&state, now);
+        for width in [9_u16, 13, 18, 26] {
+            let texts = claude_limit_line_texts(&lines, width, now);
+            for (line, text) in lines.iter().zip(&texts) {
+                if matches!(line, ClaudeLimitLine::Gauge { .. }) {
+                    assert!(
+                        UnicodeWidthStr::width(text.as_str()) <= usize::from(width),
+                        "{width}: {text:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(claude_limit_line_texts(&lines, 9, now)[0], "5h    42%");
+    }
+
+    fn zero_day(day: &str, total: i64) -> UsageDay {
+        UsageDay {
+            day: day.to_string(),
+            input_tokens: total,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            total_tokens: total,
+            agent_time_ms: 0,
+            agent_runs: 0,
+        }
+    }
+
+    #[test]
+    fn aligned_usage_days_pad_both_lists_to_the_same_dates() {
+        let left = vec![zero_day("2026-09-28", 1), zero_day("2026-09-29", 2)];
+        let right = vec![zero_day("2026-09-29", 3), zero_day("2026-10-01", 4)];
+        let (left, right) = aligned_usage_days(&left, &right);
+        let days = |list: &[UsageDay]| list.iter().map(|day| day.day.clone()).collect::<Vec<_>>();
+        let expected = vec!["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01"];
+        assert_eq!(days(&left), expected);
+        assert_eq!(days(&right), expected);
+        let totals =
+            |list: &[UsageDay]| list.iter().map(|day| day.total_tokens).collect::<Vec<_>>();
+        assert_eq!(totals(&left), vec![1, 2, 0, 0]);
+        assert_eq!(totals(&right), vec![0, 3, 0, 4]);
+    }
+
+    #[test]
+    fn combined_view_shows_both_card_groups_and_aligned_chart_days() {
+        let mut state = AppState::for_tests();
+        state.harness_view = HarnessView::Combined;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+        state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+        state.claude_limits = Some(synthetic_claude_limits());
+        let text = render_screen_text(&mut state, 200, 50);
+        let lines: Vec<&str> = text.lines().collect();
+        let codex_row = lines
+            .iter()
+            .position(|line| line.contains("CODEX LIMITS"))
+            .expect("codex cards");
+        let claude_row = lines
+            .iter()
+            .position(|line| line.contains("CLAUDE LIMITS"))
+            .expect("claude cards");
+        assert!(codex_row < claude_row, "Codex cards come first");
+        let chart_row = lines
+            .iter()
+            .position(|line| line.contains("CODEX :: Usage by day"))
+            .expect("codex chart");
+        assert!(lines[chart_row].contains("CLAUDE :: Usage by day"));
+
+        // Every chart row shows the same date on the left (Codex) and the
+        // right (Claude), including days before the first Claude session.
+        let weekdays = ["Mon ", "Tue ", "Wed ", "Thu ", "Fri ", "Sat ", "Sun "];
+        let mut aligned_rows = 0;
+        for line in &lines[chart_row..] {
+            let labels: Vec<&str> = weekdays
+                .iter()
+                .flat_map(|weekday| line.match_indices(weekday).map(|(index, _)| index))
+                .filter_map(|index| line.get(index..index + 9))
+                .collect();
+            if labels.len() == 2 {
+                assert_eq!(labels[0], labels[1], "{line}");
+                aligned_rows += 1;
+            }
+        }
+        assert!(aligned_rows >= 15, "{aligned_rows} aligned rows");
     }
 
     #[test]

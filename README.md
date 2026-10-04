@@ -29,10 +29,18 @@ generated tokens. Bar lengths and summary-card totals use input plus output.
   - Debian/Ubuntu: `sudo apt install musl-tools`
   - Required tool for x86_64 musl builds: `x86_64-linux-musl-gcc`
 
-Claude Code support is being added. The USAGE screen has a Claude Code view
-(`h` switches views): token usage with input / cache-write / cache-read /
-output columns, and a LIMITS card with gauges for the 5-hour, weekly, and
-per-model limits. The other screens still show Codex.
+Claude Code support is being added. The USAGE screen has three views (`h`
+switches them):
+
+- **Combined** (default): the Codex cards, the Claude Code cards below
+  them, then the Codex chart on the left and the Claude Code chart on the
+  right, with the same days in the same rows. Both charts scroll together.
+- **Codex** and **Claude Code**: the full single-harness screen. The Claude
+  Code view shows input / cache-write / cache-read / output token columns
+  and a LIMITS card with gauges for the 5-hour, weekly, and per-model limits.
+
+The other screens still show Codex. The combined view needs about 120
+columns; on narrower terminals use the single views.
 
 ## Claude Code live limits
 
@@ -184,7 +192,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 
 ## Key bindings
 
-- `h` Switch the USAGE view between Codex and Claude Code (or click the pills in the header)
+- `h` Switch the USAGE view: Combined, Codex, or Claude Code (or click the pills in the header)
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)
 - `f` Toggle layout (Horz/Vert)

@@ -205,7 +205,9 @@ pub enum ClaudeLimitsMode {
 /// Which harness the USAGE screen shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum HarnessView {
+    /// Codex and Claude Code side by side.
     #[default]
+    Combined,
     Codex,
     Claude,
 }
@@ -213,13 +215,15 @@ pub(crate) enum HarnessView {
 impl HarnessView {
     pub(crate) fn next(self) -> Self {
         match self {
+            Self::Combined => Self::Codex,
             Self::Codex => Self::Claude,
-            Self::Claude => Self::Codex,
+            Self::Claude => Self::Combined,
         }
     }
 
     fn store_value(self) -> &'static str {
         match self {
+            Self::Combined => "combined",
             Self::Codex => "codex",
             Self::Claude => "claude",
         }
@@ -227,6 +231,7 @@ impl HarnessView {
 
     fn from_store(value: &str) -> Option<Self> {
         match value {
+            "combined" => Some(Self::Combined),
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
             _ => None,
@@ -3428,13 +3433,14 @@ mod tests {
     fn harness_view_round_trips_through_state_store() {
         let llmon_home = make_temp_dir("harness-view");
         let mut state = PersistedUiState::default_for_workspace(None);
-        assert_eq!(state.harness_view, HarnessView::Codex);
+        assert_eq!(state.harness_view, HarnessView::Combined);
         state.harness_view = HarnessView::Claude;
 
         save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
         let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.harness_view, HarnessView::Claude);
-        assert_eq!(HarnessView::Claude.next(), HarnessView::Codex);
+        assert_eq!(HarnessView::Claude.next(), HarnessView::Combined);
+        assert_eq!(HarnessView::Combined.next(), HarnessView::Codex);
 
         let _ = std::fs::remove_dir_all(llmon_home);
     }

@@ -11,8 +11,8 @@ one TUI. The design, decisions, and phases are in `PLAN.md`; keep its
 The repo continues CoMon's git history: `master` is CoMon `c24855d` (comon
 0.5.8) renamed to llmon 0.1.0 (binary `llmon`, `~/.llmon`, `LLMON_HOME`,
 `llmon.db`). Usage, session history, and the limit sources support Codex and
-Claude Code. The USAGE screen has Codex and Claude views; the other screens
-are still Codex-only (see `PLAN.md`).
+Claude Code. The USAGE screen has Combined, Codex, and Claude views; the other
+screens are still Codex-only (see `PLAN.md`).
 
 `_handoff/sources/` is gitignored and holds read-only reference trees, each
 with its own git repo:
@@ -83,7 +83,10 @@ same layout; differences are noted per module.
   as `Arc` so the chart can borrow the state mutably). Per-harness parts
   dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude
   gauge rows reusing CoMon's segmented gauges and weekly pacing) and the token
-  columns (3 for Codex, 4 for Claude).
+  columns (3 for Codex, 4 for Claude). The combined view stacks two labeled
+  panels' card groups (one row each), then draws both charts in equal-width
+  halves from `aligned_usage_days`, so the days line up and one scroll offset
+  drives both.
   To see a layout without a terminal, run
   `LLMON_RENDER_DUMP_DIR=<dir> cargo test render_dump -- --ignored`: it
   renders screens from synthetic data to text files (`AppState::for_tests()`).
