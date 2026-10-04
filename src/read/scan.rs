@@ -1,5 +1,6 @@
-use crate::providers::codex::history::{load_session_detail, scan_session_summary};
-use crate::usage::normalize_project_key;
+use crate::harness::Harness;
+use crate::providers::{claude, codex};
+use crate::usage::{normalize_project_key, TokenBreakdown};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
@@ -34,6 +35,7 @@ pub(crate) struct ProjectRecord {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionSummary {
+    pub(crate) harness: Harness,
     pub(crate) file_path: PathBuf,
     pub(crate) session_id: String,
     pub(crate) cwd: String,
@@ -45,7 +47,11 @@ pub(crate) struct SessionSummary {
     pub(crate) git_commit: Option<String>,
     pub(crate) repo_url: Option<String>,
     pub(crate) model_provider: Option<String>,
+    /// Version of the CLI that wrote the log (Claude Code).
+    pub(crate) client_version: Option<String>,
     pub(crate) model: Option<String>,
+    /// Subagent transcripts of this session (Claude Code).
+    pub(crate) subagent_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,10 +62,15 @@ pub(crate) struct SessionDetail {
     pub(crate) tool_calls: usize,
     pub(crate) tool_outputs: usize,
     pub(crate) input_images: usize,
-    pub(crate) total_tokens: Option<i64>,
-    pub(crate) input_tokens: Option<i64>,
-    pub(crate) output_tokens: Option<i64>,
+    /// Encrypted reasoning items were present (Codex).
     pub(crate) reasoning_encrypted: bool,
+    /// Thinking content blocks (Claude Code).
+    pub(crate) thinking_blocks: usize,
+    /// Token usage of the session.
+    pub(crate) usage: Option<TokenBreakdown>,
+    /// Total the log itself reports, when it does (Codex). It can differ from
+    /// `usage.total()`, so the browser shows it as the session total.
+    pub(crate) total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -67,7 +78,7 @@ struct ProjectBuilder {
     sessions: Vec<SessionSummary>,
 }
 
-pub(crate) fn build_catalog(sessions_dir: &Path) -> Result<Catalog> {
+pub(crate) fn build_catalog(harness: Harness, sessions_dir: &Path) -> Result<Catalog> {
     if !sessions_dir.exists() {
         return Ok(Catalog {
             sessions_dir: sessions_dir.to_path_buf(),
@@ -81,12 +92,42 @@ pub(crate) fn build_catalog(sessions_dir: &Path) -> Result<Catalog> {
     collect_session_files(sessions_dir, &mut candidates)?;
     candidates.sort();
 
+    // Claude Code subagent transcripts are attached to their parent session
+    // instead of being listed on their own.
+    let (top_level, mut subagents) = match harness {
+        Harness::Codex => (candidates, BTreeMap::new()),
+        Harness::Claude => claude::history::split_subagent_files(candidates),
+    };
+
     let mut grouped: BTreeMap<String, ProjectBuilder> = BTreeMap::new();
     let mut files_scanned = 0usize;
     let mut files_skipped = 0usize;
 
-    for path in candidates {
-        match scan_session_summary(&path) {
+    for path in top_level {
+        match scan_session_summary(harness, &path) {
+            Ok(mut summary) => {
+                files_scanned += 1;
+                let file_session_id = path.file_stem().and_then(|stem| stem.to_str());
+                for key in [Some(summary.session_id.as_str()), file_session_id]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(files) = subagents.remove(key) {
+                        summary.subagent_files.extend(files);
+                    }
+                }
+                let key = normalize_project_key(&summary.cwd);
+                grouped.entry(key).or_default().sessions.push(summary);
+            }
+            Err(_) => {
+                files_skipped += 1;
+            }
+        }
+    }
+
+    // Subagents whose parent transcript is gone are still listed.
+    for path in subagents.into_values().flatten() {
+        match scan_session_summary(harness, &path) {
             Ok(summary) => {
                 files_scanned += 1;
                 let key = normalize_project_key(&summary.cwd);
@@ -106,6 +147,39 @@ pub(crate) fn build_catalog(sessions_dir: &Path) -> Result<Catalog> {
         files_scanned,
         files_skipped,
     })
+}
+
+fn scan_session_summary(harness: Harness, path: &Path) -> Result<SessionSummary> {
+    match harness {
+        Harness::Codex => codex::history::scan_session_summary(path),
+        Harness::Claude => claude::history::scan_session_summary(path),
+    }
+}
+
+pub(crate) fn load_session_detail(harness: Harness, path: &Path) -> Result<SessionDetail> {
+    match harness {
+        Harness::Codex => codex::history::load_session_detail(path),
+        Harness::Claude => claude::history::load_session_detail(path),
+    }
+}
+
+/// Start time fields of a session summary: the recorded timestamp, or the
+/// file modification time (with a `--` label) when the log has none.
+pub(crate) fn session_start_fields(
+    started_at_raw: Option<String>,
+    started_at_sort_key_ms: i64,
+    file_path: &Path,
+) -> (Option<String>, String, i64) {
+    if let Some(raw) = started_at_raw {
+        let label = format_timestamp_label(&raw);
+        return (Some(raw), label, started_at_sort_key_ms);
+    }
+    let file_time = std::fs::metadata(file_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(system_time_to_epoch_ms)
+        .unwrap_or(0);
+    (None, "--".to_string(), file_time)
 }
 
 fn finish_project_builders(grouped: BTreeMap<String, ProjectBuilder>) -> Vec<ProjectRecord> {
@@ -210,21 +284,30 @@ pub(crate) fn catalog_dump_json(catalog: &Catalog) -> Value {
                 .sessions
                 .iter()
                 .map(|session| {
-                    let detail = load_session_detail(&session.file_path).ok().map(|detail| {
-                        serde_json::json!({
-                            "meaningful_user_turns": detail.meaningful_user_turns.len(),
-                            "all_user_turns": detail.all_user_turns.len(),
-                            "assistant_messages": detail.assistant_messages,
-                            "tool_calls": detail.tool_calls,
-                            "tool_outputs": detail.tool_outputs,
-                            "input_images": detail.input_images,
-                            "total_tokens": detail.total_tokens,
-                            "input_tokens": detail.input_tokens,
-                            "output_tokens": detail.output_tokens,
-                            "reasoning_encrypted": detail.reasoning_encrypted,
-                        })
-                    });
+                    let detail = load_session_detail(session.harness, &session.file_path)
+                        .ok()
+                        .map(|detail| {
+                            serde_json::json!({
+                                "meaningful_user_turns": detail.meaningful_user_turns.len(),
+                                "all_user_turns": detail.all_user_turns.len(),
+                                "assistant_messages": detail.assistant_messages,
+                                "tool_calls": detail.tool_calls,
+                                "tool_outputs": detail.tool_outputs,
+                                "input_images": detail.input_images,
+                                "reasoning_encrypted": detail.reasoning_encrypted,
+                                "thinking_blocks": detail.thinking_blocks,
+                                "total_tokens": detail.total_tokens,
+                                "usage": detail.usage.map(|usage| serde_json::json!({
+                                    "input": usage.input,
+                                    "cache_write": usage.cache_write,
+                                    "cache_read": usage.cache_read,
+                                    "output": usage.output,
+                                    "total": usage.total(),
+                                })),
+                            })
+                        });
                     serde_json::json!({
+                        "harness": session.harness.key(),
                         "file": session.file_path.display().to_string(),
                         "session_id": session.session_id,
                         "cwd": session.cwd,
@@ -236,7 +319,13 @@ pub(crate) fn catalog_dump_json(catalog: &Catalog) -> Value {
                         "git_commit": session.git_commit,
                         "repo_url": session.repo_url,
                         "model_provider": session.model_provider,
+                        "client_version": session.client_version,
                         "model": session.model,
+                        "subagents": session
+                            .subagent_files
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>(),
                         "detail": detail,
                     })
                 })
@@ -333,7 +422,7 @@ mod tests {
 "##,
         );
 
-        let catalog = build_catalog(&sessions).expect("catalog");
+        let catalog = build_catalog(Harness::Codex, &sessions).expect("catalog");
         assert_eq!(catalog.projects.len(), 2);
         assert_eq!(catalog.projects[0].display_path, "/mnt/e/Work/demo-builder");
         assert_eq!(catalog.projects[0].sessions.len(), 1);
@@ -376,7 +465,7 @@ mod tests {
             ),
         );
 
-        let catalog = build_catalog(&sessions).expect("catalog");
+        let catalog = build_catalog(Harness::Codex, &sessions).expect("catalog");
         assert_eq!(catalog.projects.len(), 1);
         assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
         assert_eq!(catalog.projects[0].sessions.len(), 1);
@@ -415,7 +504,7 @@ mod tests {
         body.push('\n');
         write_session(&session, &body);
 
-        let catalog = build_catalog(&root.join("sessions")).expect("catalog");
+        let catalog = build_catalog(Harness::Codex, &root.join("sessions")).expect("catalog");
         assert_eq!(catalog.projects.len(), 1);
         assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
         assert_eq!(catalog.projects[0].sessions[0].file_path, session);
@@ -444,7 +533,7 @@ mod tests {
         );
         write_session(&session, &body);
 
-        let catalog = build_catalog(&root.join("sessions")).expect("catalog");
+        let catalog = build_catalog(Harness::Codex, &root.join("sessions")).expect("catalog");
         assert_eq!(catalog.files_scanned, 1);
         assert_eq!(catalog.projects.len(), 1);
         assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
@@ -465,7 +554,7 @@ mod tests {
 "#,
         );
 
-        let catalog = build_catalog(&root.join("sessions")).expect("catalog");
+        let catalog = build_catalog(Harness::Codex, &root.join("sessions")).expect("catalog");
         assert_eq!(catalog.files_scanned, 1);
         assert_eq!(catalog.files_skipped, 0);
         assert_eq!(catalog.projects.len(), 1);
@@ -490,7 +579,7 @@ mod tests {
 "##,
         );
 
-        let detail = load_session_detail(&path).expect("detail");
+        let detail = load_session_detail(Harness::Codex, &path).expect("detail");
         assert_eq!(detail.meaningful_user_turns, vec!["show all prompts"]);
         assert_eq!(detail.all_user_turns.len(), 2);
         assert_eq!(detail.assistant_messages, 1);

@@ -1,10 +1,11 @@
+use crate::harness::Harness;
 use crate::locale::{DisplayFormatter, DisplayStyle};
-use crate::providers::codex::history::load_session_detail;
 use crate::read::catalog::{
     CatalogProgress, CatalogScanPhase, CatalogSnapshot, ProjectViewMode, SOURCE_NOISY_TREE,
 };
 use crate::read::scan::{
-    truncate_single_line, Catalog, ProjectRecord, SessionDetail, SessionSummary,
+    load_session_detail, truncate_single_line, Catalog, ProjectRecord, SessionDetail,
+    SessionSummary,
 };
 use crate::usage::{
     format_compact_kmb, format_duration, normalize_project_key, LocalUsageSnapshot,
@@ -319,16 +320,16 @@ impl BrowserState {
     }
 
     fn ensure_selected_session_detail(&mut self) -> Result<()> {
-        let Some(path) = self
+        let Some((harness, path)) = self
             .selected_session()
-            .map(|session| session.file_path.clone())
+            .map(|session| (session.harness, session.file_path.clone()))
         else {
             return Ok(());
         };
         if self.session_details.contains_key(&path) {
             return Ok(());
         }
-        let detail = load_session_detail(&path)?;
+        let detail = load_session_detail(harness, &path)?;
         self.session_details.insert(path, detail);
         Ok(())
     }
@@ -1082,8 +1083,13 @@ fn render_sessions_view(
                     } else {
                         "R"
                     };
+                    let agents = if session.subagent_files.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  [+{} agents]", session.subagent_files.len())
+                    };
                     let label = format!(
-                        "{relation}  {}  {}",
+                        "{relation}  {}  {}{agents}",
                         session_started_label(session, formatter),
                         truncate_single_line(&session.title, 64)
                     );
@@ -1349,7 +1355,8 @@ fn render_session_detail(
             Span::raw(
                 session
                     .model
-                    .clone()
+                    .as_deref()
+                    .map(crate::usage::model_display_name)
                     .or_else(|| session.model_provider.clone())
                     .unwrap_or_else(|| "--".to_string()),
             ),
@@ -1382,6 +1389,39 @@ fn render_session_detail(
         ]));
     }
 
+    if let Some(version) = &session.client_version {
+        lines.push(Line::from(vec![
+            Span::styled("CLIENT", Style::default().fg(Color::Gray)),
+            Span::raw("  "),
+            Span::raw(format!("Claude Code {}", truncate_single_line(version, 24))),
+        ]));
+    }
+
+    let resume = match session.harness {
+        Harness::Codex => format!("codex resume {}", session.session_id),
+        Harness::Claude => format!("claude --resume {}", session.session_id),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("RESUME", Style::default().fg(Color::Gray)),
+        Span::raw("  "),
+        Span::raw(resume),
+    ]));
+
+    if !session.subagent_files.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("SUBAGENTS", Style::default().fg(Color::Gray)),
+            Span::raw("  "),
+            Span::raw(formatter.format_usize(session.subagent_files.len())),
+        ]));
+        for path in session.subagent_files.iter().take(8) {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            lines.push(Line::from(format!("  - {name}")));
+        }
+    }
+
     if let Some(raw) = &session.started_at_raw {
         lines.push(Line::from(vec![
             Span::styled("TIMESTAMP", Style::default().fg(Color::Gray)),
@@ -1408,31 +1448,65 @@ fn render_session_detail(
                 formatter.format_usize(detail.input_images)
             )),
         ]));
-        if let Some(total_tokens) = detail.total_tokens {
+        if let Some(total_tokens) = detail
+            .total_tokens
+            .or_else(|| detail.usage.map(|usage| usage.total()))
+        {
             lines.push(Line::from(vec![
                 Span::styled("TOKENS", Style::default().fg(Color::Gray)),
                 Span::raw("  "),
                 Span::raw(formatter.format_count(total_tokens)),
             ]));
         }
-        if let Some(input_tokens) = detail.input_tokens {
-            lines.push(Line::from(vec![
-                Span::styled("INPUT", Style::default().fg(Color::Gray)),
-                Span::raw("  "),
-                Span::raw(formatter.format_count(input_tokens)),
-            ]));
-        }
-        if let Some(output_tokens) = detail.output_tokens {
-            lines.push(Line::from(vec![
-                Span::styled("OUTPUT", Style::default().fg(Color::Gray)),
-                Span::raw("  "),
-                Span::raw(formatter.format_count(output_tokens)),
-            ]));
+        if let Some(usage) = detail.usage {
+            match session.harness {
+                Harness::Codex => {
+                    lines.push(Line::from(vec![
+                        Span::styled("INPUT", Style::default().fg(Color::Gray)),
+                        Span::raw("  "),
+                        Span::raw(
+                            formatter.format_count(
+                                usage
+                                    .input
+                                    .saturating_add(usage.cache_write)
+                                    .saturating_add(usage.cache_read),
+                            ),
+                        ),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("OUTPUT", Style::default().fg(Color::Gray)),
+                        Span::raw("  "),
+                        Span::raw(formatter.format_count(usage.output)),
+                    ]));
+                }
+                Harness::Claude => {
+                    lines.push(Line::from(vec![
+                        Span::styled("IN/CW/CR/OUT", Style::default().fg(Color::Gray)),
+                        Span::raw("  "),
+                        Span::raw(format!(
+                            "{} / {} / {} / {}",
+                            formatter.format_count(usage.input),
+                            formatter.format_count(usage.cache_write),
+                            formatter.format_count(usage.cache_read),
+                            formatter.format_count(usage.output)
+                        )),
+                    ]));
+                }
+            }
         }
         if detail.reasoning_encrypted {
             lines.push(Line::from(vec![
                 Span::styled("REASONING", Style::default().fg(Color::Gray)),
                 Span::raw("  encrypted"),
+            ]));
+        }
+        if detail.thinking_blocks > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("THINKING", Style::default().fg(Color::Gray)),
+                Span::raw(format!(
+                    "  {} blocks",
+                    formatter.format_usize(detail.thinking_blocks)
+                )),
             ]));
         }
 
@@ -1614,6 +1688,7 @@ mod tests {
 
     fn session(path: &str, cwd: &str) -> SessionSummary {
         SessionSummary {
+            harness: crate::harness::Harness::Codex,
             file_path: PathBuf::from(path),
             session_id: path.to_string(),
             cwd: cwd.to_string(),
@@ -1625,7 +1700,9 @@ mod tests {
             git_commit: None,
             repo_url: None,
             model_provider: None,
+            client_version: None,
             model: None,
+            subagent_files: Vec::new(),
         }
     }
 

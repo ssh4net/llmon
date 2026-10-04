@@ -297,7 +297,7 @@ struct Args {
     #[arg(long, hide = true)]
     dump_history: bool,
 
-    /// Harness whose usage --dump-usage prints.
+    /// Harness for --dump-usage, --dump-history, and --print-sessions-dir.
     #[arg(long, value_enum, default_value = "codex", hide = true)]
     harness: HarnessArg,
 }
@@ -313,19 +313,33 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let selected_harness = match args.harness {
+        HarnessArg::Codex => harness::Harness::Codex,
+        HarnessArg::Claude => harness::Harness::Claude,
+    };
+    let selected_home = match selected_harness {
+        harness::Harness::Codex => args.codex_home.clone(),
+        harness::Harness::Claude => args.claude_dir.clone(),
+    };
     if args.print_sessions_dir {
-        read::print_sessions_dir(args.codex_home.clone(), args.sessions_dir.clone())?;
+        read::print_sessions_dir(selected_harness, selected_home, args.sessions_dir.clone())?;
         return Ok(());
     }
-    let read_config = read::build_config(args.codex_home.clone(), args.sessions_dir.clone())?;
     if args.dump_history {
-        let catalog = read::scan::build_catalog(&read_config.sessions_dir)?;
+        let config =
+            read::build_config(selected_harness, selected_home, args.sessions_dir.clone())?;
+        let catalog = read::scan::build_catalog(config.harness, &config.sessions_dir)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&read::scan::catalog_dump_json(&catalog))?
         );
         return Ok(());
     }
+    let read_config = read::build_config(
+        harness::Harness::Codex,
+        args.codex_home.clone(),
+        args.sessions_dir.clone(),
+    )?;
 
     let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 

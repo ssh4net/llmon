@@ -648,6 +648,7 @@ async fn run_inner(
         clear_scan_cache_files(&scan_cache_db_path)?;
     }
     let read_config = read::Config {
+        harness: crate::harness::Harness::Codex,
         sessions_dir: config.read_sessions_dir.clone(),
     };
     let mut read_browser = read::build_browser(&read_config)?;
@@ -712,6 +713,7 @@ async fn run_inner(
                     .await;
             }
             let scan_config = crate::read::catalog::CatalogScanConfig {
+                harness: crate::harness::Harness::Codex,
                 sessions_dir: sessions_dir.clone(),
                 search_roots,
                 excluded_roots,
@@ -738,7 +740,10 @@ async fn run_inner(
                 let scan_cancelled = scan_config.cancelled.clone();
                 let reuse_repositories = reuse_cached_repositories;
                 let result = tokio::task::spawn_blocking(move || {
-                    let strict = crate::read::scan::build_catalog(&scan_config.sessions_dir)?;
+                    let strict = crate::read::scan::build_catalog(
+                        scan_config.harness,
+                        &scan_config.sessions_dir,
+                    )?;
                     let report_progress = |progress| {
                         let _ =
                             progress_tx.blocking_send(AppEvent::HistoryCatalogProgress(progress));

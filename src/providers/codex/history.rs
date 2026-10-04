@@ -1,14 +1,15 @@
 //! Codex session history: list metadata (title, start time, model, git
 //! context) and the turn/tool/token detail of one session log.
 
+use crate::harness::Harness;
 use crate::providers::codex::usage::{
     resolve_session_owner, SessionOwner, PROJECT_IDENTITY_LINE_LIMIT,
 };
 use crate::read::scan::{
-    format_timestamp_label, parse_rfc3339_to_epoch_ms, system_time_to_epoch_ms,
-    truncate_single_line, SessionDetail, SessionSummary, MAX_TITLE_CHARS, MAX_TURN_PREVIEW_CHARS,
-    UNRESOLVED_SESSION_OWNER,
+    parse_rfc3339_to_epoch_ms, session_start_fields, truncate_single_line, SessionDetail,
+    SessionSummary, MAX_TITLE_CHARS, MAX_TURN_PREVIEW_CHARS, UNRESOLVED_SESSION_OWNER,
 };
+use crate::usage::TokenBreakdown;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs::File;
@@ -108,10 +109,7 @@ pub(crate) fn load_session_detail(path: &Path) -> Result<SessionDetail> {
                             {
                                 detail.total_tokens = read_i64(total_usage.get("total_tokens"))
                                     .or_else(|| read_i64(total_usage.get("totalTokens")));
-                                detail.input_tokens = read_i64(total_usage.get("input_tokens"))
-                                    .or_else(|| read_i64(total_usage.get("inputTokens")));
-                                detail.output_tokens = read_i64(total_usage.get("output_tokens"))
-                                    .or_else(|| read_i64(total_usage.get("outputTokens")));
+                                detail.usage = cumulative_usage(total_usage);
                             }
                         }
                     }
@@ -278,20 +276,14 @@ impl SessionSummaryBuilder {
             .or(self.first_user_text)
             .unwrap_or_else(|| format!("Session {session_id}"));
 
-        let (started_at_raw, started_at_label, started_at_sort_key_ms) =
-            if let Some(raw) = self.started_at_raw {
-                let label = format_timestamp_label(&raw);
-                (Some(raw), label, self.started_at_sort_key_ms)
-            } else {
-                let file_time = std::fs::metadata(&self.file_path)
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(system_time_to_epoch_ms)
-                    .unwrap_or(0);
-                (None, "--".to_string(), file_time)
-            };
+        let (started_at_raw, started_at_label, started_at_sort_key_ms) = session_start_fields(
+            self.started_at_raw,
+            self.started_at_sort_key_ms,
+            &self.file_path,
+        );
 
         Ok(SessionSummary {
+            harness: Harness::Codex,
             file_path: self.file_path,
             session_id,
             cwd,
@@ -303,7 +295,9 @@ impl SessionSummaryBuilder {
             git_commit: self.git_commit,
             repo_url: self.repo_url,
             model_provider: self.model_provider,
+            client_version: None,
             model: self.model,
+            subagent_files: Vec::new(),
         })
     }
 }
@@ -354,6 +348,30 @@ fn find_nested_map<'a>(
         }
     }
     None
+}
+
+/// The session's cumulative usage from a `total_token_usage` map. Codex input
+/// includes cached input; split it so the breakdown adds up to the total.
+fn cumulative_usage(total_usage: &serde_json::Map<String, Value>) -> Option<TokenBreakdown> {
+    let input = read_i64(total_usage.get("input_tokens"))
+        .or_else(|| read_i64(total_usage.get("inputTokens")));
+    let output = read_i64(total_usage.get("output_tokens"))
+        .or_else(|| read_i64(total_usage.get("outputTokens")));
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let input = input.unwrap_or(0);
+    let cached = read_i64(total_usage.get("cached_input_tokens"))
+        .or_else(|| read_i64(total_usage.get("cachedInputTokens")))
+        .unwrap_or(0)
+        .clamp(0, input.max(0));
+    Some(TokenBreakdown {
+        input: input - cached,
+        cache_write: 0,
+        cache_write_1h: 0,
+        cache_read: cached,
+        output: output.unwrap_or(0),
+    })
 }
 
 fn read_i64(value: Option<&Value>) -> Option<i64> {

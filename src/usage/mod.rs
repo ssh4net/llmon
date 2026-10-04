@@ -2362,6 +2362,36 @@ fn path_matches_workspace(cwd: &str, workspace_path: &Path) -> bool {
     cwd_path == workspace_path || cwd_path.starts_with(workspace_path)
 }
 
+pub(crate) fn is_uuid_like(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
+}
+
+/// Short display name of a model id: `claude-opus-5-5` -> `Opus 5.5`. Other
+/// ids are returned unchanged.
+pub fn model_display_name(model: &str) -> String {
+    let Some(rest) = model.strip_prefix("claude-") else {
+        return model.to_string();
+    };
+    let mut parts = rest.split('-');
+    let Some(family) = parts.next().filter(|family| !family.is_empty()) else {
+        return model.to_string();
+    };
+    // Version parts are short numbers; an 8-digit date suffix is dropped.
+    let version: Vec<&str> = parts
+        .take_while(|part| part.len() <= 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    let mut name = family[..1].to_ascii_uppercase() + &family[1..];
+    if !version.is_empty() {
+        name.push(' ');
+        name.push_str(&version.join("."));
+    }
+    name
+}
+
 pub(crate) fn normalize_project_key(path: &str) -> String {
     let mut normalized = session_cwd_identity(path).unwrap_or_else(|| {
         normalize_wsl_unc_path(path).unwrap_or_else(|| path.trim().replace('\\', "/"))
@@ -4124,6 +4154,15 @@ mod tests {
         assert_eq!(second.scan_pending_files, 0);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn model_display_names_are_short() {
+        assert_eq!(model_display_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_display_name("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(model_display_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_display_name("claude-fable-5-1"), "Fable 5.1");
+        assert_eq!(model_display_name("gpt-5.5"), "gpt-5.5");
     }
 
     #[test]

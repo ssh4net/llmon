@@ -4,8 +4,8 @@
 
 use crate::usage::{
     add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms, read_timestamp_ms,
-    session_cwd_identity, CachedFileScanEntry, DailyTotals, FileScanSummary, HarnessParserState,
-    TokenBreakdown, UsageZone, MAX_ACTIVITY_GAP_MS,
+    CachedFileScanEntry, DailyTotals, FileScanSummary, HarnessParserState, TokenBreakdown,
+    UsageZone, MAX_ACTIVITY_GAP_MS,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::time::{Instant, SystemTime};
-
-const MAX_OWNER_IDENTITY_LINE_BYTES: usize = 512 * 1024;
 
 /// Incremental parser state persisted with each cache row so appended
 /// transcripts resume at `file_offset` without replaying earlier lines.
@@ -69,7 +67,10 @@ pub(crate) fn parse_file_summary(
         .map(|duration| duration.as_secs());
     // The owner (launch cwd) is resolved before parsing so every record in the
     // file is attributed to the same project.
-    let session_cwd = resolve_session_cwd(path).ok().flatten();
+    let session_cwd = super::resolve_session_owner(path)
+        .ok()
+        .flatten()
+        .map(|owner| owner.cwd);
     let cached_owner = existing.and_then(|entry| entry.session_cwd.as_deref());
     let owner_matches_cache = cached_owner == session_cwd.as_deref();
 
@@ -293,38 +294,6 @@ fn add_agent_ms(daily: &mut HashMap<String, DailyTotals>, timestamp_ms: i64, del
         if let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) {
             let totals = daily.entry(day_key).or_default();
             totals.agent_ms = totals.agent_ms.saturating_add(delta_ms).max(0);
-        }
-    }
-}
-
-/// The session owner is the cwd of the first record that names one (the
-/// launch directory). Later `cd` in tool calls never re-homes a session, and
-/// the lossy project-directory slug is never used.
-fn resolve_session_cwd(path: &Path) -> Result<Option<String>> {
-    let file = File::open(path).with_context(|| format!("Unable to open {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if reader
-            .read_line(&mut line)
-            .with_context(|| format!("Unable to read {}", path.display()))?
-            == 0
-        {
-            return Ok(None);
-        }
-        if line.len() > MAX_OWNER_IDENTITY_LINE_BYTES {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if let Some(cwd) = value
-            .get("cwd")
-            .and_then(Value::as_str)
-            .and_then(session_cwd_identity)
-        {
-            return Ok(Some(cwd));
         }
     }
 }
@@ -665,8 +634,14 @@ mod tests {
         append_usage_line(&path, 1_000, "/work/first", [1, 0, 0, 1]);
         append_usage_line(&path, 2_000, "/work/first/nested", [1, 0, 0, 1]);
 
-        let cwd = resolve_session_cwd(&path).expect("resolve owner");
-        assert_eq!(cwd.as_deref(), Some("/work/first"));
+        let owner = super::super::resolve_session_owner(&path)
+            .expect("resolve owner")
+            .expect("owner");
+        assert_eq!(owner.cwd, "/work/first");
+        assert_eq!(
+            owner.session_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

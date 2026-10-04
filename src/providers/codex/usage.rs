@@ -2,7 +2,7 @@
 //! events, fork replay handling, and the immutable session owner.
 
 use crate::usage::{
-    add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms,
+    add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms, is_uuid_like,
     parse_timestamp_value_ms, read_timestamp_ms, session_cwd_identity, track_activity,
     CachedFileScanEntry, DailyTotals, FileScanSummary, HarnessParserState, ScanCacheStore,
     SessionFileCandidate, TokenBreakdown, UsageZone,
@@ -1001,12 +1001,4 @@ fn session_id_from_rollout_path(path: &Path) -> Option<String> {
     } else {
         None
     }
-}
-
-fn is_uuid_like(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| match index {
-            8 | 13 | 18 | 23 => byte == b'-',
-            _ => byte.is_ascii_hexdigit(),
-        })
 }

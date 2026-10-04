@@ -16,14 +16,12 @@ pub(crate) fn resolve_codex_home(override_home: Option<PathBuf>) -> Option<PathB
             return Some(PathBuf::from(trimmed));
         }
     }
-    if let Ok(value) = std::env::var("HOME") {
-        if !value.trim().is_empty() {
-            return Some(PathBuf::from(value).join(".codex"));
-        }
-    }
-    if let Ok(value) = std::env::var("USERPROFILE") {
-        if !value.trim().is_empty() {
-            return Some(PathBuf::from(value).join(".codex"));
+    for key in ["HOME", "USERPROFILE"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed).join(".codex"));
+            }
         }
     }
     None

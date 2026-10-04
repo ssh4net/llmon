@@ -75,6 +75,7 @@ impl ProjectViewMode {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogScanConfig {
+    pub(crate) harness: crate::harness::Harness,
     pub(crate) sessions_dir: PathBuf,
     pub(crate) search_roots: Vec<PathBuf>,
     pub(crate) excluded_roots: Vec<PathBuf>,
@@ -1561,8 +1562,11 @@ mod tests {
         );
         std::fs::write(&session_path, body).expect("session file");
         let sessions_root = root.join("sessions");
-        let strict = crate::read::scan::build_catalog(&sessions_root).expect("strict catalog");
+        let strict =
+            crate::read::scan::build_catalog(crate::harness::Harness::Codex, &sessions_root)
+                .expect("strict catalog");
         let config = CatalogScanConfig {
+            harness: crate::harness::Harness::Codex,
             sessions_dir: sessions_root.clone(),
             search_roots: vec![root.clone()],
             excluded_roots: vec![sessions_root],

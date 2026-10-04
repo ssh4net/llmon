@@ -10,8 +10,8 @@ one TUI. The design, decisions, and phases are in `PLAN.md`; keep its
 
 The repo continues CoMon's git history: `master` is CoMon `c24855d` (comon
 0.5.8) renamed to llmon 0.1.0 (binary `llmon`, `~/.llmon`, `LLMON_HOME`,
-`llmon.db`). The usage scanner supports Codex and Claude Code; the UI,
-session history, and live limits are still Codex-only (see `PLAN.md`).
+`llmon.db`). The usage scanner and session history support Codex and Claude
+Code; the app UI and live limits are still Codex-only (see `PLAN.md`).
 
 `_handoff/sources/` is gitignored and holds read-only reference trees, each
 with its own git repo:
@@ -69,8 +69,8 @@ same layout; differences are noted per module.
   in the cache and config. Per-harness behavior is dispatched with `match`,
   not trait objects.
 - `providers/<harness>/` - everything specific to one CLI: home resolution,
-  log parser and its `ParserState`, session owner resolution, and (Codex)
-  fork replay baselines. Shared code reaches it through
+  log parser and its `ParserState`, session owner resolution, history
+  summary/detail parsing (`history.rs`), and (Codex) fork replay baselines. Shared code reaches it through
   `HarnessParserState` / `HarnessParsePlan` in `usage/`.
 - `ui/` - `ui::render(frame, &mut AppState)` and all drawing. Most of it lives
   in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`.
@@ -93,8 +93,11 @@ same layout; differences are noted per module.
   cache schema changes and `--rebuild-cache-on-start` never touch it, and its
   JSON columns (serde formats of `DailyTotals` / `TokenBreakdown`) may only
   gain `#[serde(default)]` fields without an archive layout migration.
-- `read/` - the session history screen. `scan.rs` reads session metadata and
-  titles and builds a catalog grouped by project. `catalog.rs` does
+- `read/` - the session history screen. `scan.rs` holds the shared catalog
+  types and `build_catalog(harness, dir)`, which groups sessions by project and
+  nests Claude subagent transcripts under their parent; record parsing is in
+  `providers/<harness>/history.rs`. `--dump-history` (hidden) prints the
+  catalog as JSON for regression checks. `catalog.rs` does
   Strict/Deep/Full discovery. Deep and Full crawl only the roots listed in
   `history_project_roots`, and only after the user confirms. `tui.rs` holds
   the browser state.
