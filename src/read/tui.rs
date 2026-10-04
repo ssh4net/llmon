@@ -1156,7 +1156,7 @@ fn render_project_detail(
             }
             if let Some(summary) = snapshot.project_usage_for_path(path) {
                 usage_totals.0 = usage_totals.0.saturating_add(summary.total_tokens);
-                usage_totals.1 = usage_totals.1.saturating_add(summary.cached_input_tokens);
+                usage_totals.1 = usage_totals.1.saturating_add(summary.cache_read_tokens);
                 usage_totals.2 = usage_totals.2.saturating_add(summary.agent_time_ms);
                 usage_totals.3 = usage_totals.3.saturating_add(summary.agent_runs);
                 usage_totals.4 = usage_totals.4.saturating_add(summary.indexed_files);

@@ -26,7 +26,7 @@ const SCAN_CACHE_DB_LAYOUT_VERSION: i64 = 1;
 /// Meaning of the Codex rows in the scan cache (`cache_meta` key
 /// `schema_version.codex`). Bump it whenever the Codex parser or the cached
 /// aggregates change; only Codex rows are rebuilt.
-const CODEX_CACHE_SCHEMA_VERSION: i64 = 1;
+const CODEX_CACHE_SCHEMA_VERSION: i64 = 2;
 pub(crate) const PROJECT_IDENTITY_LINE_LIMIT: usize = 128;
 const MAX_OWNER_IDENTITY_LINE_BYTES: usize = 512 * 1024;
 const FORK_REPLAY_END_GAP_MS: i64 = 1_000;
@@ -179,19 +179,73 @@ fn format_compact_scaled(
     formatter.localize_decimal(&s)
 }
 
+/// Token usage split into the categories every harness reports. `input` is
+/// uncached prompt input only, so the four fields add up to the total.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBreakdown {
+    #[serde(default)]
+    pub input: i64,
+    #[serde(default)]
+    pub cache_write: i64,
+    #[serde(default)]
+    pub cache_read: i64,
+    #[serde(default)]
+    pub output: i64,
+}
+
+impl TokenBreakdown {
+    pub fn total(self) -> i64 {
+        self.input
+            .saturating_add(self.cache_write)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.output)
+    }
+
+    pub fn add(&mut self, other: TokenBreakdown) {
+        self.input = self.input.saturating_add(other.input);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.output = self.output.saturating_add(other.output);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UsageDay {
     pub day: String,
+    /// Uncached input tokens.
     pub input_tokens: i64,
-    pub cached_input_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    /// Sum of the four token categories.
     pub total_tokens: i64,
     pub agent_time_ms: i64,
     pub agent_runs: i64,
 }
 
 impl UsageDay {
+    fn from_totals(day: String, totals: DailyTotals) -> Self {
+        Self {
+            day,
+            input_tokens: totals.tokens.input,
+            cache_write_tokens: totals.tokens.cache_write,
+            cache_read_tokens: totals.tokens.cache_read,
+            output_tokens: totals.tokens.output,
+            total_tokens: totals.tokens.total(),
+            agent_time_ms: totals.agent_ms,
+            agent_runs: totals.agent_runs,
+        }
+    }
+
     pub fn short_label(&self, formatter: DisplayFormatter<'_>) -> String {
         format_day_short(&self.day, formatter)
+    }
+
+    /// All prompt tokens: uncached input plus cache writes and reads.
+    pub fn prompt_tokens(&self) -> i64 {
+        self.input_tokens
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 }
 
@@ -228,7 +282,7 @@ pub struct ProjectActivity {
     pub days: Vec<UsageDay>,
     pub last_activity_day: Option<String>,
     pub total_tokens: i64,
-    pub cached_input_tokens: i64,
+    pub cache_read_tokens: i64,
     pub agent_time_ms: i64,
     pub agent_runs: i64,
 }
@@ -237,7 +291,7 @@ pub struct ProjectActivity {
 pub struct ProjectUsageSummary {
     pub display_path: String,
     pub total_tokens: i64,
-    pub cached_input_tokens: i64,
+    pub cache_read_tokens: i64,
     pub agent_time_ms: i64,
     pub agent_runs: i64,
     pub indexed_files: usize,
@@ -441,11 +495,20 @@ impl LocalUsageSnapshot {
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 struct DailyTotals {
-    input: i64,
-    cached: i64,
-    output: i64,
+    #[serde(default)]
+    tokens: TokenBreakdown,
+    #[serde(default)]
     agent_ms: i64,
+    #[serde(default)]
     agent_runs: i64,
+}
+
+impl DailyTotals {
+    fn add(&mut self, other: DailyTotals) {
+        self.tokens.add(other.tokens);
+        self.agent_ms = self.agent_ms.saturating_add(other.agent_ms);
+        self.agent_runs = self.agent_runs.saturating_add(other.agent_runs);
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
@@ -530,7 +593,7 @@ struct CachedFileScanEntry {
     #[serde(default)]
     daily: HashMap<String, DailyTotals>,
     #[serde(default)]
-    model_totals_by_day: HashMap<String, HashMap<String, i64>>,
+    model_totals_by_day: HashMap<String, HashMap<String, TokenBreakdown>>,
     updated_at: i64,
 }
 
@@ -541,7 +604,7 @@ struct FileScanSummary {
     file_offset: u64,
     fully_parsed: bool,
     daily: HashMap<String, DailyTotals>,
-    model_totals_by_day: HashMap<String, HashMap<String, i64>>,
+    model_totals_by_day: HashMap<String, HashMap<String, TokenBreakdown>>,
     unresolved_fork: bool,
 }
 
@@ -571,7 +634,7 @@ struct ProjectActivityBuilder {
 struct ProjectUsageBuilder {
     display_path: String,
     total_tokens: i64,
-    cached_input_tokens: i64,
+    cache_read_tokens: i64,
     agent_time_ms: i64,
     agent_runs: i64,
     indexed_files: usize,
@@ -594,8 +657,8 @@ pub fn snapshot_dump_json(snapshot: &LocalUsageSnapshot) -> Value {
     fn day_json(day: &UsageDay) -> Value {
         serde_json::json!({
             "day": day.day,
-            "input": day.input_tokens,
-            "cached": day.cached_input_tokens,
+            "input": day.prompt_tokens(),
+            "cached": day.cache_read_tokens,
             "total": day.total_tokens,
             "agent_ms": day.agent_time_ms,
             "runs": day.agent_runs,
@@ -643,14 +706,14 @@ pub fn snapshot_dump_json(snapshot: &LocalUsageSnapshot) -> Value {
             "days": active_days(&project.days),
             "last_activity_day": project.last_activity_day,
             "total": project.total_tokens,
-            "cached": project.cached_input_tokens,
+            "cached": project.cache_read_tokens,
             "agent_ms": project.agent_time_ms,
             "runs": project.agent_runs,
         })).collect::<Vec<_>>(),
         "project_usage": snapshot.project_usage.iter().map(|project| serde_json::json!({
             "path": project.display_path,
             "total": project.total_tokens,
-            "cached": project.cached_input_tokens,
+            "cached": project.cache_read_tokens,
             "agent_ms": project.agent_time_ms,
             "runs": project.agent_runs,
             "indexed_files": project.indexed_files,
@@ -719,8 +782,8 @@ pub fn compute_snapshot(
         .iter()
         .map(|key| (key.clone(), DailyTotals::default()))
         .collect();
-    let mut model_totals: HashMap<String, i64> = HashMap::new();
-    let mut utc_model_totals: HashMap<String, i64> = HashMap::new();
+    let mut model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
+    let mut utc_model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
     let mut project_activity: HashMap<String, ProjectActivityBuilder> = HashMap::new();
 
     if !sessions_root.exists() {
@@ -1439,10 +1502,10 @@ fn cache_entry_matches_candidate(
 fn build_snapshot(
     day_keys: Vec<String>,
     daily: HashMap<String, DailyTotals>,
-    model_totals: HashMap<String, i64>,
+    model_totals: HashMap<String, TokenBreakdown>,
     utc_day_keys: Vec<String>,
     utc_daily: HashMap<String, DailyTotals>,
-    utc_model_totals: HashMap<String, i64>,
+    utc_model_totals: HashMap<String, TokenBreakdown>,
     matched_session_files: u32,
     activity_first_weekday: Weekday,
     activity_day_keys: Vec<String>,
@@ -1478,29 +1541,21 @@ fn build_snapshot(
 fn build_zone_snapshot(
     day_keys: Vec<String>,
     daily: HashMap<String, DailyTotals>,
-    model_totals: HashMap<String, i64>,
+    model_totals: HashMap<String, TokenBreakdown>,
 ) -> (Vec<UsageDay>, UsageTotalsTokens, Vec<LocalUsageModel>) {
     let mut days: Vec<UsageDay> = Vec::with_capacity(day_keys.len());
 
     for day_key in &day_keys {
         let totals = daily.get(day_key).copied().unwrap_or_default();
-        let total = totals.input + totals.output;
-        days.push(UsageDay {
-            day: day_key.clone(),
-            input_tokens: totals.input,
-            cached_input_tokens: totals.cached,
-            total_tokens: total,
-            agent_time_ms: totals.agent_ms,
-            agent_runs: totals.agent_runs,
-        });
+        days.push(UsageDay::from_totals(day_key.clone(), totals));
     }
 
     let last30 = days.iter().rev().take(30).cloned().collect::<Vec<_>>();
     let last7 = days.iter().rev().take(7).cloned().collect::<Vec<_>>();
     let total_tokens: i64 = last30.iter().map(|day| day.total_tokens).sum();
     let last7_tokens: i64 = last7.iter().map(|day| day.total_tokens).sum();
-    let last7_input: i64 = last7.iter().map(|day| day.input_tokens).sum();
-    let last7_cached: i64 = last7.iter().map(|day| day.cached_input_tokens).sum();
+    let last7_prompt: i64 = last7.iter().map(UsageDay::prompt_tokens).sum();
+    let last7_cache_read: i64 = last7.iter().map(|day| day.cache_read_tokens).sum();
 
     let average_daily_tokens = if last7.is_empty() {
         0
@@ -1508,8 +1563,8 @@ fn build_zone_snapshot(
         ((last7_tokens as f64) / (last7.len() as f64)).round() as i64
     };
 
-    let cache_hit_rate_percent = if last7_input > 0 {
-        ((last7_cached as f64) / (last7_input as f64) * 1000.0).round() / 10.0
+    let cache_hit_rate_percent = if last7_prompt > 0 {
+        ((last7_cache_read as f64) / (last7_prompt as f64) * 1000.0).round() / 10.0
     } else {
         0.0
     };
@@ -1523,6 +1578,7 @@ fn build_zone_snapshot(
 
     let mut top_models: Vec<LocalUsageModel> = model_totals
         .into_iter()
+        .map(|(model, tokens)| (model, tokens.total()))
         .filter(|(model, tokens)| model != "unknown" && *tokens > 0)
         .map(|(model, tokens)| LocalUsageModel {
             model,
@@ -1580,12 +1636,10 @@ fn build_project_usage_summaries(
                 let Some((UsageZone::Local, _)) = split_cache_day_key(cache_key) else {
                     continue;
                 };
-                project.total_tokens = project
-                    .total_tokens
-                    .saturating_add(totals.input.saturating_add(totals.output));
-                project.cached_input_tokens = project
-                    .cached_input_tokens
-                    .saturating_add(totals.cached.min(totals.input));
+                project.total_tokens = project.total_tokens.saturating_add(totals.tokens.total());
+                project.cache_read_tokens = project
+                    .cache_read_tokens
+                    .saturating_add(totals.tokens.cache_read);
                 project.agent_time_ms = project.agent_time_ms.saturating_add(totals.agent_ms);
                 project.agent_runs = project.agent_runs.saturating_add(totals.agent_runs);
             }
@@ -1597,7 +1651,7 @@ fn build_project_usage_summaries(
         .map(|project| ProjectUsageSummary {
             display_path: project.display_path,
             total_tokens: project.total_tokens,
-            cached_input_tokens: project.cached_input_tokens,
+            cache_read_tokens: project.cache_read_tokens,
             agent_time_ms: project.agent_time_ms,
             agent_runs: project.agent_runs,
             indexed_files: project.indexed_files,
@@ -1631,29 +1685,21 @@ fn build_project_activity(
     for (_, project) in projects {
         let mut days: Vec<UsageDay> = Vec::with_capacity(day_keys.len());
         let mut total_tokens = 0i64;
-        let mut cached_input_tokens = 0i64;
+        let mut cache_read_tokens = 0i64;
         let mut agent_time_ms = 0i64;
         let mut agent_runs = 0i64;
         let mut last_activity_day: Option<String> = None;
 
         for day_key in &day_keys {
             let totals = project.daily.get(day_key).copied().unwrap_or_default();
-            let total = totals.input + totals.output;
-            total_tokens += total;
-            cached_input_tokens += totals.cached;
+            total_tokens += totals.tokens.total();
+            cache_read_tokens += totals.tokens.cache_read;
             agent_time_ms += totals.agent_ms;
             agent_runs += totals.agent_runs;
             if daily_has_activity(totals) {
                 last_activity_day = Some(day_key.clone());
             }
-            days.push(UsageDay {
-                day: day_key.clone(),
-                input_tokens: totals.input,
-                cached_input_tokens: totals.cached,
-                total_tokens: total,
-                agent_time_ms: totals.agent_ms,
-                agent_runs: totals.agent_runs,
-            });
+            days.push(UsageDay::from_totals(day_key.clone(), totals));
         }
 
         if last_activity_day.is_none() {
@@ -1665,7 +1711,7 @@ fn build_project_activity(
             days,
             last_activity_day,
             total_tokens,
-            cached_input_tokens,
+            cache_read_tokens,
             agent_time_ms,
             agent_runs,
         });
@@ -1681,7 +1727,7 @@ fn build_project_activity(
 }
 
 fn daily_has_activity(totals: DailyTotals) -> bool {
-    totals.input > 0 || totals.output > 0 || totals.agent_ms > 0 || totals.agent_runs > 0
+    totals.tokens.total() > 0 || totals.agent_ms > 0 || totals.agent_runs > 0
 }
 
 fn fallback_project_identity(session_cwd: Option<&str>) -> Option<String> {
@@ -1689,17 +1735,17 @@ fn fallback_project_identity(session_cwd: Option<&str>) -> Option<String> {
 }
 
 fn add_model_tokens_limited(
-    model_totals: &mut HashMap<String, i64>,
+    model_totals: &mut HashMap<String, TokenBreakdown>,
     model: String,
-    delta_tokens: i64,
+    tokens: TokenBreakdown,
 ) {
-    if delta_tokens <= 0 {
+    if tokens.total() <= 0 {
         return;
     }
     if model_totals.len() <= MAX_DISTINCT_MODELS || model_totals.contains_key(&model) {
-        *model_totals.entry(model).or_insert(0) += delta_tokens;
+        model_totals.entry(model).or_default().add(tokens);
     } else {
-        *model_totals.entry("other".to_string()).or_insert(0) += delta_tokens;
+        model_totals.entry("other".to_string()).or_default().add(tokens);
     }
 }
 
@@ -1708,10 +1754,10 @@ fn apply_cached_file_entry(
     entry: &CachedFileScanEntry,
     workspace_path: Option<&Path>,
     daily: &mut HashMap<String, DailyTotals>,
-    model_totals: &mut HashMap<String, i64>,
+    model_totals: &mut HashMap<String, TokenBreakdown>,
     chart_day_filter: &HashSet<String>,
     utc_daily: &mut HashMap<String, DailyTotals>,
-    utc_model_totals: &mut HashMap<String, i64>,
+    utc_model_totals: &mut HashMap<String, TokenBreakdown>,
     utc_chart_day_filter: &HashSet<String>,
     project_activity: &mut HashMap<String, ProjectActivityBuilder>,
     matched_session_files: &mut u32,
@@ -1738,12 +1784,7 @@ fn apply_cached_file_entry(
             UsageZone::Local => &mut *daily,
             UsageZone::Utc => &mut *utc_daily,
         };
-        let dst = target.entry(day_key.to_string()).or_default();
-        dst.input += totals.input;
-        dst.cached += totals.cached;
-        dst.output += totals.output;
-        dst.agent_ms += totals.agent_ms;
-        dst.agent_runs += totals.agent_runs;
+        target.entry(day_key.to_string()).or_default().add(*totals);
     }
 
     for (cache_key, per_day_models) in &entry.model_totals_by_day {
@@ -1796,12 +1837,7 @@ fn apply_project_activity(
         if !day_filter.contains_key(day_key) {
             continue;
         }
-        let dst = builder.daily.entry(day_key.to_string()).or_default();
-        dst.input += totals.input;
-        dst.cached += totals.cached;
-        dst.output += totals.output;
-        dst.agent_ms += totals.agent_ms;
-        dst.agent_runs += totals.agent_runs;
+        builder.daily.entry(day_key.to_string()).or_default().add(*totals);
     }
 }
 
@@ -1870,7 +1906,7 @@ fn parse_file_summary(
     } else {
         HashMap::new()
     };
-    let mut model_totals_by_day: HashMap<String, HashMap<String, i64>> = if can_resume {
+    let mut model_totals_by_day: HashMap<String, HashMap<String, TokenBreakdown>> = if can_resume {
         existing
             .map(|entry| entry.model_totals_by_day.clone())
             .unwrap_or_default()
@@ -2110,18 +2146,19 @@ fn parse_file_summary(
                     let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) else {
                         continue;
                     };
-                    let entry = daily.entry(day_key.clone()).or_default();
+                    // Codex input includes cached input; split it so the
+                    // breakdown fields add up to the total.
                     let cached_clamped = delta.cached.min(delta.input);
-                    entry.input += delta.input;
-                    entry.cached += cached_clamped;
-                    entry.output += delta.output;
+                    let tokens = TokenBreakdown {
+                        input: delta.input - cached_clamped,
+                        cache_write: 0,
+                        cache_read: cached_clamped,
+                        output: delta.output,
+                    };
+                    daily.entry(day_key.clone()).or_default().tokens.add(tokens);
 
                     let per_day_models = model_totals_by_day.entry(day_key).or_default();
-                    add_model_tokens_limited(
-                        per_day_models,
-                        model.clone(),
-                        delta.input + delta.output,
-                    );
+                    add_model_tokens_limited(per_day_models, model.clone(), tokens);
                 }
             }
 
@@ -2424,7 +2461,7 @@ fn load_scan_cache_store(
                 continue;
             }
         };
-        let model_totals_by_day = match serde_json::from_str::<HashMap<String, HashMap<String, i64>>>(
+        let model_totals_by_day = match serde_json::from_str::<HashMap<String, HashMap<String, TokenBreakdown>>>(
             &model_daily_json,
         ) {
             Ok(value) => value,
@@ -4222,13 +4259,13 @@ mod tests {
         );
         assert_eq!(snapshot.project_activity[0].display_path, "/outside/SFM");
         assert_eq!(snapshot.project_activity[0].total_tokens, 250);
-        assert_eq!(snapshot.project_activity[0].cached_input_tokens, 150);
+        assert_eq!(snapshot.project_activity[0].cache_read_tokens, 150);
         assert_eq!(
             snapshot.project_activity[1].display_path,
             "/outside/Starling"
         );
         assert_eq!(snapshot.project_activity[1].total_tokens, 120);
-        assert_eq!(snapshot.project_activity[1].cached_input_tokens, 0);
+        assert_eq!(snapshot.project_activity[1].cache_read_tokens, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4300,7 +4337,7 @@ mod tests {
             .expect("project usage");
         assert_eq!(summary.display_path, project.display().to_string());
         assert_eq!(summary.total_tokens, 120);
-        assert_eq!(summary.cached_input_tokens, 25);
+        assert_eq!(summary.cache_read_tokens, 25);
         assert_eq!(summary.indexed_files, 1);
         assert_eq!(second.project_usage.len(), 1);
         assert!(second
@@ -4355,7 +4392,7 @@ mod tests {
             .project_usage_for_path(&project_a.display().to_string())
             .expect("project a usage");
         assert_eq!(a.total_tokens, 190);
-        assert_eq!(a.cached_input_tokens, 35);
+        assert_eq!(a.cache_read_tokens, 35);
         assert_eq!(a.indexed_files, 1);
         assert!(snapshot
             .project_usage_for_path(&project_b.display().to_string())
@@ -4412,7 +4449,7 @@ mod tests {
             .project_usage_for_path(&project.display().to_string())
             .expect("owner usage");
         assert_eq!(owner.total_tokens, 190);
-        assert_eq!(owner.cached_input_tokens, 35);
+        assert_eq!(owner.cache_read_tokens, 35);
         assert!(snapshot
             .project_usage_for_path(&external.display().to_string())
             .is_none());

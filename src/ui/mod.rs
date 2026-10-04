@@ -132,12 +132,12 @@ pub fn format_updated_label(updated_at: Instant) -> String {
 }
 
 fn cache_hit_rate_label(
-    input_tokens: i64,
-    cached_input_tokens: i64,
+    prompt_tokens: i64,
+    cache_read_tokens: i64,
     formatter: DisplayFormatter<'_>,
 ) -> String {
-    let rate = if input_tokens > 0 {
-        ((cached_input_tokens as f64) / (input_tokens as f64) * 1000.0).round() / 10.0
+    let rate = if prompt_tokens > 0 {
+        ((cache_read_tokens as f64) / (prompt_tokens as f64) * 1000.0).round() / 10.0
     } else {
         0.0
     };
@@ -2567,7 +2567,7 @@ fn activity_metric_total_label(
     match metric {
         UsageMetric::Tokens => {
             let total = project.total_tokens.max(0) as u64;
-            let out_of_cache = (project.total_tokens - project.cached_input_tokens).max(0) as u64;
+            let out_of_cache = (project.total_tokens - project.cache_read_tokens).max(0) as u64;
             let pair = format_horizontal_value(
                 total,
                 Some(out_of_cache),
@@ -3122,7 +3122,7 @@ fn usage_card_specs(state: &AppState, card_width: u16) -> Vec<CardSpec> {
         .unwrap_or_else(|| "--".to_string());
     let today_captions = vec![
         today
-            .map(|day| cache_hit_rate_label(day.input_tokens, day.cached_input_tokens, formatter))
+            .map(|day| cache_hit_rate_label(day.prompt_tokens(), day.cache_read_tokens, formatter))
             .unwrap_or_default(),
         today
             .map(|day| format!("Runs {}", format_count(day.agent_runs, formatter)))
@@ -4023,15 +4023,19 @@ fn aggregate_usage_days(days: &[UsageDay], grouping: ChartRange) -> Vec<UsageDay
         let entry = grouped.entry(start).or_insert_with(|| UsageDay {
             day: start.format("%Y-%m-%d").to_string(),
             input_tokens: 0,
-            cached_input_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
             total_tokens: 0,
             agent_time_ms: 0,
             agent_runs: 0,
         });
         entry.input_tokens = entry.input_tokens.saturating_add(day.input_tokens);
-        entry.cached_input_tokens = entry
-            .cached_input_tokens
-            .saturating_add(day.cached_input_tokens);
+        entry.cache_write_tokens = entry
+            .cache_write_tokens
+            .saturating_add(day.cache_write_tokens);
+        entry.cache_read_tokens = entry.cache_read_tokens.saturating_add(day.cache_read_tokens);
+        entry.output_tokens = entry.output_tokens.saturating_add(day.output_tokens);
         entry.total_tokens = entry.total_tokens.saturating_add(day.total_tokens);
         entry.agent_time_ms = entry.agent_time_ms.saturating_add(day.agent_time_ms);
         entry.agent_runs = entry.agent_runs.saturating_add(day.agent_runs);
@@ -4674,13 +4678,14 @@ fn usage_chart_metric_label(metric: UsageMetric) -> &'static str {
     }
 }
 
+/// Codex-style columns: all prompt input, the part not read from cache, and
+/// output.
 fn usage_day_token_columns(day: &UsageDay) -> (u64, u64, u64) {
+    let prompt = day.prompt_tokens();
     (
-        day.input_tokens.max(0) as u64,
-        day.input_tokens
-            .saturating_sub(day.cached_input_tokens)
-            .max(0) as u64,
-        day.total_tokens.saturating_sub(day.input_tokens).max(0) as u64,
+        prompt.max(0) as u64,
+        prompt.saturating_sub(day.cache_read_tokens).max(0) as u64,
+        day.total_tokens.saturating_sub(prompt).max(0) as u64,
     )
 }
 
@@ -5780,7 +5785,7 @@ fn render_today_card(
         .as_ref()
         .and_then(|snapshot| snapshot.days_for_zone(state.usage_zone).last())
         .map(|day| {
-            cache_hit_rate_label(day.input_tokens, day.cached_input_tokens, state.formatter())
+            cache_hit_rate_label(day.prompt_tokens(), day.cache_read_tokens, state.formatter())
         });
     frame.render_widget(
         card_with_captions(
@@ -7454,16 +7459,20 @@ mod tests {
         let days = vec![
             UsageDay {
                 day: "2026-04-05".to_string(),
-                input_tokens: 10,
-                cached_input_tokens: 2,
+                input_tokens: 8,
+                cache_write_tokens: 0,
+                cache_read_tokens: 2,
+                output_tokens: 2,
                 total_tokens: 12,
                 agent_time_ms: 100,
                 agent_runs: 1,
             },
             UsageDay {
                 day: "2026-04-06".to_string(),
-                input_tokens: 20,
-                cached_input_tokens: 3,
+                input_tokens: 17,
+                cache_write_tokens: 0,
+                cache_read_tokens: 3,
+                output_tokens: 4,
                 total_tokens: 24,
                 agent_time_ms: 200,
                 agent_runs: 2,
@@ -8822,8 +8831,10 @@ mod tests {
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
         let day = UsageDay {
             day: "2026-09-24".to_string(),
-            input_tokens: 10_000,
-            cached_input_tokens: 8_000,
+            input_tokens: 2_000,
+            cache_write_tokens: 0,
+            cache_read_tokens: 8_000,
+            output_tokens: 500,
             total_tokens: 10_500,
             agent_time_ms: 0,
             agent_runs: 0,
@@ -8842,15 +8853,17 @@ mod tests {
             "10,000 / 2,000 / 500"
         );
         let fully_cached = UsageDay {
-            input_tokens: 10_000,
-            cached_input_tokens: 10_000,
+            input_tokens: 0,
+            cache_read_tokens: 10_000,
+            output_tokens: 0,
             total_tokens: 10_000,
             ..day.clone()
         };
         assert_eq!(usage_day_token_columns(&fully_cached), (10_000, 0, 0));
         let output_only = UsageDay {
             input_tokens: 0,
-            cached_input_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 500,
             total_tokens: 500,
             ..day.clone()
         };
@@ -8999,7 +9012,7 @@ mod tests {
             days: Vec::new(),
             last_activity_day: Some("2026-06-05".to_string()),
             total_tokens: 250,
-            cached_input_tokens: 150,
+            cache_read_tokens: 150,
             agent_time_ms: 0,
             agent_runs: 0,
         };
