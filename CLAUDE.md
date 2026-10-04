@@ -91,7 +91,7 @@ same layout; differences are noted per module.
   `history_project_roots`, and only after the user confirms. `tui.rs` holds
   the browser state.
 - Live limits feed `AccountRateLimits`:
-  - `codex_rpc/` spawns Codex App Server and calls
+  - `providers/codex/rpc.rs` spawns Codex App Server and calls
     `account/rateLimits/read` over stdio JSON-RPC, with line-size,
     pending-request, and timeout caps.
   - To port from ClaudeMon: `limits/statusline.rs` is the

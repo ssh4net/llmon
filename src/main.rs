@@ -1,5 +1,4 @@
 mod app;
-mod codex_rpc;
 mod harness;
 mod locale;
 mod providers;

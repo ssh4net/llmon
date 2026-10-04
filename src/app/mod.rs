@@ -1,5 +1,5 @@
-use crate::codex_rpc::{AccountRateLimits, AccountUsage, CodexRpc, ResetCreditOutcome};
 use crate::locale::{DisplayFormatter, DisplayStyle, SystemLocale};
+use crate::providers::codex::rpc::{AccountRateLimits, AccountUsage, CodexRpc, ResetCreditOutcome};
 use crate::read;
 use crate::usage::{ChartRange, LocalUsageSnapshot, UsageMetric, UsageZone};
 use anyhow::{anyhow, Context, Result};
@@ -891,7 +891,7 @@ async fn run_inner(
             }
 
             let Some(app_server) =
-                crate::codex_rpc::resolve_app_server_command(codex_bin, app_server_bin)
+                crate::providers::codex::rpc::resolve_app_server_command(codex_bin, app_server_bin)
             else {
                 let _ = evt_tx
                     .send(AppEvent::AccountApiUnavailable {
@@ -958,7 +958,7 @@ async fn run_inner(
                     notification = rpc.recv_notification() => {
                         match notification {
                             Some(value)
-                                if crate::codex_rpc::is_account_rate_limits_updated_notification(&value) =>
+                                if crate::providers::codex::rpc::is_account_rate_limits_updated_notification(&value) =>
                             {
                                 LimitsWake::Poll
                             }
@@ -2786,9 +2786,9 @@ fn account_has_exhausted_limit(limits: &AccountRateLimits) -> bool {
 }
 
 fn snapshot_has_exhausted_limit(
-    primary: Option<&crate::codex_rpc::RateLimitWindow>,
-    secondary: Option<&crate::codex_rpc::RateLimitWindow>,
-    individual: Option<&crate::codex_rpc::SpendControlLimitSnapshot>,
+    primary: Option<&crate::providers::codex::rpc::RateLimitWindow>,
+    secondary: Option<&crate::providers::codex::rpc::RateLimitWindow>,
+    individual: Option<&crate::providers::codex::rpc::SpendControlLimitSnapshot>,
 ) -> bool {
     [primary, secondary].into_iter().flatten().any(|window| {
         window
@@ -2965,7 +2965,7 @@ mod tests {
             limit_id: Some("codex".to_string()),
             limit_name: None,
             individual_limit: None,
-            primary: Some(crate::codex_rpc::RateLimitWindow {
+            primary: Some(crate::providers::codex::rpc::RateLimitWindow {
                 used_percent,
                 window_duration_mins: Some(300.0),
                 resets_at: None,
@@ -2994,19 +2994,21 @@ mod tests {
     #[test]
     fn reset_detects_an_exhausted_individual_limit_in_a_bucket() {
         let mut limits = reset_test_limits(Some(20.0), 1);
-        limits.buckets.push(crate::codex_rpc::RateLimitSnapshot {
-            limit_id: Some("monthly".to_string()),
-            limit_name: None,
-            individual_limit: Some(crate::codex_rpc::SpendControlLimitSnapshot {
-                limit: None,
-                remaining_percent: Some(0.0),
-                resets_at: None,
-                used: None,
-            }),
-            primary: None,
-            secondary: None,
-            credits: None,
-        });
+        limits
+            .buckets
+            .push(crate::providers::codex::rpc::RateLimitSnapshot {
+                limit_id: Some("monthly".to_string()),
+                limit_name: None,
+                individual_limit: Some(crate::providers::codex::rpc::SpendControlLimitSnapshot {
+                    limit: None,
+                    remaining_percent: Some(0.0),
+                    resets_at: None,
+                    used: None,
+                }),
+                primary: None,
+                secondary: None,
+                credits: None,
+            });
         assert!(limit_reset_is_available(&limits));
     }
 

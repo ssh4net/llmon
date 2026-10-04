@@ -1,5 +1,6 @@
 //! Codex CLI: session logs under `CODEX_HOME`.
 
+pub(crate) mod rpc;
 pub(crate) mod usage;
 
 use std::path::{Path, PathBuf};

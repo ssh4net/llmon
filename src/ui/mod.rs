@@ -667,7 +667,7 @@ fn render_api_stat_message(frame: &mut Frame<'_>, area: Rect, message: &str) {
 
 fn api_stat_card_specs(
     state: &AppState,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
     card_width: u16,
 ) -> Vec<(&'static str, CardSpec)> {
     let formatter = state.formatter();
@@ -720,7 +720,7 @@ fn api_stat_card_specs(
 
 fn api_stat_cards_height(
     state: &AppState,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
     width: u16,
 ) -> u16 {
     let layout = usage_card_layout(width);
@@ -735,7 +735,7 @@ fn render_api_stat_cards(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
 ) -> Option<WeeklyPaceHover> {
     let layout = usage_card_layout(area.width);
     let card_width = layout.min_card_width.max(1);
@@ -1136,7 +1136,7 @@ fn update_usage_viewport(
 fn render_api_stat_chart(
     frame: &mut Frame<'_>,
     area: Rect,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
     state: &mut AppState,
 ) {
     match state.api_stat_graph {
@@ -1159,7 +1159,7 @@ fn render_api_stat_chart(
 }
 
 fn aggregate_api_stat_points(
-    buckets: &[crate::codex_rpc::DailyUsageBucket],
+    buckets: &[crate::providers::codex::rpc::DailyUsageBucket],
     grouping: ApiStatGrouping,
     first_weekday: Weekday,
 ) -> Vec<ApiStatPoint> {
@@ -1580,7 +1580,7 @@ fn render_api_grouped_horizontal_bars(
 fn render_api_stat_heatmap(
     frame: &mut Frame<'_>,
     area: Rect,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
     state: &mut AppState,
 ) {
     let mut values = BTreeMap::<NaiveDate, u64>::new();
@@ -1773,7 +1773,7 @@ fn api_stat_color_level(value: u64, max_value: u64) -> usize {
 fn render_api_daily_chart(
     frame: &mut Frame<'_>,
     area: Rect,
-    usage: &crate::codex_rpc::AccountUsage,
+    usage: &crate::providers::codex::rpc::AccountUsage,
     state: &mut AppState,
 ) {
     let buckets = usage.daily_usage_buckets.as_deref().unwrap_or(&[]);
@@ -5885,7 +5885,7 @@ fn reset_credit_expiration_label(
     expires_at: i64,
     formatter: DisplayFormatter<'_>,
 ) -> Option<String> {
-    let ms = crate::codex_rpc::normalize_epoch_millis(expires_at);
+    let ms = crate::providers::codex::rpc::normalize_epoch_millis(expires_at);
     let dt = Local.timestamp_millis_opt(ms).single()?;
     Some(formatter.format_reset_datetime(dt.naive_local()))
 }
@@ -5895,7 +5895,7 @@ fn reset_summary_text(state: &AppState) -> Option<String> {
 }
 
 fn reset_summary_for_limits(
-    limits: &crate::codex_rpc::AccountRateLimits,
+    limits: &crate::providers::codex::rpc::AccountRateLimits,
     formatter: DisplayFormatter<'_>,
 ) -> Option<String> {
     let available = limits.reset_credits_available?;
@@ -6105,7 +6105,7 @@ fn render_limit_resets(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn reset_credit_date_time_label(timestamp: i64, formatter: DisplayFormatter<'_>) -> Option<String> {
-    let ms = crate::codex_rpc::normalize_epoch_millis(timestamp);
+    let ms = crate::providers::codex::rpc::normalize_epoch_millis(timestamp);
     let dt = Local.timestamp_millis_opt(ms).single()?;
     if dt.date_naive() == Local::now().date_naive() {
         Some(format!("today {}", formatter.format_time(dt.naive_local())))
@@ -6174,7 +6174,7 @@ fn render_limit_reset_details(frame: &mut Frame<'_>, area: Rect, state: &AppStat
 }
 
 fn reset_credit_details_text(
-    credits: &[crate::codex_rpc::RateLimitResetCredit],
+    credits: &[crate::providers::codex::rpc::RateLimitResetCredit],
     formatter: DisplayFormatter<'_>,
     accent_color: Color,
 ) -> Text<'static> {
@@ -6261,7 +6261,7 @@ fn percent_left_value(used_percent: Option<f64>) -> String {
 
 fn resets_label(resets_at: Option<i64>, formatter: DisplayFormatter<'_>) -> Option<String> {
     let raw = resets_at?;
-    let ms = crate::codex_rpc::normalize_epoch_millis(raw);
+    let ms = crate::providers::codex::rpc::normalize_epoch_millis(raw);
     let dt = Local.timestamp_millis_opt(ms).single()?;
     let today = Local::now().date_naive();
     let day = dt.date_naive();
@@ -6278,7 +6278,7 @@ fn resets_label(resets_at: Option<i64>, formatter: DisplayFormatter<'_>) -> Opti
 
 fn reset_compact_label(resets_at: Option<i64>, formatter: DisplayFormatter<'_>) -> Option<String> {
     let raw = resets_at?;
-    let ms = crate::codex_rpc::normalize_epoch_millis(raw);
+    let ms = crate::providers::codex::rpc::normalize_epoch_millis(raw);
     let dt = Local.timestamp_millis_opt(ms).single()?;
     let today = Local::now().date_naive();
     if dt.date_naive() == today {
@@ -6290,7 +6290,7 @@ fn reset_compact_label(resets_at: Option<i64>, formatter: DisplayFormatter<'_>) 
 
 fn format_limit_compact_line(
     label_with_colon: &str,
-    window: Option<&crate::codex_rpc::RateLimitWindow>,
+    window: Option<&crate::providers::codex::rpc::RateLimitWindow>,
     compact: bool,
     formatter: DisplayFormatter<'_>,
     weekly: bool,
@@ -6331,8 +6331,8 @@ fn format_limit_compact_line(
 }
 
 fn format_rolling_limit_lines(
-    short_window: Option<&crate::codex_rpc::RateLimitWindow>,
-    weekly_window: Option<&crate::codex_rpc::RateLimitWindow>,
+    short_window: Option<&crate::providers::codex::rpc::RateLimitWindow>,
+    weekly_window: Option<&crate::providers::codex::rpc::RateLimitWindow>,
     compact: bool,
     formatter: DisplayFormatter<'_>,
 ) -> (String, String) {
@@ -6359,7 +6359,7 @@ fn format_rolling_limit_lines(
 }
 
 fn format_limits_compact_card_lines(
-    l: &crate::codex_rpc::AccountRateLimits,
+    l: &crate::providers::codex::rpc::AccountRateLimits,
     compact: bool,
     formatter: DisplayFormatter<'_>,
 ) -> (String, Option<String>, Option<String>, Option<String>) {
@@ -6393,18 +6393,18 @@ fn format_limits_compact_card_lines(
 
 const WEEKLY_WINDOW_MINUTES: f64 = 6.0 * 24.0 * 60.0;
 
-fn is_weekly_rolling_window(window: &crate::codex_rpc::RateLimitWindow) -> bool {
+fn is_weekly_rolling_window(window: &crate::providers::codex::rpc::RateLimitWindow) -> bool {
     window
         .window_duration_mins
         .is_some_and(|minutes| minutes.is_finite() && minutes >= WEEKLY_WINDOW_MINUTES)
 }
 
 fn classify_rolling_windows<'a>(
-    primary: Option<&'a crate::codex_rpc::RateLimitWindow>,
-    secondary: Option<&'a crate::codex_rpc::RateLimitWindow>,
+    primary: Option<&'a crate::providers::codex::rpc::RateLimitWindow>,
+    secondary: Option<&'a crate::providers::codex::rpc::RateLimitWindow>,
 ) -> (
-    Option<&'a crate::codex_rpc::RateLimitWindow>,
-    Option<&'a crate::codex_rpc::RateLimitWindow>,
+    Option<&'a crate::providers::codex::rpc::RateLimitWindow>,
+    Option<&'a crate::providers::codex::rpc::RateLimitWindow>,
 ) {
     let primary_is_weekly = primary.is_some_and(is_weekly_rolling_window);
     let secondary_is_weekly = secondary.is_some_and(is_weekly_rolling_window);
@@ -6422,10 +6422,10 @@ fn classify_rolling_windows<'a>(
 }
 
 fn rolling_windows_for_limits(
-    l: &crate::codex_rpc::AccountRateLimits,
+    l: &crate::providers::codex::rpc::AccountRateLimits,
 ) -> (
-    Option<&crate::codex_rpc::RateLimitWindow>,
-    Option<&crate::codex_rpc::RateLimitWindow>,
+    Option<&crate::providers::codex::rpc::RateLimitWindow>,
+    Option<&crate::providers::codex::rpc::RateLimitWindow>,
 ) {
     if l.primary.is_some() || l.secondary.is_some() {
         return classify_rolling_windows(l.primary.as_ref(), l.secondary.as_ref());
@@ -6467,13 +6467,13 @@ fn now_unix_secs() -> i64 {
 }
 
 fn weekly_window_bounds_secs(
-    window: &crate::codex_rpc::RateLimitWindow,
+    window: &crate::providers::codex::rpc::RateLimitWindow,
 ) -> Option<(i64, i64, f64)> {
     let window_mins = window
         .window_duration_mins
         .filter(|value| value.is_finite() && *value > 0.0)?;
     let resets_at = window.resets_at?;
-    let reset_ms = crate::codex_rpc::normalize_epoch_millis(resets_at);
+    let reset_ms = crate::providers::codex::rpc::normalize_epoch_millis(resets_at);
     let reset_secs = reset_ms.div_euclid(1000);
     // Prefer integer minutes when the API sends whole minutes (typical 10080).
     let window_secs = if window_mins.fract().abs() < f64::EPSILON {
@@ -6499,7 +6499,7 @@ struct WeeklyDailyPace {
 /// Unused shares from completed 24-hour periods remain available today. For
 /// example, on day 3, using one daily share leaves 200% of today's share safe.
 fn weekly_daily_pace(
-    window: &crate::codex_rpc::RateLimitWindow,
+    window: &crate::providers::codex::rpc::RateLimitWindow,
     now_unix_secs: i64,
 ) -> Option<WeeklyDailyPace> {
     let used_percent = window
@@ -6532,7 +6532,7 @@ fn weekly_daily_pace(
 ///
 /// `fill%` is the current day's consumed share of its 100% daily allowance.
 fn weekly_pace_band(
-    window: &crate::codex_rpc::RateLimitWindow,
+    window: &crate::providers::codex::rpc::RateLimitWindow,
     now_unix_secs: i64,
 ) -> WeeklyPaceBand {
     weekly_daily_pace(window, now_unix_secs)
@@ -6559,7 +6559,7 @@ fn weekly_daily_cap_percent(pace: WeeklyDailyPace) -> f64 {
 }
 
 fn weekly_gauge_pacing(
-    window: &crate::codex_rpc::RateLimitWindow,
+    window: &crate::providers::codex::rpc::RateLimitWindow,
     now_unix_secs: i64,
 ) -> (Option<WeeklyPaceBand>, Option<f64>) {
     weekly_daily_pace(window, now_unix_secs)
@@ -6754,7 +6754,7 @@ enum LimitUsageGauge {
 }
 
 fn limit_usage_gauge(
-    limits: Option<&crate::codex_rpc::AccountRateLimits>,
+    limits: Option<&crate::providers::codex::rpc::AccountRateLimits>,
     now_unix_secs: i64,
 ) -> LimitUsageGauge {
     let Some(limits) = limits else {
@@ -6845,7 +6845,7 @@ fn rect_contains(area: Rect, point: (u16, u16)) -> bool {
 ///
 /// Uses the reset-anchored daily allowance and carryover calculation.
 fn format_weekly_pace_tooltip(
-    window: &crate::codex_rpc::RateLimitWindow,
+    window: &crate::providers::codex::rpc::RateLimitWindow,
     band: WeeklyPaceBand,
     now_unix_secs: i64,
 ) -> Option<String> {
@@ -6993,8 +6993,8 @@ fn render_limits_card(
 }
 
 fn individual_limit_for_limits(
-    limits: &crate::codex_rpc::AccountRateLimits,
-) -> Option<&crate::codex_rpc::SpendControlLimitSnapshot> {
+    limits: &crate::providers::codex::rpc::AccountRateLimits,
+) -> Option<&crate::providers::codex::rpc::SpendControlLimitSnapshot> {
     limits.individual_limit.as_ref().or_else(|| {
         limits
             .buckets
@@ -7004,7 +7004,7 @@ fn individual_limit_for_limits(
 }
 
 fn format_individual_limit_compact_lines(
-    l: &crate::codex_rpc::AccountRateLimits,
+    l: &crate::providers::codex::rpc::AccountRateLimits,
     compact: bool,
     formatter: DisplayFormatter<'_>,
 ) -> Option<(String, String)> {
@@ -7042,7 +7042,7 @@ fn format_individual_limit_compact_lines(
 }
 
 fn format_extra_bucket_compact_line(
-    l: &crate::codex_rpc::AccountRateLimits,
+    l: &crate::providers::codex::rpc::AccountRateLimits,
     compact: bool,
     formatter: DisplayFormatter<'_>,
 ) -> Option<String> {
@@ -7066,7 +7066,7 @@ fn format_extra_bucket_compact_line(
     ))
 }
 
-fn compact_bucket_label(bucket: &crate::codex_rpc::RateLimitSnapshot) -> String {
+fn compact_bucket_label(bucket: &crate::providers::codex::rpc::RateLimitSnapshot) -> String {
     let raw = bucket
         .limit_name
         .as_deref()
@@ -7092,7 +7092,7 @@ fn format_credit_amount(raw: &str, formatter: DisplayFormatter<'_>) -> String {
 }
 
 fn format_credits_compact_line(
-    l: &crate::codex_rpc::AccountRateLimits,
+    l: &crate::providers::codex::rpc::AccountRateLimits,
     formatter: DisplayFormatter<'_>,
 ) -> Option<String> {
     const LABEL_W: usize = 10;
@@ -7394,15 +7394,15 @@ mod tests {
     #[test]
     fn api_stats_grouping_sums_reported_days_by_local_period() {
         let buckets = vec![
-            crate::codex_rpc::DailyUsageBucket {
+            crate::providers::codex::rpc::DailyUsageBucket {
                 start_date: "2026-07-31".to_string(),
                 tokens: 10,
             },
-            crate::codex_rpc::DailyUsageBucket {
+            crate::providers::codex::rpc::DailyUsageBucket {
                 start_date: "2026-08-01".to_string(),
                 tokens: 20,
             },
-            crate::codex_rpc::DailyUsageBucket {
+            crate::providers::codex::rpc::DailyUsageBucket {
                 start_date: "2026-08-03".to_string(),
                 tokens: 30,
             },
@@ -7428,7 +7428,7 @@ mod tests {
 
     #[test]
     fn api_stats_week_grouping_is_always_iso_monday() {
-        let buckets = vec![crate::codex_rpc::DailyUsageBucket {
+        let buckets = vec![crate::providers::codex::rpc::DailyUsageBucket {
             start_date: "2026-08-02".to_string(),
             tokens: 42,
         }];
@@ -7742,7 +7742,7 @@ mod tests {
     fn reset_summary_uses_earliest_returned_expiration() {
         let system_locale = crate::locale::SystemLocale::default();
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: None,
             limit_name: None,
             individual_limit: None,
@@ -7752,7 +7752,7 @@ mod tests {
             buckets: Vec::new(),
             reset_credits_available: Some(3),
             reset_credits: Some(vec![
-                crate::codex_rpc::RateLimitResetCredit {
+                crate::providers::codex::rpc::RateLimitResetCredit {
                     id: Some("later".to_string()),
                     reset_type: Some("codexRateLimits".to_string()),
                     status: Some("available".to_string()),
@@ -7761,7 +7761,7 @@ mod tests {
                     title: None,
                     description: None,
                 },
-                crate::codex_rpc::RateLimitResetCredit {
+                crate::providers::codex::rpc::RateLimitResetCredit {
                     id: Some("earlier".to_string()),
                     reset_type: Some("codexRateLimits".to_string()),
                     status: Some("available".to_string()),
@@ -7857,10 +7857,10 @@ mod tests {
     fn limits_card_uses_monthly_and_named_rolling_bucket() {
         let system_locale = crate::locale::SystemLocale::default();
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("codex".to_string()),
             limit_name: None,
-            individual_limit: Some(crate::codex_rpc::SpendControlLimitSnapshot {
+            individual_limit: Some(crate::providers::codex::rpc::SpendControlLimitSnapshot {
                 limit: Some("60000".to_string()),
                 remaining_percent: Some(99.0),
                 resets_at: None,
@@ -7869,16 +7869,16 @@ mod tests {
             primary: None,
             secondary: None,
             credits: None,
-            buckets: vec![crate::codex_rpc::RateLimitSnapshot {
+            buckets: vec![crate::providers::codex::rpc::RateLimitSnapshot {
                 limit_id: Some("codex_bengalfox".to_string()),
                 limit_name: Some("GPT-5.3-Codex-Spark-Preview".to_string()),
                 individual_limit: None,
-                primary: Some(crate::codex_rpc::RateLimitWindow {
+                primary: Some(crate::providers::codex::rpc::RateLimitWindow {
                     used_percent: Some(0.0),
                     window_duration_mins: Some(300.0),
                     resets_at: None,
                 }),
-                secondary: Some(crate::codex_rpc::RateLimitWindow {
+                secondary: Some(crate::providers::codex::rpc::RateLimitWindow {
                     used_percent: Some(0.0),
                     window_duration_mins: Some(10080.0),
                     resets_at: None,
@@ -7906,11 +7906,11 @@ mod tests {
     fn limits_card_treats_weekly_primary_as_weekly() {
         let system_locale = crate::locale::SystemLocale::default();
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("codex".to_string()),
             limit_name: None,
             individual_limit: None,
-            primary: Some(crate::codex_rpc::RateLimitWindow {
+            primary: Some(crate::providers::codex::rpc::RateLimitWindow {
                 used_percent: Some(4.0),
                 window_duration_mins: Some(10080.0),
                 resets_at: None,
@@ -7955,7 +7955,7 @@ mod tests {
         ];
 
         for (used_percent, pair) in cases {
-            let window = crate::codex_rpc::RateLimitWindow {
+            let window = crate::providers::codex::rpc::RateLimitWindow {
                 used_percent,
                 window_duration_mins: Some(10080.0),
                 resets_at: None,
@@ -7970,7 +7970,7 @@ mod tests {
             );
         }
 
-        let short = crate::codex_rpc::RateLimitWindow {
+        let short = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(35.0),
             window_duration_mins: Some(300.0),
             resets_at: None,
@@ -8004,7 +8004,7 @@ mod tests {
         now_date: NaiveDate,
         now_hour: u32,
         now_minute: u32,
-    ) -> (crate::codex_rpc::RateLimitWindow, i64) {
+    ) -> (crate::providers::codex::rpc::RateLimitWindow, i64) {
         weekly_window_from_start(
             used_percent,
             window_start_date,
@@ -8024,12 +8024,12 @@ mod tests {
         now_date: NaiveDate,
         now_hour: u32,
         now_minute: u32,
-    ) -> (crate::codex_rpc::RateLimitWindow, i64) {
+    ) -> (crate::providers::codex::rpc::RateLimitWindow, i64) {
         const WINDOW_DAYS: i64 = 7;
         let start_secs = local_unix_secs(window_start_date, window_start_hour, window_start_minute);
         let reset_secs = start_secs.saturating_add(WINDOW_DAYS.saturating_mul(24 * 3600));
         let now_secs = local_unix_secs(now_date, now_hour, now_minute);
-        let window = crate::codex_rpc::RateLimitWindow {
+        let window = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(used_percent),
             window_duration_mins: Some((WINDOW_DAYS * 24 * 60) as f64),
             resets_at: Some(reset_secs),
@@ -8050,7 +8050,7 @@ mod tests {
             (89.99, WeeklyPaceBand::Orange),
             (90.0, WeeklyPaceBand::Red),
         ] {
-            let window = crate::codex_rpc::RateLimitWindow {
+            let window = crate::providers::codex::rpc::RateLimitWindow {
                 used_percent: Some(daily_budget * share / 100.0),
                 window_duration_mins: Some(7.0 * 24.0 * 60.0),
                 resets_at: Some((START_SECS + WINDOW_SECS) * 1000),
@@ -8069,9 +8069,9 @@ mod tests {
     }
 
     fn limits_with_weekly(
-        weekly: crate::codex_rpc::RateLimitWindow,
-    ) -> crate::codex_rpc::AccountRateLimits {
-        crate::codex_rpc::AccountRateLimits {
+        weekly: crate::providers::codex::rpc::RateLimitWindow,
+    ) -> crate::providers::codex::rpc::AccountRateLimits {
+        crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("codex".to_string()),
             limit_name: None,
             individual_limit: None,
@@ -8132,7 +8132,7 @@ mod tests {
     fn weekly_pace_band_uses_exact_reset_countdown() {
         let reset = local_unix_secs(NaiveDate::from_ymd_opt(2026, 9, 23).expect("date"), 19, 54);
         let now = local_unix_secs(NaiveDate::from_ymd_opt(2026, 9, 21).expect("date"), 0, 32);
-        let window = crate::codex_rpc::RateLimitWindow {
+        let window = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(66.0),
             window_duration_mins: Some(10_080.0),
             resets_at: Some(reset),
@@ -8147,7 +8147,7 @@ mod tests {
     #[test]
     fn weekly_pace_band_is_normal_without_resets_at_or_bad_used() {
         let now = local_unix_secs(NaiveDate::from_ymd_opt(2026, 7, 20).expect("date"), 12, 0);
-        let missing_reset = crate::codex_rpc::RateLimitWindow {
+        let missing_reset = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(50.0),
             window_duration_mins: Some(10080.0),
             resets_at: None,
@@ -8157,7 +8157,7 @@ mod tests {
             WeeklyPaceBand::Normal
         );
 
-        let bad_used = crate::codex_rpc::RateLimitWindow {
+        let bad_used = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(f64::NAN),
             window_duration_mins: Some(10080.0),
             resets_at: Some(now + 3_600),
@@ -8349,7 +8349,7 @@ mod tests {
         let reset_secs = start_secs + 7 * 24 * 60 * 60;
         let daily_budget = 100.0 / 7.0;
         for (day_offset, day_index) in [(0, 1), (2, 3)] {
-            let window = crate::codex_rpc::RateLimitWindow {
+            let window = crate::providers::codex::rpc::RateLimitWindow {
                 used_percent: Some(daily_budget * (day_index - 1) as f64),
                 window_duration_mins: Some(10_080.0),
                 resets_at: Some(reset_secs * 1000),
@@ -8367,7 +8367,7 @@ mod tests {
     fn weekly_gauge_marker_changes_at_fixed_reset_boundary() {
         let start_secs = 1_800_000_000;
         let reset_secs = start_secs + 7 * 24 * 60 * 60;
-        let window = crate::codex_rpc::RateLimitWindow {
+        let window = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(8.0),
             window_duration_mins: Some(10_080.0),
             resets_at: Some(reset_secs * 1000),
@@ -8387,7 +8387,7 @@ mod tests {
         const MIDNIGHT_START_SECS: i64 = 1_800_057_600;
         assert_eq!(MIDNIGHT_START_SECS.rem_euclid(24 * 60 * 60), 0);
         let now = MIDNIGHT_START_SECS + 24 * 60 * 60 + 23 * 60;
-        let window_for_start = |start_secs| crate::codex_rpc::RateLimitWindow {
+        let window_for_start = |start_secs| crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(8.0),
             window_duration_mins: Some(10_080.0),
             resets_at: Some((start_secs + 7 * 24 * 60 * 60) * 1000),
@@ -8443,7 +8443,7 @@ mod tests {
         let start_secs = 1_800_000_000;
         let reset_secs = start_secs + 7 * 24 * 60 * 60;
         let now = start_secs + 24 * 60 * 60;
-        let weekly = crate::codex_rpc::RateLimitWindow {
+        let weekly = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(20.0),
             window_duration_mins: Some(10_080.0),
             resets_at: Some(reset_secs * 1000),
@@ -8465,7 +8465,7 @@ mod tests {
 
     #[test]
     fn weekly_gauge_keeps_missing_or_invalid_pacing_data_white_without_marker() {
-        let mut missing_used = crate::codex_rpc::RateLimitWindow {
+        let mut missing_used = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: None,
             window_duration_mins: Some(10_080.0),
             resets_at: Some(1_800_000_000 * 1000 + 7 * 24 * 60 * 60 * 1000),
@@ -8483,7 +8483,7 @@ mod tests {
             }
         );
 
-        let zero_usage_window = crate::codex_rpc::RateLimitWindow {
+        let zero_usage_window = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(0.0),
             window_duration_mins: Some(10_080.0),
             resets_at: Some(1_800_000_000 * 1000 + 7 * 24 * 60 * 60 * 1000),
@@ -8509,7 +8509,7 @@ mod tests {
             }
         );
 
-        let bad_usage = crate::codex_rpc::RateLimitWindow {
+        let bad_usage = crate::providers::codex::rpc::RateLimitWindow {
             used_percent: Some(f64::NAN),
             window_duration_mins: Some(10_080.0),
             resets_at: Some(1_800_000_000 * 1000 + 7 * 24 * 60 * 60 * 1000),
@@ -8542,10 +8542,10 @@ mod tests {
 
     #[test]
     fn monthly_only_limit_selects_a_single_segment_gauge() {
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("codex".to_string()),
             limit_name: None,
-            individual_limit: Some(crate::codex_rpc::SpendControlLimitSnapshot {
+            individual_limit: Some(crate::providers::codex::rpc::SpendControlLimitSnapshot {
                 limit: Some("60000".to_string()),
                 remaining_percent: Some(75.0),
                 resets_at: None,
@@ -8569,21 +8569,21 @@ mod tests {
 
     #[test]
     fn empty_rolling_window_objects_do_not_override_monthly_gauge() {
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("codex".to_string()),
             limit_name: None,
-            individual_limit: Some(crate::codex_rpc::SpendControlLimitSnapshot {
+            individual_limit: Some(crate::providers::codex::rpc::SpendControlLimitSnapshot {
                 limit: None,
                 remaining_percent: Some(40.0),
                 resets_at: Some(1_788_192_000),
                 used: None,
             }),
-            primary: Some(crate::codex_rpc::RateLimitWindow {
+            primary: Some(crate::providers::codex::rpc::RateLimitWindow {
                 used_percent: None,
                 window_duration_mins: Some(300.0),
                 resets_at: None,
             }),
-            secondary: Some(crate::codex_rpc::RateLimitWindow {
+            secondary: Some(crate::providers::codex::rpc::RateLimitWindow {
                 used_percent: None,
                 window_duration_mins: Some(10_080.0),
                 resets_at: None,
@@ -8604,10 +8604,10 @@ mod tests {
 
     #[test]
     fn top_level_monthly_limit_ignores_auxiliary_rolling_bucket() {
-        let limits = crate::codex_rpc::AccountRateLimits {
+        let limits = crate::providers::codex::rpc::AccountRateLimits {
             limit_id: Some("active-monthly".to_string()),
             limit_name: None,
-            individual_limit: Some(crate::codex_rpc::SpendControlLimitSnapshot {
+            individual_limit: Some(crate::providers::codex::rpc::SpendControlLimitSnapshot {
                 limit: None,
                 remaining_percent: Some(40.0),
                 resets_at: Some(1_788_192_000),
@@ -8616,16 +8616,16 @@ mod tests {
             primary: None,
             secondary: None,
             credits: None,
-            buckets: vec![crate::codex_rpc::RateLimitSnapshot {
+            buckets: vec![crate::providers::codex::rpc::RateLimitSnapshot {
                 limit_id: Some("auxiliary-rolling".to_string()),
                 limit_name: None,
                 individual_limit: None,
-                primary: Some(crate::codex_rpc::RateLimitWindow {
+                primary: Some(crate::providers::codex::rpc::RateLimitWindow {
                     used_percent: Some(10.0),
                     window_duration_mins: Some(300.0),
                     resets_at: None,
                 }),
-                secondary: Some(crate::codex_rpc::RateLimitWindow {
+                secondary: Some(crate::providers::codex::rpc::RateLimitWindow {
                     used_percent: Some(20.0),
                     window_duration_mins: Some(10_080.0),
                     resets_at: None,
