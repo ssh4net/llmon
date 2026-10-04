@@ -1,4 +1,5 @@
 use crate::locale::{DisplayFormatter, DisplayStyle, SystemLocale};
+use crate::providers::claude::limits::AccountRateLimits as ClaudeLimits;
 use crate::providers::codex::rpc::{AccountRateLimits, AccountUsage, CodexRpc, ResetCreditOutcome};
 use crate::read;
 use crate::usage::{ChartRange, LocalUsageSnapshot, UsageMetric, UsageZone};
@@ -18,6 +19,8 @@ use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub claude_dir: Option<std::path::PathBuf>,
+    pub claude_limits_mode: ClaudeLimitsMode,
     pub codex_bin: Option<String>,
     pub app_server_bin: Option<std::path::PathBuf>,
     pub live_limits_mode: LiveLimitsMode,
@@ -189,6 +192,48 @@ impl AccentTheme {
     }
 }
 
+/// Source of the Claude Code subscription limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeLimitsMode {
+    /// The snapshot `llmon statusline` records (no credentials).
+    StatusLine,
+    /// The OAuth usage endpoint with Claude Code's token (opt-in).
+    OAuth,
+    Off,
+}
+
+/// Which harness the USAGE screen shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum HarnessView {
+    #[default]
+    Codex,
+    Claude,
+}
+
+impl HarnessView {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Codex => Self::Claude,
+            Self::Claude => Self::Codex,
+        }
+    }
+
+    fn store_value(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    fn from_store(value: &str) -> Option<Self> {
+        match value {
+            "codex" => Some(Self::Codex),
+            "claude" => Some(Self::Claude),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum BarFillMode {
     #[default]
@@ -233,13 +278,19 @@ enum UsageCommand {
     PageNewer,
     ScrollOldest,
     ScrollNewest,
+    CycleHarnessView,
     ToggleHelp,
     ConfirmContinue,
 }
 
 #[derive(Debug)]
 enum AppEvent {
-    UsageUpdated(Result<LocalUsageSnapshot>),
+    UsageUpdated(crate::harness::Harness, Result<LocalUsageSnapshot>),
+    ClaudeLimitsUpdated(Result<ClaudeLimits>),
+    ClaudeLimitsUnavailable {
+        message: String,
+        is_error: bool,
+    },
     LimitsUpdated(Result<AccountRateLimits>),
     LimitResetConsumed(Result<ResetCreditOutcome>),
     AccountUsageUpdated(Result<AccountUsage>),
@@ -268,6 +319,7 @@ pub(crate) enum ActiveScreen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiClickAction {
     SetScreen(ActiveScreen),
+    SetHarnessView(HarnessView),
     SetDisplayStyle(DisplayStyle),
     SetAccentTheme(AccentTheme),
     ToggleBarFillMode,
@@ -428,9 +480,20 @@ pub(crate) struct AppState {
     pub(crate) mouse_position: Option<(u16, u16)>,
     pub(crate) ui_hit_targets: Vec<UiHitTarget>,
 
-    pub(crate) usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
-    pub(crate) usage_updated_at: Option<Instant>,
-    pub(crate) usage_error: Option<String>,
+    pub(crate) harness_view: HarnessView,
+
+    pub(crate) codex_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
+    pub(crate) codex_usage_updated_at: Option<Instant>,
+    pub(crate) codex_usage_error: Option<String>,
+    pub(crate) claude_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
+    pub(crate) claude_usage_updated_at: Option<Instant>,
+    pub(crate) claude_usage_error: Option<String>,
+
+    pub(crate) claude_limits: Option<ClaudeLimits>,
+    pub(crate) claude_limits_updated_at: Option<Instant>,
+    pub(crate) claude_limits_error: Option<String>,
+    pub(crate) claude_limits_notice: Option<String>,
+    pub(crate) claude_limits_mode: ClaudeLimitsMode,
 
     pub(crate) limits: Option<AccountRateLimits>,
     pub(crate) limits_updated_at: Option<Instant>,
@@ -480,6 +543,7 @@ pub(crate) enum LimitResetButtonState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedUiState {
+    harness_view: HarnessView,
     metric: UsageMetric,
     range: ChartRange,
     usage_zone: UsageZone,
@@ -505,6 +569,7 @@ struct PersistedUiState {
 impl PersistedUiState {
     fn default_for_workspace(workspace_path: Option<PathBuf>) -> Self {
         Self {
+            harness_view: HarnessView::default(),
             metric: UsageMetric::Tokens,
             range: ChartRange::Day,
             usage_zone: UsageZone::Local,
@@ -530,6 +595,7 @@ impl PersistedUiState {
 
     fn from_app_state(state: &AppState) -> Self {
         Self {
+            harness_view: state.harness_view,
             metric: state.metric,
             range: state.range,
             usage_zone: state.usage_zone,
@@ -580,6 +646,8 @@ impl Default for StateStore {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredGlobalState {
+    #[serde(default)]
+    harness_view: Option<String>,
     metric: Option<String>,
     range: Option<String>,
     usage_zone: Option<String>,
@@ -800,10 +868,13 @@ async fn run_inner(
         });
     }
 
-    // Spawn usage worker.
+    // Spawn usage worker: one snapshot per harness on each refresh.
     {
         let evt_tx = evt_tx.clone();
-        let codex_home = config.codex_home.clone();
+        let mut harness_homes = vec![(crate::harness::Harness::Codex, config.codex_home.clone())];
+        if let Some(claude_dir) = config.claude_dir.clone() {
+            harness_homes.push((crate::harness::Harness::Claude, claude_dir));
+        }
         let workspace_path = restored_ui_state.workspace_path.clone();
         let scan_cache_db_path = scan_cache_db_path.clone();
         let usage_days = config.usage_days;
@@ -814,7 +885,8 @@ async fn run_inner(
         tokio::spawn(async move {
             let mut first_run = true;
             let mut rapid_catch_up = false;
-            let mut previous_scan_progress: Option<(usize, u64)> = None;
+            let mut previous_scan_progress: Vec<Option<(usize, u64)>> =
+                vec![None; harness_homes.len()];
             loop {
                 if !first_run {
                     let wait = if rapid_catch_up {
@@ -831,43 +903,122 @@ async fn run_inner(
                     }
                 }
                 first_run = false;
-                let snapshot = tokio::task::spawn_blocking({
-                    let codex_home = codex_home.clone();
-                    let workspace_path = workspace_path.clone();
-                    let scan_cache_db_path = scan_cache_db_path.clone();
-                    move || {
-                        crate::usage::compute_snapshot(
-                            crate::harness::Harness::Codex,
-                            usage_days,
-                            &codex_home,
-                            workspace_path.as_deref(),
-                            usage_scan_limits,
-                            Some(scan_cache_db_path.as_path()),
-                        )
-                    }
-                })
-                .await
-                .unwrap_or_else(|err| Err(anyhow!("usage snapshot task failed: {err}")));
+                rapid_catch_up = false;
+                for (index, (harness, home)) in harness_homes.iter().enumerate() {
+                    let harness = *harness;
+                    let snapshot = tokio::task::spawn_blocking({
+                        let home = home.clone();
+                        let workspace_path = workspace_path.clone();
+                        let scan_cache_db_path = scan_cache_db_path.clone();
+                        move || {
+                            crate::usage::compute_snapshot(
+                                harness,
+                                usage_days,
+                                &home,
+                                workspace_path.as_deref(),
+                                usage_scan_limits,
+                                Some(scan_cache_db_path.as_path()),
+                            )
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(anyhow!("usage snapshot task failed: {err}")));
 
-                // Keep filling a fresh/incomplete cache without waiting for the normal
-                // five-minute refresh. Stop the rapid loop as soon as a pass makes no
-                // file-level progress; an unresolved fork must not cause a CPU spin.
-                rapid_catch_up = snapshot.as_ref().is_ok_and(|current| {
-                    should_continue_scan_catch_up(
-                        current.scan_pending_files,
-                        current.scan_indexed_files,
-                        current.scan_processed_bytes,
-                        previous_scan_progress,
-                    )
-                });
-                if let Ok(current) = snapshot.as_ref() {
-                    previous_scan_progress =
-                        Some((current.scan_indexed_files, current.scan_processed_bytes));
-                } else {
-                    previous_scan_progress = None;
+                    // Keep filling a fresh/incomplete cache without waiting for the
+                    // normal refresh. Stop the rapid loop as soon as no harness makes
+                    // file-level progress; an unresolved fork must not cause a CPU spin.
+                    if snapshot.as_ref().is_ok_and(|current| {
+                        should_continue_scan_catch_up(
+                            current.scan_pending_files,
+                            current.scan_indexed_files,
+                            current.scan_processed_bytes,
+                            previous_scan_progress[index],
+                        )
+                    }) {
+                        rapid_catch_up = true;
+                    }
+                    previous_scan_progress[index] = snapshot
+                        .as_ref()
+                        .ok()
+                        .map(|current| (current.scan_indexed_files, current.scan_processed_bytes));
+                    if evt_tx
+                        .send(AppEvent::UsageUpdated(harness, snapshot))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-                if evt_tx.send(AppEvent::UsageUpdated(snapshot)).await.is_err() {
-                    break;
+            }
+        });
+    }
+
+    // Spawn the Claude Code limits worker.
+    {
+        let evt_tx = evt_tx.clone();
+        let mode = config.claude_limits_mode;
+        let llmon_home = config.llmon_home.clone();
+        let claude_dir = config.claude_dir.clone();
+        let refresh = Duration::from_secs(config.refresh_limits_secs);
+        let mut shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let interval = match mode {
+                ClaudeLimitsMode::Off => {
+                    let _ = evt_tx
+                        .send(AppEvent::ClaudeLimitsUnavailable {
+                            message: "Claude Code limits disabled (--claude-limits off)."
+                                .to_string(),
+                            is_error: false,
+                        })
+                        .await;
+                    return;
+                }
+                // The snapshot is a small local file that changes while Claude
+                // Code runs, so it is read often.
+                ClaudeLimitsMode::StatusLine => Duration::from_secs(10),
+                ClaudeLimitsMode::OAuth => refresh.max(Duration::from_secs(
+                    crate::providers::claude::limits::oauth::MIN_REFRESH_SECS,
+                )),
+            };
+            loop {
+                let llmon_home = llmon_home.clone();
+                let claude_dir = claude_dir.clone();
+                let event = tokio::task::spawn_blocking(move || match mode {
+                    ClaudeLimitsMode::StatusLine => {
+                        match crate::providers::claude::limits::statusline::load(
+                            &llmon_home,
+                            crate::providers::claude::limits::unix_now(),
+                        ) {
+                            Ok(Some(limits)) => AppEvent::ClaudeLimitsUpdated(Ok(limits)),
+                            Ok(None) => AppEvent::ClaudeLimitsUnavailable {
+                                message: "Not set up".to_string(),
+                                is_error: false,
+                            },
+                            Err(err) => AppEvent::ClaudeLimitsUpdated(Err(err)),
+                        }
+                    }
+                    ClaudeLimitsMode::OAuth => match claude_dir {
+                        Some(claude_dir) => AppEvent::ClaudeLimitsUpdated(
+                            crate::providers::claude::limits::oauth::fetch(&claude_dir),
+                        ),
+                        None => AppEvent::ClaudeLimitsUnavailable {
+                            message: "Claude Code config directory not found.".to_string(),
+                            is_error: true,
+                        },
+                    },
+                    ClaudeLimitsMode::Off => AppEvent::ClaudeLimitsUnavailable {
+                        message: String::new(),
+                        is_error: false,
+                    },
+                })
+                .await;
+                let Ok(event) = event else { return };
+                if evt_tx.send(event).await.is_err() {
+                    return;
+                }
+                tokio::select! {
+                    _ = shutdown_rx.changed() => return,
+                    _ = tokio::time::sleep(interval) => {}
                 }
             }
         });
@@ -1087,9 +1238,18 @@ async fn run_inner(
         system_locale: config.system_locale.clone(),
         mouse_position: None,
         ui_hit_targets: Vec::new(),
-        usage: None,
-        usage_updated_at: None,
-        usage_error: None,
+        harness_view: restored_ui_state.harness_view,
+        codex_usage: None,
+        codex_usage_updated_at: None,
+        codex_usage_error: None,
+        claude_usage: None,
+        claude_usage_updated_at: None,
+        claude_usage_error: None,
+        claude_limits: None,
+        claude_limits_updated_at: None,
+        claude_limits_error: None,
+        claude_limits_notice: None,
+        claude_limits_mode: config.claude_limits_mode,
         limits: None,
         limits_updated_at: None,
         limits_error: None,
@@ -1700,6 +1860,11 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
             state.active_screen = screen;
             changed
         }
+        UiClickAction::SetHarnessView(view) => {
+            let changed = state.harness_view != view;
+            state.harness_view = view;
+            changed
+        }
         UiClickAction::SetDisplayStyle(style) => {
             let changed = state.display_style != style;
             state.display_style = style;
@@ -1895,6 +2060,9 @@ fn map_event_to_usage_cmd(event: Event) -> Option<UsageCommand> {
                 (KeyCode::PageDown, _) => Some(UsageCommand::PageNewer),
                 (KeyCode::Home, _) => Some(UsageCommand::ScrollOldest),
                 (KeyCode::End, _) => Some(UsageCommand::ScrollNewest),
+                (KeyCode::Char('h'), _) | (KeyCode::Char('H'), _) => {
+                    Some(UsageCommand::CycleHarnessView)
+                }
                 (KeyCode::Char('?'), _) => Some(UsageCommand::ToggleHelp),
                 (KeyCode::Enter, _) => Some(UsageCommand::ConfirmContinue),
                 (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
@@ -2046,6 +2214,10 @@ fn handle_usage_command(
             let changed = state.usage_period_offset != 0;
             state.usage_period_offset = 0;
             changed
+        }
+        UsageCommand::CycleHarnessView => {
+            state.harness_view = state.harness_view.next();
+            true
         }
         UsageCommand::RefreshAll => {
             let _ = usage_refresh_tx.try_send(());
@@ -2263,7 +2435,7 @@ fn scroll_api_stat_periods(state: &mut AppState, amount: usize, older: bool) -> 
 
 fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
     match evt {
-        AppEvent::UsageUpdated(res) => {
+        AppEvent::UsageUpdated(crate::harness::Harness::Codex, res) => {
             match res {
                 Ok(snapshot) => {
                     if state.workspace_path.is_some()
@@ -2272,13 +2444,50 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
                     {
                         state.no_sessions_confirm_open = true;
                     }
-                    state.usage = Some(std::sync::Arc::new(snapshot));
-                    state.usage_error = None;
-                    state.usage_updated_at = Some(Instant::now());
+                    state.codex_usage = Some(std::sync::Arc::new(snapshot));
+                    state.codex_usage_error = None;
+                    state.codex_usage_updated_at = Some(Instant::now());
                 }
                 Err(err) => {
-                    state.usage_error = Some(err.to_string());
+                    state.codex_usage_error = Some(err.to_string());
                 }
+            }
+            true
+        }
+        AppEvent::UsageUpdated(crate::harness::Harness::Claude, res) => {
+            match res {
+                Ok(snapshot) => {
+                    state.claude_usage = Some(std::sync::Arc::new(snapshot));
+                    state.claude_usage_error = None;
+                    state.claude_usage_updated_at = Some(Instant::now());
+                }
+                Err(err) => {
+                    state.claude_usage_error = Some(err.to_string());
+                }
+            }
+            true
+        }
+        AppEvent::ClaudeLimitsUpdated(res) => {
+            match res {
+                Ok(limits) => {
+                    state.claude_limits = Some(limits);
+                    state.claude_limits_error = None;
+                    state.claude_limits_notice = None;
+                    state.claude_limits_updated_at = Some(Instant::now());
+                }
+                // Keep the last good data next to the error.
+                Err(err) => state.claude_limits_error = Some(err.to_string()),
+            }
+            true
+        }
+        AppEvent::ClaudeLimitsUnavailable { message, is_error } => {
+            state.claude_limits = None;
+            if is_error {
+                state.claude_limits_error = Some(message);
+                state.claude_limits_notice = None;
+            } else {
+                state.claude_limits_error = None;
+                state.claude_limits_notice = Some(message);
             }
             true
         }
@@ -2469,6 +2678,11 @@ fn load_persisted_ui_state_with_history_depth(
             state.bar_fill_mode = mode;
         }
     }
+    if let Some(view_text) = store.global.harness_view.as_deref() {
+        if let Some(view) = HarnessView::from_store(view_text) {
+            state.harness_view = view;
+        }
+    }
     state.skip_quit_confirmation = store.global.skip_quit_confirmation;
     state.limit_reset_cooldown_until = store
         .global
@@ -2536,6 +2750,7 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.display_style = Some(state.display_style.store_value().to_string());
     store.global.accent_theme = Some(state.accent_theme.store_value().to_string());
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
+    store.global.harness_view = Some(state.harness_view.store_value().to_string());
     store.global.skip_quit_confirmation = state.skip_quit_confirmation;
     store.global.limit_reset_cooldown_until = state
         .limit_reset_cooldown_until
@@ -2761,9 +2976,18 @@ impl AppState {
             system_locale: SystemLocale::default(),
             mouse_position: None,
             ui_hit_targets: Vec::new(),
-            usage: None,
-            usage_updated_at: None,
-            usage_error: None,
+            harness_view: defaults.harness_view,
+            codex_usage: None,
+            codex_usage_updated_at: None,
+            codex_usage_error: None,
+            claude_usage: None,
+            claude_usage_updated_at: None,
+            claude_usage_error: None,
+            claude_limits: None,
+            claude_limits_updated_at: None,
+            claude_limits_error: None,
+            claude_limits_notice: None,
+            claude_limits_mode: ClaudeLimitsMode::StatusLine,
             limits: None,
             limits_updated_at: None,
             limits_error: None,
@@ -2798,8 +3022,16 @@ impl AppState {
         self.accent_theme.text_color()
     }
 
-    pub(crate) fn usage_updated_label(&self) -> Option<String> {
-        let updated_at = self.usage_updated_at?;
+    pub(crate) fn usage_updated_label(&self, harness: crate::harness::Harness) -> Option<String> {
+        let updated_at = match harness {
+            crate::harness::Harness::Codex => self.codex_usage_updated_at,
+            crate::harness::Harness::Claude => self.claude_usage_updated_at,
+        }?;
+        Some(crate::ui::format_updated_label(updated_at))
+    }
+
+    pub(crate) fn claude_limits_updated_label(&self) -> Option<String> {
+        let updated_at = self.claude_limits_updated_at?;
         Some(crate::ui::format_updated_label(updated_at))
     }
 
@@ -3188,6 +3420,21 @@ mod tests {
         save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
         let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemFull);
+
+        let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn harness_view_round_trips_through_state_store() {
+        let llmon_home = make_temp_dir("harness-view");
+        let mut state = PersistedUiState::default_for_workspace(None);
+        assert_eq!(state.harness_view, HarnessView::Codex);
+        state.harness_view = HarnessView::Claude;
+
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
+        assert_eq!(loaded.harness_view, HarnessView::Claude);
+        assert_eq!(HarnessView::Claude.next(), HarnessView::Codex);
 
         let _ = std::fs::remove_dir_all(llmon_home);
     }

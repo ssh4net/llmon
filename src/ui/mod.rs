@@ -1,7 +1,9 @@
+use crate::app::HarnessView;
 use crate::app::{
     AccentTheme, ActiveScreen, ApiStatGraph, ApiStatGrouping, AppState, BarFillMode,
     ChartOrientation, LimitResetButtonState, UiClickAction, UiHitTarget,
 };
+use crate::harness::Harness;
 use crate::locale::{DisplayFormatter, DisplayStyle};
 use crate::usage::{
     format_compact_kmb, format_count, format_duration_compact, format_tokens_compact,
@@ -250,8 +252,8 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 frame,
                 inner,
                 &mut state.read_browser,
-                state.usage.as_deref(),
-                state.usage_error.as_deref(),
+                state.codex_usage.as_deref(),
+                state.codex_usage_error.as_deref(),
                 formatter,
                 accent_text_color,
             );
@@ -368,22 +370,44 @@ fn quit_title(
     (line, right_aligned_targets(title_area, &segments))
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let line_area = header_line_area(area);
     let row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(40)])
         .split(line_area);
 
-    let title = "USAGE_SNAPSHOT :: LOCAL";
-    let left = Paragraph::new(Line::from(Span::styled(
+    let title = "USAGE_SNAPSHOT :: ";
+    let views = [
+        ("CODEX", HarnessView::Codex),
+        ("CLAUDE", HarnessView::Claude),
+    ];
+    let mut spans = vec![Span::styled(
         title,
         Style::default().add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Left);
+    )];
+    let mut x = row[0]
+        .x
+        .saturating_add(u16::try_from(UnicodeWidthStr::width(title)).unwrap_or(u16::MAX));
+    for (label, view) in views {
+        let pill_span = pill(label, state.harness_view == view);
+        let width =
+            u16::try_from(UnicodeWidthStr::width(pill_span.content.as_ref())).unwrap_or(u16::MAX);
+        let right = row[0].x.saturating_add(row[0].width);
+        if x.saturating_add(width) <= right {
+            state.ui_hit_targets.push(UiHitTarget {
+                area: Rect::new(x, row[0].y, width, 1),
+                action: UiClickAction::SetHarnessView(view),
+            });
+        }
+        x = x.saturating_add(width);
+        spans.push(pill_span);
+    }
+    let left = Paragraph::new(Line::from(spans)).alignment(Alignment::Left);
     frame.render_widget(left, row[0]);
 
-    let updated = usage_scan_status_label(state).unwrap_or_else(|| "Updated --".to_string());
+    let updated = usage_scan_status_label(state, usage_view_harness(state.harness_view))
+        .unwrap_or_else(|| "Updated --".to_string());
 
     let right = Paragraph::new(updated).alignment(Alignment::Right);
     frame.render_widget(right, row[1]);
@@ -420,16 +444,24 @@ fn render_activity_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     .alignment(Alignment::Left);
     frame.render_widget(left, row[0]);
 
-    let updated = usage_scan_status_label(state).unwrap_or_else(|| "Updated --".to_string());
+    let updated =
+        usage_scan_status_label(state, Harness::Codex).unwrap_or_else(|| "Updated --".to_string());
     let right = Paragraph::new(updated).alignment(Alignment::Right);
     frame.render_widget(right, row[1]);
 }
 
-fn usage_scan_status_label(state: &AppState) -> Option<String> {
+fn usage_scan_status_label(state: &AppState, harness: Harness) -> Option<String> {
     let updated = state
-        .usage_updated_label()
-        .or_else(|| state.limits_updated_label())?;
-    let Some(snapshot) = state.usage.as_deref() else {
+        .usage_updated_label(harness)
+        .or_else(|| match harness {
+            Harness::Codex => state.limits_updated_label(),
+            Harness::Claude => state.claude_limits_updated_label(),
+        })?;
+    let snapshot = match harness {
+        Harness::Codex => state.codex_usage.as_deref(),
+        Harness::Claude => state.claude_usage.as_deref(),
+    };
+    let Some(snapshot) = snapshot else {
         return Some(updated);
     };
     let status = if snapshot.scan_pending_files == 0 {
@@ -1978,7 +2010,7 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: View [h] (codex/claude), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
             "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -1996,11 +2028,11 @@ fn footer_hint(screen: ActiveScreen) -> &'static str {
 fn footer_error(state: &AppState) -> String {
     let err = match state.active_screen {
         ActiveScreen::Usage => state
-            .usage_error
+            .codex_usage_error
             .as_deref()
             .or(state.limits_error.as_deref())
             .or(state.limit_reset_error.as_deref()),
-        ActiveScreen::Activity => state.usage_error.as_deref(),
+        ActiveScreen::Activity => state.codex_usage_error.as_deref(),
         ActiveScreen::ApiStat => state.account_usage_error.as_deref(),
         ActiveScreen::LimitResets => state.limits_error.as_deref(),
         ActiveScreen::Read => None,
@@ -2046,11 +2078,13 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let panel = UsagePanel {
-        snapshot: state.usage.clone(),
-    };
+    let panel = usage_panel(state, usage_view_harness(state.harness_view));
     let cards_height = usage_cards_height(state, &panel, area.width);
-    let reset_summary = reset_summary_text(state);
+    // Limit reset credits exist only for Codex.
+    let reset_summary = match panel.harness {
+        Harness::Codex => reset_summary_text(state),
+        Harness::Claude => None,
+    };
     let reset_button = reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
@@ -2078,7 +2112,26 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 
 /// One harness's usage data as the USAGE cards, chart, and top models read it.
 struct UsagePanel {
+    harness: Harness,
     snapshot: Option<Arc<crate::usage::LocalUsageSnapshot>>,
+}
+
+fn usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
+    UsagePanel {
+        harness,
+        snapshot: match harness {
+            Harness::Codex => state.codex_usage.clone(),
+            Harness::Claude => state.claude_usage.clone(),
+        },
+    }
+}
+
+/// The harness the USAGE screen shows in the current view.
+fn usage_view_harness(view: HarnessView) -> Harness {
+    match view {
+        HarnessView::Codex => Harness::Codex,
+        HarnessView::Claude => Harness::Claude,
+    }
 }
 
 fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4] {
@@ -2099,9 +2152,7 @@ fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4
 }
 
 fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let panel = UsagePanel {
-        snapshot: state.usage.clone(),
-    };
+    let panel = usage_panel(state, Harness::Codex);
     let cards_height = usage_cards_height(state, &panel, area.width);
     let reset_summary = reset_summary_text(state);
     let controls_height = activity_controls_height(reset_summary.as_deref(), area.width);
@@ -2227,7 +2278,7 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
         },
     );
     if let Some((indexed, total)) = state
-        .usage
+        .codex_usage
         .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files > 0)
         .map(|snapshot| (snapshot.scan_indexed_files, snapshot.scan_total_files))
@@ -2328,7 +2379,7 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
     }
     let inner = chart_inner;
 
-    let Some(snapshot) = state.usage.as_deref() else {
+    let Some(snapshot) = state.codex_usage.as_deref() else {
         render_activity_message(frame, inner, "Loading activity...");
         return;
     };
@@ -3101,8 +3152,14 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
     let totals = snapshot
         .map(|snapshot| snapshot.totals_view_for_zone(state.metric, formatter, state.usage_zone));
     let today = snapshot.and_then(|snapshot| snapshot.days_for_zone(state.usage_zone).last());
-    let (limits_value, limits_captions) =
-        limits_card_content(state, uses_compact_limit_lines(card_width));
+    let limits_card = || match panel.harness {
+        Harness::Codex => {
+            let (value, captions) =
+                limits_card_content(state, uses_compact_limit_lines(card_width));
+            CardSpec::limits(value, captions)
+        }
+        Harness::Claude => claude_limits_card_spec(state, card_width),
+    };
 
     if let Some(pending) = snapshot.filter(|snapshot| snapshot.scan_pending_files > 0) {
         let progress = format!(
@@ -3111,7 +3168,7 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
             formatter.format_usize(pending.scan_total_files)
         );
         let mut cards = Vec::with_capacity(6);
-        cards.push(CardSpec::limits(limits_value, limits_captions));
+        cards.push(limits_card());
         for _ in 0..5 {
             cards.push(CardSpec::new(
                 "INDEXING".to_string(),
@@ -3161,7 +3218,7 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
         .map(|runs| format!("Runs {}", format_count(runs, formatter)));
 
     let mut cards = Vec::with_capacity(6);
-    cards.push(CardSpec::limits(limits_value, limits_captions));
+    cards.push(limits_card());
     cards.push(CardSpec::new(today_value, today_captions));
 
     match state.metric {
@@ -3431,10 +3488,11 @@ fn render_usage_cards(
                         Constraint::Percentage(16),
                     ])
                     .split(row1);
-                if let Some(hover) = render_limits_card(
+                if let Some(hover) = render_panel_limits_card(
                     frame,
                     cards[0],
                     state,
+                    panel,
                     uses_compact_limit_lines(card_layout.min_card_width),
                 ) {
                     weekly_hover = Some(hover);
@@ -3465,10 +3523,11 @@ fn render_usage_cards(
                         Constraint::Percentage(33),
                     ])
                     .split(row1);
-                if let Some(hover) = render_limits_card(
+                if let Some(hover) = render_panel_limits_card(
                     frame,
                     top[0],
                     state,
+                    panel,
                     uses_compact_limit_lines(card_layout.min_card_width),
                 ) {
                     weekly_hover = Some(hover);
@@ -3588,10 +3647,11 @@ fn render_usage_cards(
                             Constraint::Percentage(16),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -3640,10 +3700,11 @@ fn render_usage_cards(
                             Constraint::Percentage(33),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         top[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -3740,10 +3801,11 @@ fn render_usage_cards(
                             Constraint::Percentage(16),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -3789,10 +3851,11 @@ fn render_usage_cards(
                             Constraint::Percentage(33),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         top[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -3927,10 +3990,11 @@ fn render_usage_cards(
                             Constraint::Percentage(16),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -3974,10 +4038,11 @@ fn render_usage_cards(
                             Constraint::Percentage(33),
                         ])
                         .split(row1);
-                    if let Some(hover) = render_limits_card(
+                    if let Some(hover) = render_panel_limits_card(
                         frame,
                         top[0],
                         state,
+                        panel,
                         uses_compact_limit_lines(card_layout.min_card_width),
                     ) {
                         weekly_hover = Some(hover);
@@ -4232,7 +4297,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
     let (start, end) = update_usage_viewport(state, area, all_days.len(), visible_capacity);
     let days = &all_days[start..end];
     let formatter = state.formatter();
-    let metric_label = usage_chart_metric_label(state.metric);
+    let metric_label = usage_chart_metric_label(state.metric, panel.harness);
     let range_title = if all_days.len() == days.len() {
         range_label.to_string()
     } else {
@@ -4272,9 +4337,8 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
     let mut labels: Vec<String> = Vec::with_capacity(days.len());
     let mut tooltip_labels: Vec<String> = Vec::with_capacity(days.len());
     let mut values: Vec<u64> = Vec::with_capacity(days.len());
-    let mut token_input_values: Vec<u64> = Vec::with_capacity(days.len());
-    let mut token_non_cached_values: Vec<u64> = Vec::with_capacity(days.len());
-    let mut token_output_values: Vec<u64> = Vec::with_capacity(days.len());
+    let mut token_rows: Vec<TokenColumns> = Vec::with_capacity(days.len());
+    let (token_column_count, _) = token_column_layout(panel.harness);
     for day in days {
         let date = NaiveDate::parse_from_str(&day.day, "%Y-%m-%d").ok();
         let label = date
@@ -4300,10 +4364,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
             UsageMetric::Runs => day.agent_runs.max(0) as u64,
         };
         values.push(value);
-        let (input, non_cached, output) = usage_day_token_columns(day);
-        token_input_values.push(input);
-        token_non_cached_values.push(non_cached);
-        token_output_values.push(output);
+        token_rows.push(usage_day_token_columns(day, panel.harness));
     }
 
     match state.orientation {
@@ -4475,9 +4536,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
 
             let visible_labels = &labels[start..];
             let visible_values = &values[start..];
-            let visible_token_inputs = &token_input_values[start..];
-            let visible_token_non_cached = &token_non_cached_values[start..];
-            let visible_token_outputs = &token_output_values[start..];
+            let visible_token_rows = &token_rows[start..];
 
             let max_value = visible_values.iter().copied().max().unwrap_or(0).max(1);
 
@@ -4502,17 +4561,16 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
             // Reserve the space needed by independently aligned token columns.
             let desired_value_w = if state.metric == UsageMetric::Tokens {
                 horizontal_token_columns_widths(
-                    visible_token_inputs,
-                    visible_token_non_cached,
-                    visible_token_outputs,
+                    visible_token_rows,
+                    token_column_count,
                     u16::MAX,
                     formatter,
                 )
-                .map(|(input, non_cached, output)| {
-                    input
-                        .saturating_add(non_cached)
-                        .saturating_add(output)
-                        .saturating_add(6)
+                .map(|widths| {
+                    widths
+                        .iter()
+                        .sum::<usize>()
+                        .saturating_add(token_column_separators_width(token_column_count))
                 })
                 .unwrap_or(1)
             } else {
@@ -4545,9 +4603,8 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
                 .max(1);
             let token_column_widths = if state.metric == UsageMetric::Tokens {
                 horizontal_token_columns_widths(
-                    visible_token_inputs,
-                    visible_token_non_cached,
-                    visible_token_outputs,
+                    visible_token_rows,
+                    token_column_count,
                     value_w,
                     formatter,
                 )
@@ -4635,9 +4692,8 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
                 let value_max_width = value_area.width;
                 let value_text = if state.metric == UsageMetric::Tokens {
                     format_horizontal_token_columns(
-                        visible_token_inputs[idx],
-                        visible_token_non_cached[idx],
-                        visible_token_outputs[idx],
+                        visible_token_rows[idx],
+                        token_column_count,
                         value_max_width,
                         token_column_widths,
                         formatter,
@@ -4686,23 +4742,49 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, p
     }
 }
 
-fn usage_chart_metric_label(metric: UsageMetric) -> &'static str {
+fn usage_chart_metric_label(metric: UsageMetric, harness: Harness) -> &'static str {
     match metric {
-        UsageMetric::Tokens => "TOKENS (INPUT / NON-CACHED / OUTPUT)",
+        UsageMetric::Tokens => token_column_layout(harness).1,
         UsageMetric::Time => "TIME",
         UsageMetric::Runs => "RUNS",
     }
 }
 
-/// Codex-style columns: all prompt input, the part not read from cache, and
-/// output.
-fn usage_day_token_columns(day: &UsageDay) -> (u64, u64, u64) {
-    let prompt = day.prompt_tokens();
-    (
-        prompt.max(0) as u64,
-        prompt.saturating_sub(day.cache_read_tokens).max(0) as u64,
-        day.total_tokens.saturating_sub(prompt).max(0) as u64,
-    )
+/// Token values of one chart row: the first `count` of up to four columns.
+type TokenColumns = [u64; 4];
+
+/// Number of token columns a harness shows, and their chart heading.
+fn token_column_layout(harness: Harness) -> (usize, &'static str) {
+    match harness {
+        Harness::Codex => (3, "TOKENS (INPUT / NON-CACHED / OUTPUT)"),
+        Harness::Claude => (4, "TOKENS (INPUT / CACHE-WRITE / CACHE-READ / OUTPUT)"),
+    }
+}
+
+fn token_column_separators_width(count: usize) -> usize {
+    count.saturating_sub(1).saturating_mul(3)
+}
+
+/// Codex: all prompt input, the part not read from cache, and output.
+/// Claude Code: uncached input, cache writes, cache reads, and output.
+fn usage_day_token_columns(day: &UsageDay, harness: Harness) -> TokenColumns {
+    match harness {
+        Harness::Codex => {
+            let prompt = day.prompt_tokens();
+            [
+                prompt.max(0) as u64,
+                prompt.saturating_sub(day.cache_read_tokens).max(0) as u64,
+                day.total_tokens.saturating_sub(prompt).max(0) as u64,
+                0,
+            ]
+        }
+        Harness::Claude => [
+            day.input_tokens.max(0) as u64,
+            day.cache_write_tokens.max(0) as u64,
+            day.cache_read_tokens.max(0) as u64,
+            day.output_tokens.max(0) as u64,
+        ],
+    }
 }
 
 fn hovered_vertical_bar_index(
@@ -4979,73 +5061,68 @@ fn format_horizontal_value(
 }
 
 fn horizontal_token_columns_widths(
-    values: &[u64],
-    non_cached_values: &[u64],
-    output_values: &[u64],
+    rows: &[TokenColumns],
+    count: usize,
     max_width: u16,
     formatter: DisplayFormatter<'_>,
-) -> Option<(usize, usize, usize)> {
-    let mut widths = [0usize; 3];
-
-    for ((&input, &non_cached), &output) in values.iter().zip(non_cached_values).zip(output_values)
-    {
-        for (idx, value) in [input, non_cached, output].into_iter().enumerate() {
-            let formatted = format_tokens_overview(value as i64, formatter);
+) -> Option<[usize; 4]> {
+    let count = count.min(4);
+    let separators = token_column_separators_width(count);
+    let mut widths = [0usize; 4];
+    for row in rows {
+        for idx in 0..count {
+            let formatted = format_tokens_overview(row[idx] as i64, formatter);
             widths[idx] = widths[idx].max(UnicodeWidthStr::width(formatted.as_str()));
         }
     }
 
-    let full_width = widths.iter().sum::<usize>().saturating_add(6);
+    let full_width = widths.iter().sum::<usize>().saturating_add(separators);
     if full_width <= max_width as usize {
-        return Some((widths[0], widths[1], widths[2]));
+        return Some(widths);
     }
-    if max_width < 9 {
+    if usize::from(max_width) < separators + count {
         return None;
     }
 
-    let digits_width = usize::from(max_width.saturating_sub(6));
-    let mut compact_widths = [0usize; 3];
-    for ((&input, &non_cached), &output) in values.iter().zip(non_cached_values).zip(output_values)
-    {
-        for (idx, value) in [input, non_cached, output].into_iter().enumerate() {
-            let compact = format_compact_kmb(value, 5, formatter);
+    let digits_width = usize::from(max_width).saturating_sub(separators);
+    let mut compact_widths = [0usize; 4];
+    for row in rows {
+        for idx in 0..count {
+            let compact = format_compact_kmb(row[idx], 5, formatter);
             compact_widths[idx] = compact_widths[idx].max(UnicodeWidthStr::width(compact.as_str()));
         }
     }
     if compact_widths.iter().sum::<usize>() <= digits_width {
-        return Some((compact_widths[0], compact_widths[1], compact_widths[2]));
+        return Some(compact_widths);
     }
 
-    let base = digits_width / 3;
-    let remainder = digits_width % 3;
-    Some((
-        base + usize::from(remainder > 0),
-        base + usize::from(remainder > 1),
-        base,
-    ))
+    let base = digits_width / count;
+    let remainder = digits_width % count;
+    let mut even = [0usize; 4];
+    for (idx, width) in even.iter_mut().enumerate().take(count) {
+        *width = base + usize::from(idx < remainder);
+    }
+    Some(even)
 }
 
 fn format_horizontal_token_columns(
-    input: u64,
-    non_cached: u64,
-    output: u64,
+    row: TokenColumns,
+    count: usize,
     max_width: u16,
-    columns: Option<(usize, usize, usize)>,
+    columns: Option<[usize; 4]>,
     formatter: DisplayFormatter<'_>,
 ) -> String {
-    let Some((input_width, non_cached_width, output_width)) = columns else {
+    let Some(widths) = columns else {
         return "\u{2026}".to_string();
     };
-    let numbers = [input, non_cached, output];
-    let widths = [input_width, non_cached_width, output_width];
-    let cells: [String; 3] =
-        std::array::from_fn(|idx| format_token_column_cell(numbers[idx], widths[idx], formatter));
-    let value = format!(
-        "{} / {} / {}",
-        right_align_token_cell(&cells[0], input_width),
-        right_align_token_cell(&cells[1], non_cached_width),
-        right_align_token_cell(&cells[2], output_width),
-    );
+    let mut value = String::new();
+    for idx in 0..count.min(4) {
+        if idx > 0 {
+            value.push_str(" / ");
+        }
+        let cell = format_token_column_cell(row[idx], widths[idx], formatter);
+        value.push_str(&right_align_token_cell(&cell, widths[idx]));
+    }
     if UnicodeWidthStr::width(value.as_str()) <= max_width as usize {
         value
     } else {
@@ -5135,7 +5212,7 @@ fn render_top_models(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pa
             spans.push(Span::styled(
                 format!(
                     "{} {}%",
-                    truncate_middle(&m.model, 18),
+                    truncate_middle(&crate::usage::model_display_name(&m.model), 18),
                     formatter.format_one_decimal(m.share_percent)
                 ),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -5228,6 +5305,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
     let text = match screen {
         ActiveScreen::Usage => Text::from(vec![
             Line::from("Keys:"),
+            Line::from("  h    - switch view (Codex/Claude)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  g/w  - group by day/ISO week/month"),
             Line::from("  f    - toggle layout (Horz/Vert)"),
@@ -6983,6 +7061,338 @@ fn limits_card_paragraph(
     (paragraph, weekly_line_index, gauge_line_index, tooltip)
 }
 
+fn render_panel_limits_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    panel: &UsagePanel,
+    compact: bool,
+) -> Option<WeeklyPaceHover> {
+    match panel.harness {
+        Harness::Codex => render_limits_card(frame, area, state, compact),
+        Harness::Claude => render_claude_limits_card(frame, area, state),
+    }
+}
+
+/// Status-line snapshots older than this are flagged as stale.
+const CLAUDE_STALE_SNAPSHOT_SECS: i64 = 15 * 60;
+
+/// Segments of a limit gauge: one per hour of the 5-hour window, one per day
+/// of a weekly window, or one for any other window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GaugeSegments {
+    Hours,
+    Days,
+    Single,
+}
+
+/// One line of the Claude Code LIMITS card.
+enum ClaudeLimitLine {
+    Gauge {
+        label: String,
+        window: crate::providers::codex::rpc::RateLimitWindow,
+        segments: GaugeSegments,
+    },
+    Text {
+        text: String,
+        style: Style,
+    },
+}
+
+/// The weekly pacing helpers take the Codex window type; Claude windows carry
+/// the same fields (percent, window minutes, reset in Unix seconds).
+fn pacing_window(
+    window: &crate::providers::claude::limits::RateLimitWindow,
+) -> crate::providers::codex::rpc::RateLimitWindow {
+    crate::providers::codex::rpc::RateLimitWindow {
+        used_percent: window.used_percent,
+        window_duration_mins: window.window_duration_mins,
+        resets_at: window.resets_at,
+    }
+}
+
+fn claude_limit_lines(state: &AppState, now: i64) -> Vec<ClaudeLimitLine> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let gray = Style::default().fg(Color::Gray);
+    let text = |text: &str, style: Style| ClaudeLimitLine::Text {
+        text: text.to_string(),
+        style,
+    };
+    if state.claude_limits_mode == crate::app::ClaudeLimitsMode::Off {
+        return vec![text("Disabled", bold), text("--claude-limits off", gray)];
+    }
+    let Some(limits) = state.claude_limits.as_ref() else {
+        if let Some(error) = state.claude_limits_error.as_deref() {
+            return vec![text("Unavailable", bold), text(error, gray)];
+        }
+        if state.claude_limits_notice.is_some() {
+            return vec![
+                text("Not set up", bold),
+                text("Set the Claude Code statusLine command to:", gray),
+                text(
+                    "llmon statusline",
+                    Style::default().fg(state.accent_text_color()),
+                ),
+            ];
+        }
+        return vec![text("Loading...", bold)];
+    };
+
+    let mut lines = Vec::new();
+    let weekly_mins = crate::providers::claude::limits::SEVEN_DAY_WINDOW_MINS - 1.0;
+    let segments_for = |window: &crate::providers::claude::limits::RateLimitWindow| match window
+        .window_duration_mins
+    {
+        Some(minutes) if minutes >= weekly_mins => GaugeSegments::Days,
+        Some(minutes)
+            if (minutes - crate::providers::claude::limits::FIVE_HOUR_WINDOW_MINS).abs() < 1.0 =>
+        {
+            GaugeSegments::Hours
+        }
+        _ => GaugeSegments::Single,
+    };
+    let mut gauge = |label: String, window: &crate::providers::claude::limits::RateLimitWindow| {
+        lines.push(ClaudeLimitLine::Gauge {
+            label,
+            window: pacing_window(window),
+            segments: segments_for(window),
+        });
+    };
+    if let Some(window) = limits.primary.as_ref() {
+        gauge("5h".to_string(), window);
+    }
+    if let Some(window) = limits.secondary.as_ref() {
+        gauge("7d".to_string(), window);
+    }
+    for bucket in &limits.buckets {
+        if let Some(window) = bucket.primary.as_ref() {
+            // Per-model weekly limits: the first word of the model name.
+            let name = bucket.limit_name.as_deref().unwrap_or("Model");
+            let label = name.split_whitespace().next().unwrap_or(name);
+            gauge(truncate_middle(label, 6), window);
+        }
+    }
+    if let Some(window) = limits.spend_limit.as_ref() {
+        gauge("Spend".to_string(), window);
+    }
+    if lines.is_empty() {
+        lines.push(text("No limit windows reported", gray));
+    }
+    if let Some(extra) = limits.extra_usage.as_ref().filter(|extra| extra.enabled) {
+        let formatter = state.formatter();
+        let amount = |value: Option<f64>| {
+            value
+                .map(|value| formatter.format_two_decimals(value))
+                .unwrap_or_else(|| "--".to_string())
+        };
+        let mut extra_text = format!("Extra {}", amount(extra.used_amount));
+        if extra.limit_amount.is_some() {
+            extra_text.push_str(&format!(" / {}", amount(extra.limit_amount)));
+        }
+        if let Some(currency) = extra.currency.as_deref() {
+            extra_text.push_str(&format!(" {currency}"));
+        }
+        lines.push(text(&extra_text, gray));
+    }
+    let age = now.saturating_sub(limits.captured_at).max(0);
+    let stale = limits.source == crate::providers::claude::limits::LimitsSourceKind::StatusLine
+        && age > CLAUDE_STALE_SNAPSHOT_SECS;
+    let source = match limits.source {
+        crate::providers::claude::limits::LimitsSourceKind::StatusLine => "statusline",
+        crate::providers::claude::limits::LimitsSourceKind::OAuth => "OAuth",
+    };
+    let mut source_text = format!("{source} {} ago", format_reset_countdown(age));
+    if stale {
+        source_text.push_str(" (stale)");
+    }
+    lines.push(text(
+        &source_text,
+        if stale {
+            Style::default().fg(Color::Yellow)
+        } else {
+            gray
+        },
+    ));
+    if let Some(error) = state.claude_limits_error.as_deref() {
+        lines.push(text(error, Style::default().fg(Color::Yellow)));
+    }
+    lines
+}
+
+/// Compact time until a reset or since a capture: `45m`, `2h05m`, `6d23h`.
+fn format_reset_countdown(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3_600)
+    }
+}
+
+/// Column layout of the gauge rows: label width, gauge width, and whether
+/// the reset countdown fits.
+fn claude_gauge_columns(lines: &[ClaudeLimitLine], content_width: u16) -> (usize, u16, bool) {
+    const PERCENT_WIDTH: u16 = 4;
+    const RESET_WIDTH: u16 = 6;
+    const MIN_GAUGE_WIDTH: u16 = 5;
+    let mut label_width = 2_usize;
+    for line in lines {
+        if let ClaudeLimitLine::Gauge { label, .. } = line {
+            label_width = label_width.max(UnicodeWidthStr::width(label.as_str()));
+        }
+    }
+    let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
+    let without_reset = content_width
+        .saturating_sub(label_cells)
+        .saturating_sub(1)
+        .saturating_sub(1)
+        .saturating_sub(PERCENT_WIDTH);
+    let with_reset = without_reset.saturating_sub(1).saturating_sub(RESET_WIDTH);
+    if with_reset >= MIN_GAUGE_WIDTH {
+        (label_width, with_reset, true)
+    } else {
+        (label_width, without_reset.max(1), false)
+    }
+}
+
+/// Text of each card line; gauge rows leave blank space where the gauge is
+/// painted.
+fn claude_limit_line_texts(lines: &[ClaudeLimitLine], content_width: u16, now: i64) -> Vec<String> {
+    let (label_width, gauge_width, show_reset) = claude_gauge_columns(lines, content_width);
+    lines
+        .iter()
+        .map(|line| match line {
+            ClaudeLimitLine::Gauge { label, window, .. } => {
+                let percent = window
+                    .used_percent
+                    .map(|used| format!("{:>3}%", used.round() as i64))
+                    .unwrap_or_else(|| " --%".to_string());
+                let reset = if show_reset {
+                    let countdown = window
+                        .resets_at
+                        .map(|reset| format_reset_countdown(reset.saturating_sub(now)))
+                        .unwrap_or_default();
+                    format!(" {countdown:>6}")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{label:<label_width$} {} {percent}{reset}",
+                    " ".repeat(usize::from(gauge_width))
+                )
+            }
+            ClaudeLimitLine::Text { text, .. } => text.clone(),
+        })
+        .collect()
+}
+
+fn claude_limits_card_spec(state: &AppState, card_width: u16) -> CardSpec {
+    let content_width = card_width.saturating_sub(5).max(1);
+    let now = now_unix_secs();
+    let mut texts =
+        claude_limit_line_texts(&claude_limit_lines(state, now), content_width, now).into_iter();
+    let value = texts.next().unwrap_or_default();
+    CardSpec::new(value, texts.collect())
+}
+
+fn render_claude_limits_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+) -> Option<WeeklyPaceHover> {
+    let now = now_unix_secs();
+    let content_width = area.width.saturating_sub(5).max(1);
+    let lines = claude_limit_lines(state, now);
+    let texts = claude_limit_line_texts(&lines, content_width, now);
+    let (label_width, gauge_width, _) = claude_gauge_columns(&lines, content_width);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .padding(Padding {
+            left: 2,
+            right: 1,
+            top: 1,
+            bottom: 0,
+        })
+        .title(Span::styled(" LIMITS ", Style::default().fg(Color::Gray)));
+    let mut rendered: Vec<Line<'static>> = Vec::with_capacity(lines.len() + 1);
+    for (line, text) in lines.iter().zip(&texts) {
+        let style = match line {
+            ClaudeLimitLine::Gauge { .. } => Style::default(),
+            ClaudeLimitLine::Text { style, .. } => *style,
+        };
+        rendered.push(Line::from(Span::styled(text.clone(), style)));
+    }
+    rendered.push(Line::from(""));
+    frame.render_widget(
+        Paragraph::new(Text::from(rendered))
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+
+    // Paint the gauges into the blank space of their rows. Gauge rows come
+    // first and never wrap, so the line index is the row index.
+    let mut hover = None;
+    let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
+    for (index, line) in lines.iter().enumerate() {
+        let ClaudeLimitLine::Gauge {
+            window, segments, ..
+        } = line
+        else {
+            continue;
+        };
+        let Some(row) = card_content_line_rect(area, index) else {
+            continue;
+        };
+        let gauge_x = row.x.saturating_add(label_cells).saturating_add(1);
+        let available = row.x.saturating_add(row.width).saturating_sub(gauge_x);
+        let gauge_area = Rect::new(gauge_x, row.y, gauge_width.min(available), 1);
+        let (band, marker) = match segments {
+            GaugeSegments::Days => weekly_gauge_pacing(window, now),
+            GaugeSegments::Hours | GaugeSegments::Single => (None, None),
+        };
+        let buffer = frame.buffer_mut();
+        match segments {
+            GaugeSegments::Days => render_segmented_usage_gauge::<WEEKLY_GAUGE_DAYS>(
+                buffer,
+                gauge_area,
+                window.used_percent,
+                band,
+                marker,
+            ),
+            GaugeSegments::Hours => render_segmented_usage_gauge::<5>(
+                buffer,
+                gauge_area,
+                window.used_percent,
+                None,
+                None,
+            ),
+            GaugeSegments::Single => render_segmented_usage_gauge::<1>(
+                buffer,
+                gauge_area,
+                window.used_percent,
+                None,
+                None,
+            ),
+        }
+        if *segments == GaugeSegments::Days && hover.is_none() {
+            if let Some(mouse) = state
+                .mouse_position
+                .filter(|mouse| rect_contains(row, *mouse))
+            {
+                let band = weekly_pace_band(window, now);
+                hover = format_weekly_pace_tooltip(window, band, now)
+                    .map(|text| WeeklyPaceHover { mouse, text });
+            }
+        }
+    }
+    hover
+}
+
 fn render_limits_card(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -7335,6 +7745,92 @@ mod tests {
         snapshot
     }
 
+    /// Usage snapshot from synthetic Claude Code transcripts: one session
+    /// per day for the last `days` days.
+    fn synthetic_claude_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
+        let root =
+            std::env::temp_dir().join(format!("llmon-ui-claude-{}-{}", std::process::id(), days));
+        let _ = std::fs::remove_dir_all(&root);
+        let projects = root.join("projects").join("-work-app");
+        std::fs::create_dir_all(&projects).expect("create projects");
+        let now = Utc::now();
+        for day in 0..days {
+            let start = now - chrono::Duration::days(day) - chrono::Duration::minutes(20);
+            let base = 100 * (1 + (day * 104_729) % 89);
+            let model = if day % 3 == 0 {
+                "claude-sonnet-5"
+            } else {
+                "claude-opus-5-5"
+            };
+            let lines = [
+                serde_json::json!({
+                    "type": "user", "timestamp": start.to_rfc3339(), "cwd": "/work/app",
+                    "sessionId": format!("s{day}"), "promptId": format!("p{day}"),
+                    "message": {"role": "user", "content": "synthetic prompt"}
+                }),
+                serde_json::json!({
+                    "type": "assistant",
+                    "timestamp": (start + chrono::Duration::seconds(30)).to_rfc3339(),
+                    "cwd": "/work/app", "requestId": format!("r{day}"),
+                    "message": {"id": format!("m{day}"), "model": model, "role": "assistant",
+                        "content": [], "usage": {
+                            "input_tokens": base, "cache_creation_input_tokens": base * 20,
+                            "cache_read_input_tokens": base * 300, "output_tokens": base * 5}}
+                }),
+            ];
+            let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(projects.join(format!("s{day}.jsonl")), body).expect("write transcript");
+        }
+        let snapshot = crate::usage::compute_snapshot(
+            crate::harness::Harness::Claude,
+            30,
+            &root,
+            None,
+            crate::usage::ScanLimits::default(),
+            None,
+        )
+        .expect("synthetic snapshot");
+        let _ = std::fs::remove_dir_all(root);
+        snapshot
+    }
+
+    /// Claude limits as the OAuth source reports them, with a per-model weekly
+    /// limit and extra usage.
+    fn synthetic_claude_limits() -> crate::providers::claude::limits::AccountRateLimits {
+        use crate::providers::claude::limits::{
+            AccountRateLimits, ExtraUsage, LimitsSourceKind, RateLimitSnapshot, RateLimitWindow,
+            FIVE_HOUR_WINDOW_MINS, SEVEN_DAY_WINDOW_MINS,
+        };
+        let now = now_unix_secs();
+        let mut limits = AccountRateLimits::empty(LimitsSourceKind::OAuth, now - 90);
+        limits.primary = Some(RateLimitWindow {
+            used_percent: Some(42.0),
+            window_duration_mins: Some(FIVE_HOUR_WINDOW_MINS),
+            resets_at: Some(now + 2 * 3_600 + 600),
+        });
+        limits.secondary = Some(RateLimitWindow {
+            used_percent: Some(55.0),
+            window_duration_mins: Some(SEVEN_DAY_WINDOW_MINS),
+            resets_at: Some(now + 3 * 86_400),
+        });
+        limits.buckets.push(RateLimitSnapshot {
+            limit_name: Some("Opus 5.5".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: Some(61.0),
+                window_duration_mins: Some(SEVEN_DAY_WINDOW_MINS),
+                resets_at: Some(now + 3 * 86_400),
+            }),
+        });
+        limits.extra_usage = Some(ExtraUsage {
+            enabled: true,
+            used_amount: Some(3.2),
+            limit_amount: Some(50.0),
+            currency: Some("USD".to_string()),
+            used_percent: Some(6.4),
+        });
+        limits
+    }
+
     /// Writes USAGE screen renderings to `$LLMON_RENDER_DUMP_DIR` for manual
     /// layout checks: `LLMON_RENDER_DUMP_DIR=/tmp/x cargo test render_dump -- --ignored`.
     #[test]
@@ -7345,17 +7841,80 @@ mod tests {
         };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).expect("create dump dir");
-        let snapshot = synthetic_codex_snapshot(45);
-        for (width, height) in [(200_u16, 50_u16), (120, 40), (90, 32)] {
-            for orientation in [ChartOrientation::Horizontal, ChartOrientation::Vertical] {
-                let mut state = AppState::for_tests();
-                state.usage = Some(Arc::new(snapshot.clone()));
-                state.orientation = orientation;
-                let text = render_screen_text(&mut state, width, height);
-                let name = format!("usage-{width}x{height}-{orientation:?}.txt").to_lowercase();
-                std::fs::write(dir.join(name), text).expect("write dump");
+        let codex = Arc::new(synthetic_codex_snapshot(45));
+        let claude = Arc::new(synthetic_claude_snapshot(12));
+        for view in [HarnessView::Codex, HarnessView::Claude] {
+            for (width, height) in [(200_u16, 50_u16), (120, 40), (90, 32)] {
+                for orientation in [ChartOrientation::Horizontal, ChartOrientation::Vertical] {
+                    let mut state = AppState::for_tests();
+                    state.harness_view = view;
+                    state.codex_usage = Some(codex.clone());
+                    state.claude_usage = Some(claude.clone());
+                    state.claude_limits = Some(synthetic_claude_limits());
+                    state.orientation = orientation;
+                    let text = render_screen_text(&mut state, width, height);
+                    let name = format!("usage-{view:?}-{width}x{height}-{orientation:?}.txt")
+                        .to_lowercase();
+                    std::fs::write(dir.join(name), text).expect("write dump");
+                }
             }
         }
+    }
+
+    fn claude_card_texts(state: &AppState) -> Vec<String> {
+        let now = now_unix_secs();
+        claude_limit_line_texts(&claude_limit_lines(state, now), 40, now)
+    }
+
+    #[test]
+    fn claude_limits_card_shows_setup_disabled_and_gauge_rows() {
+        let mut state = AppState::for_tests();
+        assert_eq!(claude_card_texts(&state), vec!["Loading...".to_string()]);
+
+        state.claude_limits_notice = Some("Not set up".to_string());
+        let setup = claude_card_texts(&state);
+        assert_eq!(setup[0], "Not set up");
+        assert_eq!(setup.last().map(String::as_str), Some("llmon statusline"));
+
+        state.claude_limits_mode = crate::app::ClaudeLimitsMode::Off;
+        assert_eq!(claude_card_texts(&state)[0], "Disabled");
+
+        state.claude_limits_mode = crate::app::ClaudeLimitsMode::OAuth;
+        state.claude_limits = Some(synthetic_claude_limits());
+        let lines = claude_limit_lines(&state, now_unix_secs());
+        let gauges = lines
+            .iter()
+            .filter_map(|line| match line {
+                ClaudeLimitLine::Gauge {
+                    label, segments, ..
+                } => Some((label.as_str(), *segments)),
+                ClaudeLimitLine::Text { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gauges,
+            vec![
+                ("5h", GaugeSegments::Hours),
+                ("7d", GaugeSegments::Days),
+                ("Opus", GaugeSegments::Days),
+            ]
+        );
+        let texts = claude_card_texts(&state);
+        assert!(texts[0].starts_with("5h  "), "{:?}", texts[0]);
+        assert!(texts[0].ends_with(" 42%  2h10m") || texts[0].ends_with(" 42%  2h09m"));
+        assert!(texts
+            .iter()
+            .all(|text| UnicodeWidthStr::width(text.as_str()) <= 40));
+        assert!(texts.iter().any(|text| text == "Extra 3.20 / 50.00 USD"));
+        assert!(texts.iter().any(|text| text.starts_with("OAuth 1m ago")));
+    }
+
+    #[test]
+    fn reset_countdown_is_compact() {
+        assert_eq!(format_reset_countdown(-5), "0m");
+        assert_eq!(format_reset_countdown(45 * 60), "45m");
+        assert_eq!(format_reset_countdown(2 * 3_600 + 5 * 60), "2h05m");
+        assert_eq!(format_reset_countdown(6 * 86_400 + 23 * 3_600), "6d23h");
     }
 
     #[test]
@@ -7772,7 +8331,7 @@ mod tests {
     #[test]
     fn token_chart_header_explains_the_slash_pair() {
         assert_eq!(
-            usage_chart_metric_label(UsageMetric::Tokens),
+            usage_chart_metric_label(UsageMetric::Tokens, Harness::Codex),
             "TOKENS (INPUT / NON-CACHED / OUTPUT)"
         );
     }
@@ -8942,6 +9501,10 @@ mod tests {
         );
     }
 
+    fn codex_row(input: u64, non_cached: u64, output: u64) -> TokenColumns {
+        [input, non_cached, output, 0]
+    }
+
     #[test]
     fn horizontal_token_columns_use_input_non_cached_and_output_semantics() {
         let system_locale = crate::locale::SystemLocale::default();
@@ -8956,17 +9519,11 @@ mod tests {
             agent_time_ms: 0,
             agent_runs: 0,
         };
-        let (input, non_cached, output) = usage_day_token_columns(&day);
-        assert_eq!((input, non_cached, output), (10_000, 2_000, 500));
-        let columns = horizontal_token_columns_widths(
-            &[input],
-            &[non_cached],
-            &[output],
-            u16::MAX,
-            formatter,
-        );
+        let row = usage_day_token_columns(&day, Harness::Codex);
+        assert_eq!(row, codex_row(10_000, 2_000, 500));
+        let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, formatter);
         assert_eq!(
-            format_horizontal_token_columns(input, non_cached, output, 24, columns, formatter),
+            format_horizontal_token_columns(row, 3, 24, columns, formatter),
             "10,000 / 2,000 / 500"
         );
         let fully_cached = UsageDay {
@@ -8976,7 +9533,10 @@ mod tests {
             total_tokens: 10_000,
             ..day.clone()
         };
-        assert_eq!(usage_day_token_columns(&fully_cached), (10_000, 0, 0));
+        assert_eq!(
+            usage_day_token_columns(&fully_cached, Harness::Codex),
+            codex_row(10_000, 0, 0)
+        );
         let output_only = UsageDay {
             input_tokens: 0,
             cache_read_tokens: 0,
@@ -8984,27 +9544,49 @@ mod tests {
             total_tokens: 500,
             ..day.clone()
         };
-        assert_eq!(usage_day_token_columns(&output_only), (0, 0, 500));
-        for (input, non_cached, output, expected) in [
-            (0, 0, 0, "0 / 0 / 0"),
-            (10_000, 0, 0, "10,000 / 0 / 0"),
-            (0, 0, 500, "0 / 0 / 500"),
+        assert_eq!(
+            usage_day_token_columns(&output_only, Harness::Codex),
+            codex_row(0, 0, 500)
+        );
+        for (row, expected) in [
+            (codex_row(0, 0, 0), "0 / 0 / 0"),
+            (codex_row(10_000, 0, 0), "10,000 / 0 / 0"),
+            (codex_row(0, 0, 500), "0 / 0 / 500"),
         ] {
             let width = expected.len() as u16;
-            let columns = horizontal_token_columns_widths(
-                &[input],
-                &[non_cached],
-                &[output],
-                u16::MAX,
-                formatter,
-            );
+            let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, formatter);
             assert_eq!(
-                format_horizontal_token_columns(
-                    input, non_cached, output, width, columns, formatter
-                ),
+                format_horizontal_token_columns(row, 3, width, columns, formatter),
                 expected
             );
         }
+    }
+
+    #[test]
+    fn claude_token_columns_show_input_cache_write_cache_read_and_output() {
+        let system_locale = crate::locale::SystemLocale::default();
+        let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
+        let day = UsageDay {
+            day: "2026-09-24".to_string(),
+            input_tokens: 2_000,
+            cache_write_tokens: 3_000,
+            cache_read_tokens: 8_000,
+            output_tokens: 500,
+            total_tokens: 13_500,
+            agent_time_ms: 0,
+            agent_runs: 0,
+        };
+        let row = usage_day_token_columns(&day, Harness::Claude);
+        assert_eq!(row, [2_000, 3_000, 8_000, 500]);
+        let columns = horizontal_token_columns_widths(&[row], 4, u16::MAX, formatter);
+        assert_eq!(
+            format_horizontal_token_columns(row, 4, 40, columns, formatter),
+            "2,000 / 3,000 / 8,000 / 500"
+        );
+        assert_eq!(
+            usage_chart_metric_label(UsageMetric::Tokens, Harness::Claude),
+            "TOKENS (INPUT / CACHE-WRITE / CACHE-READ / OUTPUT)"
+        );
     }
 
     #[test]
@@ -9012,43 +9594,27 @@ mod tests {
         let system_locale = crate::locale::SystemLocale::default();
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
         assert_eq!(right_align_token_cell("\u{754c}", 3), " \u{754c}");
-        let inputs = [0, 121_030_387, 403_643_361];
-        let non_cached = [0, 7_630_451, 15_714_273];
-        let outputs = [0, 8_681_443, 287_431_139];
-        let columns =
-            horizontal_token_columns_widths(&inputs, &non_cached, &outputs, u16::MAX, formatter);
-        let rows = inputs
+        let rows = [
+            codex_row(0, 0, 0),
+            codex_row(121_030_387, 7_630_451, 8_681_443),
+            codex_row(403_643_361, 15_714_273, 287_431_139),
+        ];
+        let columns = horizontal_token_columns_widths(&rows, 3, u16::MAX, formatter);
+        let rendered = rows
             .iter()
-            .zip(non_cached)
-            .zip(outputs)
-            .map(|((&input, non_cached), output)| {
-                format_horizontal_token_columns(
-                    input,
-                    non_cached,
-                    output,
-                    u16::MAX,
-                    columns,
-                    formatter,
-                )
-            })
+            .map(|row| format_horizontal_token_columns(*row, 3, u16::MAX, columns, formatter))
             .collect::<Vec<_>>();
-        assert_eq!(columns, Some((11, 10, 11)));
-        assert!(rows
+        assert_eq!(columns, Some([11, 10, 11, 0]));
+        assert!(rendered
             .iter()
-            .all(|row| row.find(" / ") == rows[0].find(" / ")));
-        assert!(rows
+            .all(|row| row.find(" / ") == rendered[0].find(" / ")));
+        assert!(rendered
             .iter()
-            .all(|row| row.rfind(" / ") == rows[0].rfind(" / ")));
+            .all(|row| row.rfind(" / ") == rendered[0].rfind(" / ")));
 
-        let tight = horizontal_token_columns_widths(
-            &[1_000_000],
-            &[2_000_000],
-            &[3_000_000],
-            15,
-            formatter,
-        );
-        let compact =
-            format_horizontal_token_columns(1_000_000, 2_000_000, 3_000_000, 15, tight, formatter);
+        let millions = codex_row(1_000_000, 2_000_000, 3_000_000);
+        let tight = horizontal_token_columns_widths(&[millions], 3, 15, formatter);
+        let compact = format_horizontal_token_columns(millions, 3, 15, tight, formatter);
         assert!(UnicodeWidthStr::width(compact.as_str()) <= 15);
         assert_eq!(compact.matches(" / ").count(), 2);
         assert_eq!(compact, "1M / 2M / 3M");
@@ -9058,64 +9624,45 @@ mod tests {
             DisplayStyle::SystemFull,
         ] {
             let mixed_formatter = DisplayFormatter::new(style, &system_locale);
-            let mixed_columns =
-                horizontal_token_columns_widths(&[1_000_000], &[0], &[500], 15, mixed_formatter);
+            let mixed = codex_row(1_000_000, 0, 500);
+            let mixed_columns = horizontal_token_columns_widths(&[mixed], 3, 15, mixed_formatter);
             assert_eq!(
-                format_horizontal_token_columns(
-                    1_000_000,
-                    0,
-                    500,
-                    15,
-                    mixed_columns,
-                    mixed_formatter,
-                ),
+                format_horizontal_token_columns(mixed, 3, 15, mixed_columns, mixed_formatter),
                 "1M / 0 / 500",
                 "{style:?}"
             );
         }
         assert_eq!(
-            horizontal_token_columns_widths(&inputs, &non_cached, &outputs, 8, formatter),
+            horizontal_token_columns_widths(&rows, 3, 8, formatter),
             None
         );
         assert_eq!(
-            format_horizontal_token_columns(1, 1, 0, 8, None, formatter),
+            format_horizontal_token_columns(codex_row(1, 1, 0), 3, 8, None, formatter),
             "\u{2026}"
         );
-        let one_cell_columns =
-            horizontal_token_columns_widths(&[999], &[999], &[999], 9, formatter);
+        let nines = codex_row(999, 999, 999);
+        let one_cell_columns = horizontal_token_columns_widths(&[nines], 3, 9, formatter);
         assert_eq!(
-            format_horizontal_token_columns(999, 999, 999, 9, one_cell_columns, formatter),
+            format_horizontal_token_columns(nines, 3, 9, one_cell_columns, formatter),
             "\u{2026} / \u{2026} / \u{2026}"
         );
 
         let full_formatter = DisplayFormatter::new(DisplayStyle::SystemFull, &system_locale);
-        let full_columns = horizontal_token_columns_widths(
-            &inputs,
-            &non_cached,
-            &outputs,
-            u16::MAX,
-            full_formatter,
-        );
-        let full = format_horizontal_token_columns(
-            inputs[2],
-            non_cached[2],
-            outputs[2],
-            u16::MAX,
-            full_columns,
-            full_formatter,
-        );
+        let full_columns = horizontal_token_columns_widths(&rows, 3, u16::MAX, full_formatter);
+        let full =
+            format_horizontal_token_columns(rows[2], 3, u16::MAX, full_columns, full_formatter);
         assert!(
             full.contains("403 643 361 / 15 714 273 / 287 431 139"),
             "{full:?}"
         );
         assert_eq!(
-            format_horizontal_token_columns(1, 1, 0, 8, None, full_formatter),
+            format_horizontal_token_columns(codex_row(1, 1, 0), 3, 8, None, full_formatter),
             "\u{2026}"
         );
-        let narrow_full =
-            horizontal_token_columns_widths(&[10_000], &[2_000], &[500], 9, full_formatter);
+        let small = codex_row(10_000, 2_000, 500);
+        let narrow_full = horizontal_token_columns_widths(&[small], 3, 9, full_formatter);
         assert_eq!(
-            format_horizontal_token_columns(10_000, 2_000, 500, 9, narrow_full, full_formatter),
+            format_horizontal_token_columns(small, 3, 9, narrow_full, full_formatter),
             "\u{2026} / \u{2026} / \u{2026}"
         );
     }

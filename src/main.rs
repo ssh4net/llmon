@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
 
-const USER_CONFIG_SCHEMA_VERSION: u32 = 3;
+const USER_CONFIG_SCHEMA_VERSION: u32 = 4;
 const USER_CONFIG_FILE_NAME: &str = "config.json";
 const DEFAULT_USAGE_DAYS: u32 = 30;
 const DEFAULT_REFRESH_USAGE_SECS: u64 = 300;
@@ -45,6 +45,8 @@ struct UserConfig {
     history_deep_max_depth: u8,
     history_catalog_max_candidates: usize,
     history_catalog_scan_budget_ms: u64,
+    /// Claude Code limits source: "statusline" (default), "oauth", or "off".
+    claude_limits: ClaudeLimitsArg,
 }
 
 impl Default for UserConfig {
@@ -68,6 +70,7 @@ impl Default for UserConfig {
             history_deep_max_depth: read::catalog::MAX_DEEP_DEPTH,
             history_catalog_max_candidates: DEFAULT_HISTORY_CATALOG_MAX_CANDIDATES,
             history_catalog_scan_budget_ms: DEFAULT_HISTORY_CATALOG_SCAN_BUDGET_MS,
+            claude_limits: ClaudeLimitsArg::Statusline,
         }
     }
 }
@@ -178,7 +181,8 @@ impl From<LiveLimitsArg> for app::LiveLimitsMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 enum ClaudeLimitsArg {
     /// Read the snapshot `llmon statusline` records (no credentials).
     Statusline,
@@ -328,9 +332,9 @@ struct Args {
     #[arg(long, hide = true)]
     dump_limits: bool,
 
-    /// Claude Code limits source.
-    #[arg(long, value_enum, default_value = "statusline", hide = true)]
-    claude_limits: ClaudeLimitsArg,
+    /// Claude Code limits source (default from config: statusline).
+    #[arg(long, value_enum)]
+    claude_limits: Option<ClaudeLimitsArg>,
 
     /// Harness for --dump-usage, --dump-history, and --print-sessions-dir.
     #[arg(long, value_enum, default_value = "codex", hide = true)]
@@ -349,7 +353,7 @@ async fn main() -> Result<()> {
     }
 
     if args.dump_limits {
-        let limits = match args.claude_limits {
+        let limits = match args.claude_limits.unwrap_or(ClaudeLimitsArg::Statusline) {
             ClaudeLimitsArg::Statusline => {
                 let home = resolve_llmon_home(args.llmon_home.clone())
                     .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
@@ -522,6 +526,12 @@ async fn main() -> Result<()> {
     }
 
     let config = app::Config {
+        claude_dir: providers::claude::resolve_claude_dir(args.claude_dir.clone()),
+        claude_limits_mode: match args.claude_limits.unwrap_or(user_config.claude_limits) {
+            ClaudeLimitsArg::Statusline => app::ClaudeLimitsMode::StatusLine,
+            ClaudeLimitsArg::Oauth => app::ClaudeLimitsMode::OAuth,
+            ClaudeLimitsArg::Off => app::ClaudeLimitsMode::Off,
+        },
         codex_bin: args.codex_bin.clone(),
         app_server_bin: args.app_server_bin.clone(),
         live_limits_mode: args.live_limits.into(),

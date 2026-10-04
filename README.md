@@ -29,8 +29,10 @@ generated tokens. Bar lengths and summary-card totals use input plus output.
   - Debian/Ubuntu: `sudo apt install musl-tools`
   - Required tool for x86_64 musl builds: `x86_64-linux-musl-gcc`
 
-Claude Code support is being added: usage, session history, and the limit
-sources below already work; the TUI views for them come next.
+Claude Code support is being added. The USAGE screen has a Claude Code view
+(`h` switches views): token usage with input / cache-write / cache-read /
+output columns, and a LIMITS card with gauges for the 5-hour, weekly, and
+per-model limits. The other screens still show Codex.
 
 ## Claude Code live limits
 
@@ -50,7 +52,11 @@ llmon statusline --wrap 'your-status-line-command'
 ```
 
 The snapshot is stored in `~/.llmon/limits.json` and updates while Claude
-Code runs. The command never fails Claude Code's status line: on any error it
+Code runs. `--claude-limits oauth` (or `"claude_limits": "oauth"` in
+`config.json`) reads the OAuth usage endpoint behind Claude Code's `/usage`
+instead, which adds per-model weekly limits and extra usage; the endpoint is
+undocumented and uses Claude Code's token, read per request and never stored.
+`--claude-limits off` disables Claude limits. The command never fails Claude Code's status line: on any error it
 prints a minimal line and exits 0. No credentials are read.
 
 ## Run
@@ -178,6 +184,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 
 ## Key bindings
 
+- `h` Switch the USAGE view between Codex and Claude Code (or click the pills in the header)
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)
 - `f` Toggle layout (Horz/Vert)

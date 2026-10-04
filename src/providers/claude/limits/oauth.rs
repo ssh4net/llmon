@@ -20,6 +20,8 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_CREDENTIALS_BYTES: u64 = 64 * 1024;
+/// Minimum interval between requests, regardless of the configured refresh.
+pub const MIN_REFRESH_SECS: u64 = 60;
 
 struct Credentials {
     access_token: String,

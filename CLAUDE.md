@@ -11,7 +11,8 @@ one TUI. The design, decisions, and phases are in `PLAN.md`; keep its
 The repo continues CoMon's git history: `master` is CoMon `c24855d` (comon
 0.5.8) renamed to llmon 0.1.0 (binary `llmon`, `~/.llmon`, `LLMON_HOME`,
 `llmon.db`). Usage, session history, and the limit sources support Codex and
-Claude Code; the app UI is still Codex-only (see `PLAN.md`).
+Claude Code. The USAGE screen has Codex and Claude views; the other screens
+are still Codex-only (see `PLAN.md`).
 
 `_handoff/sources/` is gitignored and holds read-only reference trees, each
 with its own git repo:
@@ -64,7 +65,11 @@ same layout; differences are noted per module.
   `AppEvent`s back. `AppState` holds all UI state. Key events map to per-screen
   command enums (`UsageCommand`, `ActivityCommand`, ...). Each frame the renderer
   registers `UiHitTarget` rects, and mouse clicks resolve against them to a
-  `UiClickAction`. UI preferences persist in `state.json`.
+  `UiClickAction`. UI preferences persist in `state.json`, including the
+  USAGE view (`HarnessView`, key `h`). The usage worker scans every harness
+  each refresh and sends `UsageUpdated(harness, snapshot)`; a separate worker
+  polls the Claude limits (status-line snapshot every 10 s, or OAuth at most
+  once a minute).
 - `harness.rs` - `Harness` enum (Codex, Claude) with the stable `key()` used
   in the cache and config. Per-harness behavior is dispatched with `match`,
   not trait objects.
@@ -73,7 +78,12 @@ same layout; differences are noted per module.
   summary/detail parsing (`history.rs`), and (Codex) fork replay baselines. Shared code reaches it through
   `HarnessParserState` / `HarnessParsePlan` in `usage/`.
 - `ui/` - `ui::render(frame, &mut AppState)` and all drawing. Most of it lives
-  in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`.
+  in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`. The USAGE
+  cards, chart, and top models draw a `UsagePanel` (harness + snapshot, kept
+  as `Arc` so the chart can borrow the state mutably). Per-harness parts
+  dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude
+  gauge rows reusing CoMon's segmented gauges and weekly pacing) and the token
+  columns (3 for Codex, 4 for Claude).
   To see a layout without a terminal, run
   `LLMON_RENDER_DUMP_DIR=<dir> cargo test render_dump -- --ignored`: it
   renders screens from synthetic data to text files (`AppState::for_tests()`).

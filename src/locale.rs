@@ -143,6 +143,10 @@ impl<'a> DisplayFormatter<'a> {
         self.localize_decimal(&format!("{:.1}", value))
     }
 
+    pub(crate) fn format_two_decimals(self, value: f64) -> String {
+        self.localize_decimal(&format!("{:.2}", value))
+    }
+
     pub(crate) fn format_chart_day(self, date: NaiveDate) -> String {
         if self.style == DisplayStyle::Classic {
             return format!(
