@@ -1,5 +1,6 @@
 //! Codex CLI: session logs under `CODEX_HOME`.
 
+pub(crate) mod history;
 pub(crate) mod rpc;
 pub(crate) mod usage;
 

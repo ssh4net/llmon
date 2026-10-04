@@ -1,10 +1,10 @@
 use crate::locale::{DisplayFormatter, DisplayStyle};
+use crate::providers::codex::history::load_session_detail;
 use crate::read::catalog::{
     CatalogProgress, CatalogScanPhase, CatalogSnapshot, ProjectViewMode, SOURCE_NOISY_TREE,
 };
 use crate::read::scan::{
-    load_session_detail, truncate_single_line, Catalog, ProjectRecord, SessionDetail,
-    SessionSummary,
+    truncate_single_line, Catalog, ProjectRecord, SessionDetail, SessionSummary,
 };
 use crate::usage::{
     format_compact_kmb, format_duration, normalize_project_key, LocalUsageSnapshot,
