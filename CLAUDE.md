@@ -10,8 +10,8 @@ one TUI. The design, decisions, and phases are in `PLAN.md`; keep its
 
 The repo continues CoMon's git history: `master` is CoMon `c24855d` (comon
 0.5.8) renamed to llmon 0.1.0 (binary `llmon`, `~/.llmon`, `LLMON_HOME`,
-`llmon.db`). The usage scanner and session history support Codex and Claude
-Code; the app UI and live limits are still Codex-only (see `PLAN.md`).
+`llmon.db`). Usage, session history, and the limit sources support Codex and
+Claude Code; the app UI is still Codex-only (see `PLAN.md`).
 
 `_handoff/sources/` is gitignored and holds read-only reference trees, each
 with its own git repo:
@@ -107,11 +107,15 @@ same layout; differences are noted per module.
   - `providers/codex/rpc.rs` spawns Codex App Server and calls
     `account/rateLimits/read` over stdio JSON-RPC, with line-size,
     pending-request, and timeout caps.
-  - To port from ClaudeMon: `limits/statusline.rs` is the
-    `claudemon statusline [--wrap]` subcommand. It writes `limits.json` atomically, must always exit 0, and
+  - `providers/claude/limits/statusline.rs` is the `llmon statusline [--wrap]`
+    subcommand. It writes `limits.json` atomically, must always exit 0, and
     must never break Claude Code's status line.
-  - To port from ClaudeMon: `limits/oauth.rs` reads an undocumented endpoint. It is opt-in,
-    and the token is read per request.
+  - `providers/claude/limits/oauth.rs` reads an undocumented endpoint
+    (field notes in `docs/sources.md`). It is opt-in, and the token is read
+    per request and never stored or refreshed.
+  - The Claude types (`providers::claude::limits::AccountRateLimits`) are
+    separate from the Codex App Server types until the UI unifies them.
+    `--dump-limits --claude-limits <statusline|oauth>` (hidden) prints them.
 - `locale.rs` - Classic, System Compact, and System Full number/date
   formatting (`DisplayFormatter`). It reads the OS locale through `libc` or
   `windows-sys`.

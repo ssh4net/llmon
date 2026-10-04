@@ -9,8 +9,7 @@ derived from CoMon) into one tool with a
 combined view and full per-harness views. See [PLAN.md](PLAN.md) for the
 design and phases, and `CHANGELOG.md` for release history.
 
-Status: early development. The code base is CoMon renamed to llmon; it
-currently supports Codex only:
+Status: early development. The TUI currently shows Codex only:
 
 - Local Codex usage stats (last 7/30 days, chart, top models) by scanning `CODEX_HOME/sessions`.
 - Local session-history browser grouped by project path, with session titles and prompt previews.
@@ -29,6 +28,30 @@ generated tokens. Bar lengths and summary-card totals use input plus output.
 - For portable Linux builds (`--musl`), install both the Rust musl target and a musl C compiler.
   - Debian/Ubuntu: `sudo apt install musl-tools`
   - Required tool for x86_64 musl builds: `x86_64-linux-musl-gcc`
+
+Claude Code support is being added: usage, session history, and the limit
+sources below already work; the TUI views for them come next.
+
+## Claude Code live limits
+
+Claude Code passes the current 5-hour and weekly limits to its status-line
+command. Point it at llmon in `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "llmon statusline" }
+}
+```
+
+To keep an existing status line, wrap it; its output is shown unchanged:
+
+```bash
+llmon statusline --wrap 'your-status-line-command'
+```
+
+The snapshot is stored in `~/.llmon/limits.json` and updates while Claude
+Code runs. The command never fails Claude Code's status line: on any error it
+prints a minimal line and exits 0. No credentials are read.
 
 ## Run
 

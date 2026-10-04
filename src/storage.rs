@@ -22,6 +22,39 @@ pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Writes `bytes` to a private temporary file next to `path` and renames it
+/// over `path`, so concurrent readers never observe a partial file.
+pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    ensure_private_dir(parent)?;
+    ensure_regular_file_or_missing(path, "file")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&temp_path)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| std::fs::rename(&temp_path, path));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("Unable to write {}", path.display()));
+    }
+    Ok(())
+}
+
 pub fn enforce_private_file_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {

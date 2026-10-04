@@ -8,7 +8,7 @@ mod ui;
 mod usage;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
@@ -178,6 +178,29 @@ impl From<LiveLimitsArg> for app::LiveLimitsMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ClaudeLimitsArg {
+    /// Read the snapshot `llmon statusline` records (no credentials).
+    Statusline,
+    /// Call the OAuth usage endpoint with Claude Code's token (opt-in).
+    Oauth,
+    /// No Claude Code limits.
+    Off,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Status-line bridge: set Claude Code's `statusLine.command` to
+    /// `llmon statusline`. Records the rate limits Claude Code reports and
+    /// prints a compact status line.
+    Statusline {
+        /// Existing status-line command to run with the same input; its output
+        /// is printed instead of the built-in line.
+        #[arg(long)]
+        wrap: Option<String>,
+    },
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "llmon",
@@ -185,6 +208,9 @@ impl From<LiveLimitsArg> for app::LiveLimitsMode {
     about = "Usage, limits, and session history TUI for coding-agent CLIs"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Launch with the session history screen active.
     #[arg(short = 'r', long = "read")]
     read_mode: bool,
@@ -297,6 +323,15 @@ struct Args {
     #[arg(long, hide = true)]
     dump_history: bool,
 
+    /// Fetch the Claude Code limits once from the --claude-limits source,
+    /// print them as JSON, and exit.
+    #[arg(long, hide = true)]
+    dump_limits: bool,
+
+    /// Claude Code limits source.
+    #[arg(long, value_enum, default_value = "statusline", hide = true)]
+    claude_limits: ClaudeLimitsArg,
+
     /// Harness for --dump-usage, --dump-history, and --print-sessions-dir.
     #[arg(long, value_enum, default_value = "codex", hide = true)]
     harness: HarnessArg,
@@ -305,6 +340,38 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(Command::Statusline { wrap }) = &args.command {
+        // Must stay fast and must never fail Claude Code's status line.
+        let home = resolve_llmon_home(args.llmon_home.clone());
+        providers::claude::limits::statusline::run(home.as_deref(), wrap.as_deref());
+        return Ok(());
+    }
+
+    if args.dump_limits {
+        let limits = match args.claude_limits {
+            ClaudeLimitsArg::Statusline => {
+                let home = resolve_llmon_home(args.llmon_home.clone())
+                    .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
+                providers::claude::limits::statusline::load(
+                    &home,
+                    providers::claude::limits::unix_now(),
+                )?
+            }
+            ClaudeLimitsArg::Oauth => {
+                let claude_dir = providers::claude::resolve_claude_dir(args.claude_dir.clone())
+                    .context("Unable to resolve the Claude Code config directory")?;
+                Some(providers::claude::limits::oauth::fetch(&claude_dir)?)
+            }
+            ClaudeLimitsArg::Off => None,
+        };
+        let json = limits
+            .as_ref()
+            .map(providers::claude::limits::limits_dump_json)
+            .unwrap_or(serde_json::Value::Null);
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
 
     if args.print_config_path {
         let llmon_home = resolve_llmon_home(args.llmon_home.clone())

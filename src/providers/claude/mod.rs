@@ -1,6 +1,7 @@
 //! Claude Code: session transcripts under the Claude config directory.
 
 pub(crate) mod history;
+pub(crate) mod limits;
 pub(crate) mod usage;
 
 use crate::usage::{is_uuid_like, session_cwd_identity};
