@@ -628,27 +628,27 @@ mod tests {
 
         write_session(
             &session_a,
-            r##"{"type":"session_meta","payload":{"id":"a","timestamp":"2026-03-16T08:30:22.974Z","cwd":"/mnt/e/GH/oiio-builder","model_provider":"openai"}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /mnt/e/GH/oiio-builder"}]}}
+            r##"{"type":"session_meta","payload":{"id":"a","timestamp":"2026-03-16T08:30:22.974Z","cwd":"/mnt/e/Work/demo-builder","model_provider":"openai"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /mnt/e/Work/demo-builder"}]}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show me the session history"}]}}
 "##,
         );
         write_session(
             &session_b,
-            r##"{"type":"session_meta","payload":{"id":"b","timestamp":"2026-03-16T09:30:22.974Z","cwd":"/mnt/e/gh/oiio-builder","model_provider":"openai"}}
+            r##"{"type":"session_meta","payload":{"id":"b","timestamp":"2026-03-16T09:30:22.974Z","cwd":"/mnt/e/work/demo-builder","model_provider":"openai"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list prompts"}]}}
 "##,
         );
 
         let catalog = build_catalog(&sessions).expect("catalog");
         assert_eq!(catalog.projects.len(), 2);
-        assert_eq!(catalog.projects[0].display_path, "/mnt/e/GH/oiio-builder");
+        assert_eq!(catalog.projects[0].display_path, "/mnt/e/Work/demo-builder");
         assert_eq!(catalog.projects[0].sessions.len(), 1);
         assert_eq!(
             catalog.projects[0].sessions[0].title,
             "show me the session history"
         );
-        assert_eq!(catalog.projects[1].display_path, "/mnt/e/gh/oiio-builder");
+        assert_eq!(catalog.projects[1].display_path, "/mnt/e/work/demo-builder");
         assert_eq!(catalog.projects[1].sessions[0].title, "list prompts");
 
         let _ = std::fs::remove_dir_all(root);
@@ -666,7 +666,7 @@ mod tests {
             &session,
             &format!(
                 "{}\n{}\n{}\n",
-                r#"{"type":"session_meta","payload":{"id":"a","timestamp":"2026-06-23T08:30:22.974Z","cwd":"/outside/Charter","model_provider":"openai"}}"#,
+                r#"{"type":"session_meta","payload":{"id":"a","timestamp":"2026-06-23T08:30:22.974Z","cwd":"/outside/Lantern","model_provider":"openai"}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"work on the project"}]}}"#,
                 serde_json::json!({
                     "type": "response_item",
@@ -685,7 +685,7 @@ mod tests {
 
         let catalog = build_catalog(&sessions).expect("catalog");
         assert_eq!(catalog.projects.len(), 1);
-        assert_eq!(catalog.projects[0].display_path, "/outside/Charter");
+        assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
         assert_eq!(catalog.projects[0].sessions.len(), 1);
 
         let _ = std::fs::remove_dir_all(root);
@@ -699,8 +699,8 @@ mod tests {
 
         let session = sessions.join("session.jsonl");
         let mut body = String::from(
-            r#"{"type":"session_meta","payload":{"id":"session","timestamp":"2026-07-26T08:00:00Z","cwd":"/outside/Charter"}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"work in Charter"}]}}
+            r#"{"type":"session_meta","payload":{"id":"session","timestamp":"2026-07-26T08:00:00Z","cwd":"/outside/Lantern"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"work in Lantern"}]}}
 "#,
         );
         for _ in 0..140 {
@@ -724,7 +724,7 @@ mod tests {
 
         let catalog = build_catalog(&root.join("sessions")).expect("catalog");
         assert_eq!(catalog.projects.len(), 1);
-        assert_eq!(catalog.projects[0].display_path, "/outside/Charter");
+        assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
         assert_eq!(catalog.projects[0].sessions[0].file_path, session);
 
         let _ = std::fs::remove_dir_all(root);
@@ -745,7 +745,7 @@ mod tests {
             body.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"noop\"}}\n");
         }
         body.push_str(
-            r#"{"type":"session_meta","payload":{"id":"late","timestamp":"2026-07-29T08:00:00Z","cwd":"/outside/Charter"}}
+            r#"{"type":"session_meta","payload":{"id":"late","timestamp":"2026-07-29T08:00:00Z","cwd":"/outside/Lantern"}}
 {"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"cwd":"/outside/nativefiledialog-extended"}}}
 "#,
         );
@@ -754,7 +754,7 @@ mod tests {
         let catalog = build_catalog(&root.join("sessions")).expect("catalog");
         assert_eq!(catalog.files_scanned, 1);
         assert_eq!(catalog.projects.len(), 1);
-        assert_eq!(catalog.projects[0].display_path, "/outside/Charter");
+        assert_eq!(catalog.projects[0].display_path, "/outside/Lantern");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -787,8 +787,8 @@ mod tests {
         let path = root.join("session.jsonl");
         write_session(
             &path,
-            r##"{"type":"session_meta","payload":{"id":"s","timestamp":"2026-03-16T08:30:22.974Z","cwd":"/mnt/w/VisualStudio/comon-cli","model_provider":"openai"}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /mnt/w/VisualStudio/comon-cli"}]}}
+            r##"{"type":"session_meta","payload":{"id":"s","timestamp":"2026-03-16T08:30:22.974Z","cwd":"/mnt/d/projects/demo-cli","model_provider":"openai"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /mnt/d/projects/demo-cli"}]}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show all prompts"}]}}
 {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}
 {"type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{}"}}

@@ -4496,9 +4496,9 @@ mod tests {
         let older_ms = now_ms - Duration::days(5).num_milliseconds();
         let newer_ms = now_ms - Duration::days(1).num_milliseconds();
 
-        let photonia = sessions_root.join("photonia.jsonl");
-        append_session_meta_line(&photonia, older_ms, "/outside/Photonia");
-        append_total_token_line(&photonia, older_ms + 100, 100, 0, 20);
+        let starling = sessions_root.join("starling.jsonl");
+        append_session_meta_line(&starling, older_ms, "/outside/Starling");
+        append_total_token_line(&starling, older_ms + 100, 100, 0, 20);
 
         let sfm = sessions_root.join("sfm.jsonl");
         append_session_meta_line(&sfm, newer_ms, "/outside/SFM");
@@ -4517,7 +4517,7 @@ mod tests {
         assert_eq!(snapshot.project_activity[0].cached_input_tokens, 150);
         assert_eq!(
             snapshot.project_activity[1].display_path,
-            "/outside/Photonia"
+            "/outside/Starling"
         );
         assert_eq!(snapshot.project_activity[1].total_tokens, 120);
         assert_eq!(snapshot.project_activity[1].cached_input_tokens, 0);
@@ -4673,7 +4673,7 @@ mod tests {
         let root = make_temp_dir("late-settings-owner");
         let codex_home = root.join("codex");
         let sessions_root = codex_home.join("sessions");
-        let project = root.join("Charter");
+        let project = root.join("Lantern");
         let external = root.join("nativefiledialog-extended");
         std::fs::create_dir_all(&sessions_root).expect("create sessions root");
         let now_ms = Utc::now().timestamp_millis();
@@ -4717,7 +4717,7 @@ mod tests {
         let root = make_temp_dir("late-meta-usage");
         let codex_home = root.join("codex");
         let sessions_root = codex_home.join("sessions");
-        let project = root.join("Charter");
+        let project = root.join("Lantern");
         std::fs::create_dir_all(&sessions_root).expect("create sessions root");
         let now_ms = Utc::now().timestamp_millis();
         let session = sessions_root.join("session.jsonl");
@@ -4753,7 +4753,7 @@ mod tests {
         let root = make_temp_dir("unresolved-owner-cache");
         let codex_home = root.join("codex");
         let sessions_root = codex_home.join("sessions");
-        let project = root.join("Charter");
+        let project = root.join("Lantern");
         std::fs::create_dir_all(&sessions_root).expect("create sessions root");
         let now_ms = Utc::now().timestamp_millis();
         let session = sessions_root.join("session.jsonl");
@@ -5416,12 +5416,12 @@ mod tests {
     #[test]
     fn project_keys_unify_wsl_unc_and_linux_paths() {
         assert_eq!(
-            normalize_project_key(r"\\wsl.localhost\Ubuntu\home\w0w\rustadmin-fps-diag\"),
-            normalize_project_key("/home/w0w/rustadmin-fps-diag")
+            normalize_project_key(r"\\wsl.localhost\Ubuntu\home\user\demo-project\"),
+            normalize_project_key("/home/user/demo-project")
         );
         assert_eq!(
-            normalize_project_key(r"\\wsl$\Ubuntu\home\w0w\rustadmin-fps-diag"),
-            "/home/w0w/rustadmin-fps-diag"
+            normalize_project_key(r"\\wsl$\Ubuntu\home\user\demo-project"),
+            "/home/user/demo-project"
         );
     }
 
@@ -5485,14 +5485,14 @@ mod tests {
             &session,
             serde_json::json!({
                 "type": "session_meta",
-                "payload": {"id": expected_id, "cwd": "/outside/Charter"}
+                "payload": {"id": expected_id, "cwd": "/outside/Lantern"}
             }),
         );
 
         let owner = resolve_session_owner(&session)
             .expect("resolve owner")
             .expect("recovered owner");
-        assert_eq!(owner.cwd, "/outside/Charter");
+        assert_eq!(owner.cwd, "/outside/Lantern");
         assert_eq!(owner.source, SessionOwnerSource::SessionMeta);
 
         let _ = std::fs::remove_dir_all(root);
@@ -5588,8 +5588,8 @@ mod tests {
     #[test]
     fn windows_drive_path_maps_to_wsl_mount() {
         assert_eq!(
-            normalize_cross_platform_path(r"C:\Users\w0w\project"),
-            Some(PathBuf::from("/mnt/c/Users/w0w/project"))
+            normalize_cross_platform_path(r"C:\Users\user\project"),
+            Some(PathBuf::from("/mnt/c/Users/user/project"))
         );
     }
 
@@ -5597,12 +5597,12 @@ mod tests {
     #[test]
     fn workspace_filter_matches_normalized_windows_session_cwd() {
         assert!(path_matches_workspace(
-            r"C:\Users\w0w\project\src",
-            Path::new("/mnt/c/Users/w0w/project")
+            r"C:\Users\user\project\src",
+            Path::new("/mnt/c/Users/user/project")
         ));
         assert!(!path_matches_workspace(
-            r"C:\Users\w0w\project-other",
-            Path::new("/mnt/c/Users/w0w/project")
+            r"C:\Users\user\project-other",
+            Path::new("/mnt/c/Users/user/project")
         ));
     }
 

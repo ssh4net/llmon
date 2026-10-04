@@ -113,7 +113,7 @@ roots you intend to scan, for example:
 
 ```json
 {
-  "history_project_roots": ["/Volumes/Dev/dev"]
+  "history_project_roots": ["/path/to/projects"]
 }
 ```
 

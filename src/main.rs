@@ -521,7 +521,7 @@ mod tests {
         let path = comon_home.join(USER_CONFIG_FILE_NAME);
         let legacy = serde_json::json!({
             "schema_version": 2,
-            "history_project_roots": ["/Volumes/Dev/dev"]
+            "history_project_roots": ["/Volumes/Ext/src"]
         });
         crate::storage::write_private_file(
             &path,
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(migrated.schema_version, USER_CONFIG_SCHEMA_VERSION);
         assert_eq!(
             migrated.history_project_roots,
-            vec![PathBuf::from("/Volumes/Dev/dev")]
+            vec![PathBuf::from("/Volumes/Ext/src")]
         );
 
         let _ = std::fs::remove_dir_all(comon_home);

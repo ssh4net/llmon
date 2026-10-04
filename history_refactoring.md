@@ -2,7 +2,7 @@
 
 Status: **implemented on `history`** (cache schema **v14**)
 Date: 2026-07-29  
-Sources: comon local scan/cache; Codex tree at `/mnt/e/GH/codex`; local audit of `~/.codex/sessions`
+Sources: comon local scan/cache; a local Codex source checkout; local audit of `~/.codex/sessions`
 
 ## Goal
 

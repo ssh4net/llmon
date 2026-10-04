@@ -1680,21 +1680,21 @@ mod tests {
     #[test]
     fn strict_project_labels_keep_paths_and_truncate_from_the_left() {
         let project = strict_project(
-            "/Volumes/Dev/dev/Photonia",
-            session("/sessions/photonia.jsonl", "/Volumes/Dev/dev/Photonia"),
+            "/Volumes/Ext/src/Starling",
+            session("/sessions/starling.jsonl", "/Volumes/Ext/src/Starling"),
         );
 
         assert_eq!(
             project_list_label(&project, ProjectViewMode::Strict, 80),
-            "/Volumes/Dev/dev/Photonia"
+            "/Volumes/Ext/src/Starling"
         );
         assert_eq!(
             project_list_label(&project, ProjectViewMode::Strict, 18),
-            ".../dev/Photonia"
+            ".../src/Starling"
         );
         assert_eq!(
             project_list_label(&project, ProjectViewMode::Deep, 18),
-            "Photonia"
+            "Starling"
         );
     }
 
@@ -1704,12 +1704,12 @@ mod tests {
             sessions_dir: PathBuf::from("/sessions"),
             projects: vec![
                 strict_project(
-                    "/Volumes/Dev/dev/Zeta",
-                    session("/sessions/z.jsonl", "/Volumes/Dev/dev/Zeta"),
+                    "/Volumes/Ext/src/Zeta",
+                    session("/sessions/z.jsonl", "/Volumes/Ext/src/Zeta"),
                 ),
                 strict_project(
-                    "/Volumes/Dev/dev/Alpha",
-                    session("/sessions/a.jsonl", "/Volumes/Dev/dev/Alpha"),
+                    "/Volumes/Ext/src/Alpha",
+                    session("/sessions/a.jsonl", "/Volumes/Ext/src/Alpha"),
                 ),
             ],
             files_scanned: 2,
@@ -1723,7 +1723,7 @@ mod tests {
                 .iter()
                 .map(|project| project.display_path.as_str())
                 .collect::<Vec<_>>(),
-            ["/Volumes/Dev/dev/Alpha", "/Volumes/Dev/dev/Zeta"]
+            ["/Volumes/Ext/src/Alpha", "/Volumes/Ext/src/Zeta"]
         );
     }
 

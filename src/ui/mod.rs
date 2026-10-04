@@ -9019,7 +9019,7 @@ mod tests {
 
     #[test]
     fn activity_project_name_uses_path_leaf() {
-        assert_eq!(activity_project_name("/tmp/Photonia"), "Photonia");
+        assert_eq!(activity_project_name("/tmp/Starling"), "Starling");
         assert_eq!(activity_project_name(r"C:\src\SFM"), "SFM");
     }
 
