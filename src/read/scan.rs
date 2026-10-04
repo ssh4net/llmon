@@ -567,6 +567,68 @@ fn is_meaningful_user_text(text: &str) -> bool {
     true
 }
 
+/// The catalog with every session's metadata and detail counts as JSON, for
+/// `--dump-history`. Like `--dump-usage`, the field set is a regression
+/// contract. Turn texts are reduced to counts; titles are kept because title
+/// selection is part of what the check covers.
+pub(crate) fn catalog_dump_json(catalog: &Catalog) -> Value {
+    let projects: Vec<Value> = catalog
+        .projects
+        .iter()
+        .map(|project| {
+            let sessions: Vec<Value> = project
+                .sessions
+                .iter()
+                .map(|session| {
+                    let detail = load_session_detail(&session.file_path).ok().map(|detail| {
+                        serde_json::json!({
+                            "meaningful_user_turns": detail.meaningful_user_turns.len(),
+                            "all_user_turns": detail.all_user_turns.len(),
+                            "assistant_messages": detail.assistant_messages,
+                            "tool_calls": detail.tool_calls,
+                            "tool_outputs": detail.tool_outputs,
+                            "input_images": detail.input_images,
+                            "total_tokens": detail.total_tokens,
+                            "input_tokens": detail.input_tokens,
+                            "output_tokens": detail.output_tokens,
+                            "reasoning_encrypted": detail.reasoning_encrypted,
+                        })
+                    });
+                    serde_json::json!({
+                        "file": session.file_path.display().to_string(),
+                        "session_id": session.session_id,
+                        "cwd": session.cwd,
+                        "title": session.title,
+                        "started_at_raw": session.started_at_raw,
+                        "started_at_label": session.started_at_label,
+                        "started_at_sort_key_ms": session.started_at_sort_key_ms,
+                        "git_branch": session.git_branch,
+                        "git_commit": session.git_commit,
+                        "repo_url": session.repo_url,
+                        "model_provider": session.model_provider,
+                        "model": session.model,
+                        "detail": detail,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "stable_id": project.stable_id,
+                "logical_name": project.logical_name,
+                "display_path": project.display_path,
+                "checkouts": project.checkouts,
+                "owner_session_count": project.owner_session_count,
+                "sessions": sessions,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "sessions_dir": catalog.sessions_dir.display().to_string(),
+        "files_scanned": catalog.files_scanned,
+        "files_skipped": catalog.files_skipped,
+        "projects": projects,
+    })
+}
+
 pub(crate) fn truncate_single_line(input: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();

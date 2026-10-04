@@ -292,6 +292,11 @@ struct Args {
     #[arg(long, hide = true)]
     dump_usage: bool,
 
+    /// Build the session history catalog once, print it with each session's
+    /// detail counts as JSON, and exit.
+    #[arg(long, hide = true)]
+    dump_history: bool,
+
     /// Harness whose usage --dump-usage prints.
     #[arg(long, value_enum, default_value = "codex", hide = true)]
     harness: HarnessArg,
@@ -313,6 +318,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let read_config = read::build_config(args.codex_home.clone(), args.sessions_dir.clone())?;
+    if args.dump_history {
+        let catalog = read::scan::build_catalog(&read_config.sessions_dir)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&read::scan::catalog_dump_json(&catalog))?
+        );
+        return Ok(());
+    }
 
     let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
