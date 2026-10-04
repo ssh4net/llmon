@@ -74,6 +74,9 @@ same layout; differences are noted per module.
   `HarnessParserState` / `HarnessParsePlan` in `usage/`.
 - `ui/` - `ui::render(frame, &mut AppState)` and all drawing. Most of it lives
   in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`.
+  To see a layout without a terminal, run
+  `LLMON_RENDER_DUMP_DIR=<dir> cargo test render_dump -- --ignored`: it
+  renders screens from synthetic data to text files (`AppState::for_tests()`).
 - `usage/` - the shared scanner: log discovery, scan planning, and the SQLite scan
   cache (`llmon.db`). The cache stores per-file byte offsets and parser state
   so a refresh resumes mid-file. `ScanLimits` bounds each refresh by file

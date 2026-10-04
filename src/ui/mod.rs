@@ -7242,6 +7242,101 @@ fn inset_with_border_and_padding(area: Rect, padding: Padding) -> Rect {
 mod tests {
     use super::*;
 
+    /// Renders the whole frame and returns it as text, one line per row.
+    fn render_screen_text(state: &mut AppState, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal.draw(|frame| render(frame, state)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::with_capacity(usize::from(width + 1) * usize::from(height));
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Usage snapshot from synthetic Codex logs: one session per day for the
+    /// last `days` days, with token counts that vary by day.
+    fn synthetic_codex_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
+        let root =
+            std::env::temp_dir().join(format!("llmon-ui-codex-{}-{}", std::process::id(), days));
+        let _ = std::fs::remove_dir_all(&root);
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).expect("create sessions");
+        let now = Utc::now();
+        for day in 0..days {
+            let start = now - chrono::Duration::days(day) - chrono::Duration::minutes(30);
+            let path = sessions.join(format!("session-{day}.jsonl"));
+            let base = 1_000 * (1 + (day * 7919) % 97);
+            let lines = [
+                serde_json::json!({
+                    "type": "session_meta",
+                    "timestamp": start.to_rfc3339(),
+                    "payload": {"id": format!("s{day}"), "timestamp": start.to_rfc3339(),
+                        "cwd": format!("/work/project-{}", day % 3)}
+                }),
+                serde_json::json!({
+                    "type": "turn_context",
+                    "timestamp": start.to_rfc3339(),
+                    "payload": {"model": if day % 4 == 0 { "gpt-test-mini" } else { "gpt-test" }}
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": (start + chrono::Duration::seconds(40)).to_rfc3339(),
+                    "payload": {"type": "agent_message", "message": "ok"}
+                }),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "timestamp": (start + chrono::Duration::seconds(60)).to_rfc3339(),
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {
+                        "input_tokens": base * 10,
+                        "cached_input_tokens": base * 7,
+                        "output_tokens": base
+                    }}}
+                }),
+            ];
+            let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(&path, body).expect("write session");
+        }
+        let snapshot = crate::usage::compute_snapshot(
+            crate::harness::Harness::Codex,
+            30,
+            &root,
+            None,
+            crate::usage::ScanLimits::default(),
+            None,
+        )
+        .expect("synthetic snapshot");
+        let _ = std::fs::remove_dir_all(root);
+        snapshot
+    }
+
+    /// Writes USAGE screen renderings to `$LLMON_RENDER_DUMP_DIR` for manual
+    /// layout checks: `LLMON_RENDER_DUMP_DIR=/tmp/x cargo test render_dump -- --ignored`.
+    #[test]
+    #[ignore]
+    fn render_dump_usage_screens() {
+        let Ok(dir) = std::env::var("LLMON_RENDER_DUMP_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("create dump dir");
+        let snapshot = synthetic_codex_snapshot(45);
+        for (width, height) in [(200_u16, 50_u16), (120, 40), (90, 32)] {
+            for orientation in [ChartOrientation::Horizontal, ChartOrientation::Vertical] {
+                let mut state = AppState::for_tests();
+                state.usage = Some(snapshot.clone());
+                state.orientation = orientation;
+                let text = render_screen_text(&mut state, width, height);
+                let name = format!("usage-{width}x{height}-{orientation:?}.txt").to_lowercase();
+                std::fs::write(dir.join(name), text).expect("write dump");
+            }
+        }
+    }
+
     #[test]
     fn viewport_bounds_move_from_newest_to_older_periods() {
         assert_eq!(viewport_bounds(30, 10, 0), (20, 30));

@@ -2708,6 +2708,83 @@ fn unix_time_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+impl AppState {
+    /// Default settings and no data, for render tests.
+    pub(crate) fn for_tests() -> Self {
+        let defaults = PersistedUiState::default_for_workspace(None);
+        let catalog = crate::read::scan::Catalog {
+            sessions_dir: PathBuf::from("/sessions"),
+            projects: Vec::new(),
+            files_scanned: 0,
+            files_skipped: 0,
+        };
+        Self {
+            active_screen: ActiveScreen::Usage,
+            metric: defaults.metric,
+            range: defaults.range,
+            usage_zone: defaults.usage_zone,
+            orientation: defaults.orientation,
+            api_stat_grouping: defaults.api_stat_grouping,
+            api_stat_graph: defaults.api_stat_graph,
+            api_stat_orientation: defaults.api_stat_orientation,
+            usage_period_offset: 0,
+            usage_visible_periods: 0,
+            usage_total_periods: 0,
+            usage_scroll_area: None,
+            api_stat_period_offset: 0,
+            api_stat_visible_periods: 0,
+            api_stat_total_periods: 0,
+            api_stat_scroll_area: None,
+            activity_project_limit: defaults.activity_project_limit,
+            activity_week_offset: 0,
+            activity_visible_weeks: 0,
+            activity_total_weeks: crate::usage::ACTIVITY_TIMELINE_WEEKS,
+            activity_scroll_area: None,
+            show_help: false,
+            workspace_path: None,
+            no_sessions_confirm_open: false,
+            no_sessions_confirm_dismissed: false,
+            quit_confirm_open: false,
+            quit_confirm_yes_selected: false,
+            quit_dont_ask_again: false,
+            skip_quit_confirmation: false,
+            quit_preference_prompt: None,
+            history_project_roots: Vec::new(),
+            history_catalog_max_depth: crate::read::catalog::DEFAULT_DEEP_DEPTH,
+            history_catalog_max_directories: 10_000,
+            history_catalog_config_path: PathBuf::from("/llmon-test/config.json"),
+            history_catalog_scan_prompt: false,
+            display_style: defaults.display_style,
+            accent_theme: defaults.accent_theme,
+            bar_fill_mode: defaults.bar_fill_mode,
+            system_locale: SystemLocale::default(),
+            mouse_position: None,
+            ui_hit_targets: Vec::new(),
+            usage: None,
+            usage_updated_at: None,
+            usage_error: None,
+            limits: None,
+            limits_updated_at: None,
+            limits_error: None,
+            limits_notice: None,
+            limits_enabled: true,
+            limit_reset_confirm_open: false,
+            limit_reset_confirm_yes_selected: false,
+            limit_reset_in_flight: false,
+            limit_reset_cooldown_until: None,
+            limit_reset_notice: None,
+            limit_reset_error: None,
+            account_usage: None,
+            account_usage_updated_at: None,
+            account_usage_error: None,
+            account_usage_notice: None,
+            account_usage_enabled: true,
+            read_browser: crate::read::tui::BrowserState::new(catalog),
+        }
+    }
+}
+
 impl AppState {
     pub(crate) fn formatter(&self) -> DisplayFormatter<'_> {
         DisplayFormatter::new(self.display_style, &self.system_locale)
