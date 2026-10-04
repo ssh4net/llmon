@@ -481,12 +481,6 @@ struct ParserState {
     fork_live_started: bool,
     #[serde(default)]
     owner_source: Option<SessionOwnerSource>,
-    #[serde(default)]
-    project_daily: HashMap<String, HashMap<String, DailyTotals>>,
-    #[serde(default)]
-    project_model_totals_by_day: HashMap<String, HashMap<String, HashMap<String, i64>>>,
-    #[serde(default)]
-    project_last_activity_ms: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1576,19 +1570,13 @@ fn build_project_usage_summaries(
         }
         for cwd in entry_project_paths(entry) {
             let key = normalize_project_key(&cwd);
-            let project = projects.entry(key).or_default();
-            prefer_project_display_path(&mut project.display_path, &cwd);
-            project.indexed_files = project.indexed_files.saturating_add(1);
-        }
-
-        for (cwd, project_daily) in &entry.parser_state.project_daily {
-            let key = normalize_project_key(cwd);
             if key.is_empty() {
                 continue;
             }
             let project = projects.entry(key).or_default();
-            prefer_project_display_path(&mut project.display_path, cwd);
-            for (cache_key, totals) in project_daily {
+            prefer_project_display_path(&mut project.display_path, &cwd);
+            project.indexed_files = project.indexed_files.saturating_add(1);
+            for (cache_key, totals) in &entry.daily {
                 let Some((UsageZone::Local, _)) = split_cache_day_key(cache_key) else {
                     continue;
                 };
@@ -1700,70 +1688,6 @@ fn fallback_project_identity(session_cwd: Option<&str>) -> Option<String> {
     session_cwd.and_then(session_cwd_identity)
 }
 
-fn project_for_session_owner(session_cwd: Option<&str>) -> Option<String> {
-    fallback_project_identity(session_cwd)
-}
-
-fn add_project_token_delta(
-    parser_state: &mut ParserState,
-    project: &str,
-    timestamp_ms: i64,
-    delta: UsageTotals,
-    model: &str,
-) {
-    for zone in [UsageZone::Local, UsageZone::Utc] {
-        let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) else {
-            continue;
-        };
-        let totals = parser_state
-            .project_daily
-            .entry(project.to_string())
-            .or_default()
-            .entry(day_key.clone())
-            .or_default();
-        totals.input = totals.input.saturating_add(delta.input);
-        totals.cached = totals.cached.saturating_add(delta.cached.min(delta.input));
-        totals.output = totals.output.saturating_add(delta.output);
-
-        let models = parser_state
-            .project_model_totals_by_day
-            .entry(project.to_string())
-            .or_default()
-            .entry(day_key)
-            .or_default();
-        add_model_tokens_limited(models, model.to_string(), delta.input + delta.output);
-    }
-}
-
-fn add_project_agent_run(parser_state: &mut ParserState, project: &str, timestamp_ms: i64) {
-    let daily = parser_state
-        .project_daily
-        .entry(project.to_string())
-        .or_default();
-    add_agent_run(daily, timestamp_ms);
-}
-
-fn track_project_activity(parser_state: &mut ParserState, project: &str, timestamp_ms: i64) {
-    let previous = parser_state.project_last_activity_ms.get(project).copied();
-    if let Some(previous) = previous {
-        let delta = timestamp_ms - previous;
-        if delta > 0 && delta <= MAX_ACTIVITY_GAP_MS {
-            let daily = parser_state
-                .project_daily
-                .entry(project.to_string())
-                .or_default();
-            for zone in [UsageZone::Local, UsageZone::Utc] {
-                if let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) {
-                    daily.entry(day_key).or_default().agent_ms += delta;
-                }
-            }
-        }
-    }
-    parser_state
-        .project_last_activity_ms
-        .insert(project.to_string(), timestamp_ms);
-}
-
 fn add_model_tokens_limited(
     model_totals: &mut HashMap<String, i64>,
     model: String,
@@ -1806,34 +1730,7 @@ fn apply_cached_file_entry(
         *matched_session_files = matched_session_files.saturating_add(1);
     }
 
-    let mut filtered_daily: HashMap<String, DailyTotals> = HashMap::new();
-    let mut filtered_models: HashMap<String, HashMap<String, i64>> = HashMap::new();
-    if let Some(filter) = workspace_path {
-        for (project, per_day) in &entry.parser_state.project_daily {
-            if !path_matches_workspace(project, filter) {
-                continue;
-            }
-            merge_daily_totals(&mut filtered_daily, per_day);
-        }
-        for (project, per_day) in &entry.parser_state.project_model_totals_by_day {
-            if !path_matches_workspace(project, filter) {
-                continue;
-            }
-            merge_model_totals_by_day(&mut filtered_models, per_day);
-        }
-    }
-    let selected_daily = if workspace_path.is_some() {
-        &filtered_daily
-    } else {
-        &entry.daily
-    };
-    let selected_models = if workspace_path.is_some() {
-        &filtered_models
-    } else {
-        &entry.model_totals_by_day
-    };
-
-    for (cache_key, totals) in selected_daily {
+    for (cache_key, totals) in &entry.daily {
         let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
             continue;
         };
@@ -1849,7 +1746,7 @@ fn apply_cached_file_entry(
         dst.agent_runs += totals.agent_runs;
     }
 
-    for (cache_key, per_day_models) in selected_models {
+    for (cache_key, per_day_models) in &entry.model_totals_by_day {
         let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
             continue;
         };
@@ -1865,37 +1762,8 @@ fn apply_cached_file_entry(
         }
     }
 
-    for (project, project_daily) in &entry.parser_state.project_daily {
-        if workspace_path.is_some_and(|filter| !path_matches_workspace(project, filter)) {
-            continue;
-        }
-        apply_project_activity(project, project_daily, daily, project_activity);
-    }
-}
-
-fn merge_daily_totals(
-    target: &mut HashMap<String, DailyTotals>,
-    source: &HashMap<String, DailyTotals>,
-) {
-    for (day, totals) in source {
-        let dst = target.entry(day.clone()).or_default();
-        dst.input = dst.input.saturating_add(totals.input);
-        dst.cached = dst.cached.saturating_add(totals.cached);
-        dst.output = dst.output.saturating_add(totals.output);
-        dst.agent_ms = dst.agent_ms.saturating_add(totals.agent_ms);
-        dst.agent_runs = dst.agent_runs.saturating_add(totals.agent_runs);
-    }
-}
-
-fn merge_model_totals_by_day(
-    target: &mut HashMap<String, HashMap<String, i64>>,
-    source: &HashMap<String, HashMap<String, i64>>,
-) {
-    for (day, models) in source {
-        let dst = target.entry(day.clone()).or_default();
-        for (model, tokens) in models {
-            add_model_tokens_limited(dst, model.clone(), *tokens);
-        }
+    for project in entry_project_paths(entry) {
+        apply_project_activity(&project, &entry.daily, daily, project_activity);
     }
 }
 
@@ -2037,7 +1905,6 @@ fn parse_file_summary(
     let uses_parent_baseline = fork_resolution.is_fork();
     let parent_baseline = fork_resolution.baseline;
     let mut fork_live_started = parser_state.fork_live_started;
-    let owner_project = project_for_session_owner(session_cwd.as_deref());
     let mut seen_runs: HashSet<i64> = HashSet::new();
     let mut line = String::new();
     let mut fully_parsed = true;
@@ -2115,14 +1982,8 @@ fn parse_file_summary(
                 if let Some(timestamp_ms) = event_timestamp_ms {
                     if seen_runs.insert(timestamp_ms) {
                         add_agent_run(&mut daily, timestamp_ms);
-                        if let Some(project) = owner_project.as_deref() {
-                            add_project_agent_run(&mut parser_state, project, timestamp_ms);
-                        }
                     }
                     track_activity(&mut daily, &mut last_activity_ms, timestamp_ms);
-                    if let Some(project) = owner_project.as_deref() {
-                        track_project_activity(&mut parser_state, project, timestamp_ms);
-                    }
                 }
                 continue;
             }
@@ -2130,9 +1991,6 @@ fn parse_file_summary(
             if payload_type == Some("agent_reasoning") {
                 if let Some(timestamp_ms) = event_timestamp_ms {
                     track_activity(&mut daily, &mut last_activity_ms, timestamp_ms);
-                    if let Some(project) = owner_project.as_deref() {
-                        track_project_activity(&mut parser_state, project, timestamp_ms);
-                    }
                 }
                 continue;
             }
@@ -2238,8 +2096,6 @@ fn parse_file_summary(
                 continue;
             }
 
-            let attributed_project = owner_project.as_deref();
-
             if delta.input == 0 && delta.cached == 0 && delta.output == 0 {
                 continue;
             }
@@ -2250,15 +2106,6 @@ fn parse_file_summary(
                     .clone()
                     .or_else(|| extract_model_from_token_count(&value))
                     .unwrap_or_else(|| "unknown".to_string());
-                if let Some(project) = attributed_project {
-                    add_project_token_delta(
-                        &mut parser_state,
-                        project,
-                        timestamp_ms,
-                        delta,
-                        &model,
-                    );
-                }
                 for zone in [UsageZone::Local, UsageZone::Utc] {
                     let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) else {
                         continue;
@@ -2280,9 +2127,6 @@ fn parse_file_summary(
 
             if let Some(timestamp_ms) = timestamp_ms {
                 track_activity(&mut daily, &mut last_activity_ms, timestamp_ms);
-                if let Some(project) = attributed_project {
-                    track_project_activity(&mut parser_state, project, timestamp_ms);
-                }
             }
             continue;
         }
@@ -2305,21 +2149,12 @@ fn parse_file_summary(
                 if let Some(timestamp_ms) = event_timestamp_ms {
                     if seen_runs.insert(timestamp_ms) {
                         add_agent_run(&mut daily, timestamp_ms);
-                        if let Some(project) = owner_project.as_deref() {
-                            add_project_agent_run(&mut parser_state, project, timestamp_ms);
-                        }
                     }
                     track_activity(&mut daily, &mut last_activity_ms, timestamp_ms);
-                    if let Some(project) = owner_project.as_deref() {
-                        track_project_activity(&mut parser_state, project, timestamp_ms);
-                    }
                 }
             } else if payload_type != Some("message") {
                 if let Some(timestamp_ms) = event_timestamp_ms {
                     track_activity(&mut daily, &mut last_activity_ms, timestamp_ms);
-                    if let Some(project) = owner_project.as_deref() {
-                        track_project_activity(&mut parser_state, project, timestamp_ms);
-                    }
                 }
             }
         }
