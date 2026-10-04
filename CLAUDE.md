@@ -64,13 +64,21 @@ same layout; differences are noted per module.
   command enums (`UsageCommand`, `ActivityCommand`, ...). Each frame the renderer
   registers `UiHitTarget` rects, and mouse clicks resolve against them to a
   `UiClickAction`. UI preferences persist in `state.json`.
+- `harness.rs` - `Harness` enum (Codex so far) with the stable `key()` used
+  in the cache and config. Per-harness behavior is dispatched with `match`,
+  not trait objects.
+- `providers/<harness>/` - everything specific to one CLI: home resolution,
+  log parser and its `ParserState`, session owner resolution, and (Codex)
+  fork replay baselines. Shared code reaches it through
+  `HarnessParserState` / `HarnessParsePlan` in `usage/`.
 - `ui/` - `ui::render(frame, &mut AppState)` and all drawing. Most of it lives
   in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`.
-- `usage/` - log discovery, incremental JSONL parsing, and the SQLite scan
+- `usage/` - the shared scanner: log discovery, scan planning, and the SQLite scan
   cache (`llmon.db`). The cache stores per-file byte offsets and parser state
   so a refresh resumes mid-file. `ScanLimits` bounds each refresh by file
-  count, bytes, line size, and time. An unterminated last line is left for the
-  next refresh. Rows are keyed by `(harness, file_path)`. Each harness has
+  count, bytes, line size, and time. The Codex parser consumes a partial last
+  line (its cumulative token totals make up for a lost event, but a run can be
+  missed); the Claude parser must leave it for the next refresh. Rows are keyed by `(harness, file_path)`. Each harness has
   its own cache schema version (for example `CODEX_CACHE_SCHEMA_VERSION`);
   bump it whenever that parser or its cached aggregates change meaning, and
   only that harness's rows are rebuilt. `SCAN_CACHE_DB_LAYOUT_VERSION` covers

@@ -2,6 +2,7 @@ mod app;
 mod codex_rpc;
 mod harness;
 mod locale;
+mod providers;
 mod read;
 mod storage;
 mod ui;
@@ -325,7 +326,7 @@ async fn main() -> Result<()> {
         .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
     crate::storage::ensure_private_dir(&llmon_home)?;
     let user_config = load_or_bootstrap_user_config(&llmon_home)?;
-    let codex_home = usage::resolve_codex_home(args.codex_home.clone())
+    let codex_home = providers::codex::resolve_codex_home(args.codex_home.clone())
         .context("Unable to resolve CODEX_HOME")?;
 
     let usage_days = args
@@ -391,6 +392,7 @@ async fn main() -> Result<()> {
 
     if args.dump_usage {
         let snapshot = usage::compute_snapshot(
+            harness::Harness::Codex,
             usage_days,
             &codex_home,
             project.as_deref(),

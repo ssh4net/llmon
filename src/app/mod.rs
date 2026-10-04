@@ -832,6 +832,7 @@ async fn run_inner(
                     let scan_cache_db_path = scan_cache_db_path.clone();
                     move || {
                         crate::usage::compute_snapshot(
+                            crate::harness::Harness::Codex,
                             usage_days,
                             &codex_home,
                             workspace_path.as_deref(),

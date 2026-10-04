@@ -1,6 +1,7 @@
-use crate::usage::{
-    normalize_project_key, resolve_session_owner, SessionOwner, PROJECT_IDENTITY_LINE_LIMIT,
+use crate::providers::codex::usage::{
+    resolve_session_owner, SessionOwner, PROJECT_IDENTITY_LINE_LIMIT,
 };
+use crate::usage::normalize_project_key;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
