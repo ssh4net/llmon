@@ -1432,7 +1432,7 @@ fn render_api_grouped_vertical_bars(
                     cell.set_char(' ');
                     if filled > 0 && y >= top {
                         cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style.clone());
+                            .set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -1444,7 +1444,7 @@ fn render_api_grouped_vertical_bars(
             let value_y = bottom.saturating_sub(1);
             for (offset, ch) in value.chars().enumerate() {
                 if let Some(cell) = buf.cell_mut((value_x + offset as u16, value_y)) {
-                    cell.set_char(ch).set_style(bar_fill.value_style.clone());
+                    cell.set_char(ch).set_style(bar_fill.value_style);
                 }
             }
         }
@@ -1541,7 +1541,7 @@ fn render_api_grouped_horizontal_bars(
                     cell.set_char(' ');
                     if offset < filled {
                         cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style.clone());
+                            .set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -1916,7 +1916,7 @@ fn render_api_daily_chart(
                     cell.set_char(' ');
                     if filled_height > 0 && y >= top {
                         cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style.clone());
+                            .set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -1929,7 +1929,7 @@ fn render_api_daily_chart(
             let value_y = bottom.saturating_sub(1);
             for (offset, ch) in value.chars().enumerate() {
                 if let Some(cell) = buf.cell_mut((value_x + offset as u16, value_y)) {
-                    cell.set_char(ch).set_style(bar_fill.value_style.clone());
+                    cell.set_char(ch).set_style(bar_fill.value_style);
                 }
             }
         }
@@ -2376,6 +2376,7 @@ fn render_activity_message(frame: &mut Frame<'_>, area: Rect, message: &str) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_project_activity_heatmap(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -4360,7 +4361,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                             cell.set_char(' ');
                             if filled_h > 0 && yy >= top_filled_y {
                                 cell.set_char(bar_fill.glyph)
-                                    .set_style(bar_fill.cell_style.clone());
+                                    .set_style(bar_fill.cell_style);
                             }
                         }
                     }
@@ -4398,7 +4399,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                             break;
                         }
                         if let Some(cell) = buf.cell_mut((start_x + j as u16, text_y)) {
-                            cell.set_char(ch).set_style(bar_fill.value_style.clone());
+                            cell.set_char(ch).set_style(bar_fill.value_style);
                         }
                     }
                 }
@@ -4604,7 +4605,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                             cell.set_char(' ');
                             if xx < bar_area.x.saturating_add(filled) {
                                 cell.set_char(bar_fill.glyph)
-                                    .set_style(bar_fill.cell_style.clone());
+                                    .set_style(bar_fill.cell_style);
                             }
                         }
                     }

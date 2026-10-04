@@ -10,6 +10,8 @@ All notable changes to this project are documented in this file.
 - Renamed the binary, crate, state directory (`~/.llmon`, `LLMON_HOME`,
   `--llmon-home`), cache database (`llmon.db`), and install/package scripts.
   Existing `~/.comon` data is not read yet; a migration command is planned.
+- Fixed the remaining clippy warnings and added a CI workflow that runs
+  clippy and the tests on Linux, macOS, and Windows.
 
 The entries below are from comon, llmon's predecessor.
 
