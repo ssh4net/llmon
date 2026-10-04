@@ -490,6 +490,12 @@ pub(crate) fn parse_file_summary(
         if bytes_read == 0 {
             break;
         }
+        if !line.ends_with('\n') {
+            // Codex is still writing this record. Consuming it now would lose
+            // the rest of the line on the next refresh.
+            fully_parsed = false;
+            break;
+        }
         file_offset = file_offset.saturating_add(bytes_read as u64);
         if line.len() > max_jsonl_line_bytes {
             continue;

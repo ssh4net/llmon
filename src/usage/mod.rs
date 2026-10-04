@@ -4060,6 +4060,73 @@ mod tests {
     }
 
     #[test]
+    fn codex_partial_last_line_is_left_for_the_next_refresh() {
+        let root = make_temp_dir("codex-partial-line");
+        let codex_home = root.join("codex");
+        let sessions_root = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        let session_ms = now_ms - Duration::hours(1).num_milliseconds();
+        let path = sessions_root.join("session.jsonl");
+        append_session_meta_line(&path, session_ms, "/outside/Lantern");
+        append_total_token_line(&path, session_ms + 1_000, 100, 0, 20);
+        let message = serde_json::json!({
+            "type": "event_msg",
+            "timestamp": Utc
+                .timestamp_millis_opt(session_ms + 2_000)
+                .single()
+                .expect("valid timestamp")
+                .to_rfc3339(),
+            "payload": {"type": "agent_message", "message": "done"}
+        })
+        .to_string();
+        let (head, tail) = message.split_at(message.len() / 2);
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for partial write");
+            write!(file, "{head}").expect("write partial line");
+        }
+        let snapshot = || {
+            compute_snapshot(
+                Harness::Codex,
+                30,
+                &codex_home,
+                None,
+                default_test_limits(false),
+                Some(cache_db_path.as_path()),
+            )
+            .expect("snapshot")
+        };
+        let runs = |snapshot: &LocalUsageSnapshot| -> i64 {
+            snapshot.days.iter().map(|day| day.agent_runs).sum()
+        };
+
+        let first = snapshot();
+        assert_eq!(first.totals.last30_days_tokens, 120);
+        assert_eq!(runs(&first), 0);
+        assert_eq!(first.scan_pending_files, 1);
+
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open to finish line");
+            writeln!(file, "{tail}").expect("finish partial line");
+        }
+        let second = snapshot();
+        assert_eq!(second.totals.last30_days_tokens, 120);
+        assert_eq!(runs(&second), 1);
+        assert_eq!(second.scan_pending_files, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn compute_snapshot_resumes_from_cached_offset_after_append() {
         let root = make_temp_dir("cache-append-resume");
         let codex_home = root.join("codex");

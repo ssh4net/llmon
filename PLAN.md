@@ -339,4 +339,4 @@ This file records the last ported commit of each:
 | Prices drift | Tables in config with an `updated` date; recorded costs preferred where they exist |
 | Copilot data only known from third-party docs | Phase 6 waits for real fixtures (D10) |
 | Both upstreams keep changing during the merge | Bug-fix-only freeze; ported-commit markers in this file |
-| Codex parser consumes a partial last line of a live log (inherited from comon) | Cumulative token totals compensate; an agent run can be missed. Fix with the shared line reader in phase 2 |
+| Codex parser consumed a partial last line of a live log (inherited from comon) | Fixed in phase 2: like the Claude parser, it leaves the line for the next refresh |

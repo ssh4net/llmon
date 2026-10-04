@@ -77,9 +77,8 @@ same layout; differences are noted per module.
 - `usage/` - the shared scanner: log discovery, scan planning, and the SQLite scan
   cache (`llmon.db`). The cache stores per-file byte offsets and parser state
   so a refresh resumes mid-file. `ScanLimits` bounds each refresh by file
-  count, bytes, line size, and time. The Codex parser consumes a partial last
-  line (its cumulative token totals make up for a lost event, but a run can be
-  missed); the Claude parser must leave it for the next refresh. Rows are keyed by `(harness, file_path)`. Each harness has
+  count, bytes, line size, and time. Parsers leave a partial last line (a
+  record still being written) for the next refresh. Rows are keyed by `(harness, file_path)`. Each harness has
   its own cache schema version (for example `CODEX_CACHE_SCHEMA_VERSION`);
   bump it whenever that parser or its cached aggregates change meaning, and
   only that harness's rows are rebuilt. `SCAN_CACHE_DB_LAYOUT_VERSION` covers
