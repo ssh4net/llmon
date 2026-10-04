@@ -10,7 +10,8 @@ one TUI. The design, decisions, and phases are in `PLAN.md`; keep its
 
 The repo continues CoMon's git history: `master` is CoMon `c24855d` (comon
 0.5.8) renamed to llmon 0.1.0 (binary `llmon`, `~/.llmon`, `LLMON_HOME`,
-`llmon.db`). It supports Codex only so far.
+`llmon.db`). The usage scanner supports Codex and Claude Code; the UI,
+session history, and live limits are still Codex-only (see `PLAN.md`).
 
 `_handoff/sources/` is gitignored and holds read-only reference trees, each
 with its own git repo:
@@ -64,7 +65,7 @@ same layout; differences are noted per module.
   command enums (`UsageCommand`, `ActivityCommand`, ...). Each frame the renderer
   registers `UiHitTarget` rects, and mouse clicks resolve against them to a
   `UiClickAction`. UI preferences persist in `state.json`.
-- `harness.rs` - `Harness` enum (Codex so far) with the stable `key()` used
+- `harness.rs` - `Harness` enum (Codex, Claude) with the stable `key()` used
   in the cache and config. Per-harness behavior is dispatched with `match`,
   not trait objects.
 - `providers/<harness>/` - everything specific to one CLI: home resolution,
@@ -83,8 +84,11 @@ same layout; differences are noted per module.
   bump it whenever that parser or its cached aggregates change meaning, and
   only that harness's rows are rebuilt. `SCAN_CACHE_DB_LAYOUT_VERSION` covers
   the table layout. Entry point: `compute_snapshot` -> `LocalUsageSnapshot`.
-  `--dump-usage` (hidden) prints every snapshot aggregate as JSON; compare
-  it before and after refactors against a frozen copy of real logs.
+  `--dump-usage` (hidden; `--harness claude` for Claude Code) prints every
+  snapshot aggregate as JSON; compare it before and after refactors against a
+  frozen copy of real logs, including a run with a tiny
+  `--scan-time-budget-ms` repeated until nothing is pending, which exercises
+  resuming files mid-way.
   `usage/archive.rs` keeps the aggregates of logs that were deleted or moved
   away (`llmon-archive.db`, next to `llmon.db`). That file is durable data:
   cache schema changes and `--rebuild-cache-on-start` never touch it, and its

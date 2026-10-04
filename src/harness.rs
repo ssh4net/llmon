@@ -2,6 +2,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Harness {
     Codex,
+    Claude,
 }
 
 impl Harness {
@@ -10,8 +11,9 @@ impl Harness {
     pub fn key(self) -> &'static str {
         match self {
             Harness::Codex => "codex",
+            Harness::Claude => "claude",
         }
     }
 }
 
-pub const ALL_HARNESSES: [Harness; 1] = [Harness::Codex];
+pub const ALL_HARNESSES: [Harness; 2] = [Harness::Codex, Harness::Claude];

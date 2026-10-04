@@ -1,0 +1,10 @@
+llmon
+Copyright 2026 llmon contributors
+
+llmon is derived from CoMon (https://github.com/ssh4net/CoMon).
+
+Claude Code support is derived from ClaudeMon
+(https://github.com/woffko/claudeMon), Copyright 2026 ClaudeMon
+contributors, which is itself derived from CoMon.
+
+CoMon and ClaudeMon are licensed under the Apache License, Version 2.0.

@@ -156,6 +156,12 @@ fn load_or_bootstrap_user_config(llmon_home: &Path) -> Result<UserConfig> {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum HarnessArg {
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum LiveLimitsArg {
     Auto,
     On,
@@ -198,6 +204,10 @@ struct Args {
     /// Override CODEX_HOME (default: $CODEX_HOME or ~/.codex).
     #[arg(long)]
     codex_home: Option<PathBuf>,
+
+    /// Override the Claude Code config directory (default: $CLAUDE_CONFIG_DIR or ~/.claude).
+    #[arg(long)]
+    claude_dir: Option<PathBuf>,
 
     /// Override LLMON_HOME for llmon-owned state/cache files (default: $LLMON_HOME or ~/.llmon).
     #[arg(long)]
@@ -281,6 +291,10 @@ struct Args {
     /// total unchanged.
     #[arg(long, hide = true)]
     dump_usage: bool,
+
+    /// Harness whose usage --dump-usage prints.
+    #[arg(long, value_enum, default_value = "codex", hide = true)]
+    harness: HarnessArg,
 }
 
 #[tokio::main]
@@ -390,10 +404,18 @@ async fn main() -> Result<()> {
     let system_locale = locale::SystemLocale::detect();
 
     if args.dump_usage {
+        let (harness, harness_home) = match args.harness {
+            HarnessArg::Codex => (harness::Harness::Codex, codex_home.clone()),
+            HarnessArg::Claude => (
+                harness::Harness::Claude,
+                providers::claude::resolve_claude_dir(args.claude_dir.clone())
+                    .context("Unable to resolve the Claude Code config directory")?,
+            ),
+        };
         let snapshot = usage::compute_snapshot(
-            harness::Harness::Codex,
+            harness,
             usage_days,
-            &codex_home,
+            &harness_home,
             project.as_deref(),
             usage_scan_limits,
             Some(&llmon_home.join(usage::SCAN_CACHE_DB_FILE_NAME)),

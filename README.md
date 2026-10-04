@@ -4,7 +4,8 @@ Single-binary, cross-platform TUI for coding-agent CLIs: local usage stats,
 live account limits, and a session-history browser.
 
 llmon merges [CoMon](https://github.com/ssh4net/CoMon) (Codex monitor) and
-ClaudeMon (Claude Code monitor, derived from CoMon) into one tool with a
+[ClaudeMon](https://github.com/woffko/claudeMon) (Claude Code monitor,
+derived from CoMon) into one tool with a
 combined view and full per-harness views. See [PLAN.md](PLAN.md) for the
 design and phases, and `CHANGELOG.md` for release history.
 

@@ -2,7 +2,7 @@ pub(crate) mod archive;
 
 use crate::harness::{Harness, ALL_HARNESSES};
 use crate::locale::{DisplayFormatter, DisplayStyle};
-use crate::providers::codex;
+use crate::providers::{claude, codex};
 use anyhow::{Context, Result};
 use archive::{ArchivedUsage, UsageArchive, USAGE_ARCHIVE_DB_FILE_NAME};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 
-const MAX_ACTIVITY_GAP_MS: i64 = 2 * 60 * 1000;
+pub(crate) const MAX_ACTIVITY_GAP_MS: i64 = 2 * 60 * 1000;
 const DEFAULT_MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_SESSION_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_SESSION_FILES_SCANNED: usize = 10_000;
@@ -29,6 +29,9 @@ const SCAN_CACHE_DB_LAYOUT_VERSION: i64 = 1;
 /// `schema_version.codex`). Bump it whenever the Codex parser or the cached
 /// aggregates change; only Codex rows are rebuilt.
 const CODEX_CACHE_SCHEMA_VERSION: i64 = 2;
+/// Meaning of the Claude Code rows in the scan cache (`cache_meta` key
+/// `schema_version.claude`).
+const CLAUDE_CACHE_SCHEMA_VERSION: i64 = 1;
 pub const DEFAULT_SCAN_CACHE_MAX_ENTRIES: usize = 50_000;
 pub const SCAN_CACHE_DB_FILE_NAME: &str = "llmon.db";
 pub const ACTIVITY_TIMELINE_WEEKS: usize = 54;
@@ -185,6 +188,10 @@ pub struct TokenBreakdown {
     pub input: i64,
     #[serde(default)]
     pub cache_write: i64,
+    /// Part of `cache_write` written with the one-hour TTL, which is billed
+    /// higher than five-minute writes. Not part of the total on its own.
+    #[serde(default)]
+    pub cache_write_1h: i64,
     #[serde(default)]
     pub cache_read: i64,
     #[serde(default)]
@@ -202,6 +209,7 @@ impl TokenBreakdown {
     pub fn add(&mut self, other: TokenBreakdown) {
         self.input = self.input.saturating_add(other.input);
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.output = self.output.saturating_add(other.output);
     }
@@ -519,24 +527,35 @@ pub(crate) struct ScanCacheStore {
 #[derive(Debug, Clone)]
 pub(crate) enum HarnessParserState {
     Codex(codex::usage::ParserState),
+    Claude(claude::usage::ParserState),
 }
 
 impl HarnessParserState {
     pub(crate) fn as_codex(&self) -> Option<&codex::usage::ParserState> {
         match self {
             HarnessParserState::Codex(state) => Some(state),
+            HarnessParserState::Claude(_) => None,
+        }
+    }
+
+    pub(crate) fn as_claude(&self) -> Option<&claude::usage::ParserState> {
+        match self {
+            HarnessParserState::Claude(state) => Some(state),
+            HarnessParserState::Codex(_) => None,
         }
     }
 
     fn from_json(harness: Harness, json: &str) -> serde_json::Result<Self> {
         match harness {
             Harness::Codex => serde_json::from_str(json).map(HarnessParserState::Codex),
+            Harness::Claude => serde_json::from_str(json).map(HarnessParserState::Claude),
         }
     }
 
     fn to_json(&self) -> serde_json::Result<String> {
         match self {
             HarnessParserState::Codex(state) => serde_json::to_string(state),
+            HarnessParserState::Claude(state) => serde_json::to_string(state),
         }
     }
 }
@@ -545,6 +564,7 @@ impl HarnessParserState {
 enum HarnessParsePlan {
     /// Parent baselines of forked Codex sessions, by candidate path.
     Codex(HashMap<String, codex::usage::ForkResolution>),
+    Claude,
 }
 
 #[derive(Debug, Clone)]
@@ -717,6 +737,7 @@ pub fn compute_snapshot(
 
     let sessions_root = match harness {
         Harness::Codex => codex::sessions_root(harness_home),
+        Harness::Claude => claude::projects_root(harness_home),
     };
     // The configured window controls summary cards and model shares. Charts are
     // expanded to the complete indexed history after cached rows are applied.
@@ -782,7 +803,7 @@ pub fn compute_snapshot(
         .map(|candidate| candidate.path.to_string_lossy().to_string())
         .collect();
     let (mut scan_cache_store, mut removed_cache_paths) = if let Some(db) = scan_cache_db.as_ref() {
-        load_scan_cache_store(db, Harness::Codex)?
+        load_scan_cache_store(db, harness)?
     } else {
         (ScanCacheStore::default(), HashSet::new())
     };
@@ -904,6 +925,7 @@ pub fn compute_snapshot(
             &harness_home.join("archived_sessions"),
             limits.max_jsonl_line_bytes,
         )),
+        Harness::Claude => HarnessParsePlan::Claude,
     };
     // Parent baseline discovery is bounded by the planned fork set and runs in
     // the background usage worker. Start the incremental file-parse budget only
@@ -1099,7 +1121,7 @@ pub fn compute_snapshot(
         if !dirty_cache_paths.is_empty() || !removed_cache_paths.is_empty() {
             let _ = persist_scan_cache_changes(
                 scan_cache_db,
-                Harness::Codex,
+                harness,
                 &scan_cache_store,
                 &removed_cache_paths,
                 &dirty_cache_paths,
@@ -1107,7 +1129,7 @@ pub fn compute_snapshot(
         }
         let _ = trim_scan_cache_db_entries_to_limit(
             scan_cache_db,
-            Harness::Codex,
+            harness,
             limits.scan_cache_max_entries.max(1),
         );
     }
@@ -1239,6 +1261,9 @@ fn parse_candidate(
             deadline,
             fork_resolutions.get(key).cloned().unwrap_or_default(),
         ),
+        HarnessParsePlan::Claude => {
+            claude::usage::parse_file_summary(path, max_jsonl_line_bytes, existing, deadline)
+        }
     }
 }
 
@@ -1705,6 +1730,7 @@ fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
 fn harness_cache_schema_version(harness: Harness) -> i64 {
     match harness {
         Harness::Codex => CODEX_CACHE_SCHEMA_VERSION,
+        Harness::Claude => CLAUDE_CACHE_SCHEMA_VERSION,
     }
 }
 

@@ -681,6 +681,7 @@ pub(crate) fn parse_file_summary(
                     let tokens = TokenBreakdown {
                         input: delta.input - cached_clamped,
                         cache_write: 0,
+                        cache_write_1h: 0,
                         cache_read: cached_clamped,
                         output: delta.output,
                     };
