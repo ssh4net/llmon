@@ -238,11 +238,11 @@ The maintainer adds the rest.
   - append-only JSONL with byte-offset resume: Codex, Claude, Grok
   - whole-file JSON reparsed on change: Gemini
   - SQLite query: Copilot `session-store.db`
-- **Cache (`llmon.db`):**
-  - `file_cache` gets a `harness` column.
-  - Each harness has its own schema version (`cache_meta` key
-    `schema_version.<harness>`), so a parser change rebuilds only that
-    harness.
+- **Cache (`llmon.db`):** (layout done in phase 1)
+  - `file_cache` rows are keyed by `(harness, file_path)`.
+  - `cache_meta` key `layout_version` covers the table layout; each harness
+    has its own schema version (`schema_version.<harness>`), so a parser
+    change rebuilds only that harness.
   - A new `archived_usage` table holds daily aggregates of logs that no
     longer exist. Schema changes never clear it.
   - ClaudeMon's current `DELETE FROM file_cache` on a version change would
@@ -293,8 +293,8 @@ version, because that clears its saved history of deleted transcripts.
 | Phase | Work | Size |
 |-------|------|------|
 | 0 | Done: repo setup per D7; rename comon to llmon (crate, binary, `~/.llmon`, `LLMON_HOME`, `llmon.db`); CI (ASCII check, `cargo test`, clippy on Linux, macOS, Windows) | S |
-| 1 | Provider seam with Codex only, no behavior change: move Codex code into `providers/codex`, add the canonical token model and the `harness` column. CoMon's 185 tests stay green, and output matches comon on the same logs | L |
-| 2 | NOTICE credits the ClaudeMon author. Claude provider: usage parser, owner, history scan, status-line and OAuth limits, pricing, model names; port ClaudeMon's 156 tests | M |
+| 1 | Done: provider seam with Codex only, no behavior change. `Harness` enum; cache keyed by `(harness, file_path)` with per-harness schema versions; canonical `TokenBreakdown`; Codex parser, owner resolver, and App Server client in `providers/codex`. Tests green (183: the comon migration tests were replaced). `--dump-usage` output on frozen real logs is identical at every step | L |
+| 2 | NOTICE credits the ClaudeMon author. Split session history (`read/scan.rs` record parsing, `catalog.rs` tool-call evidence) into shared code and `providers/codex/history.rs`, designed together with the Claude version (subagent nesting). Claude provider: usage parser, owner, history scan, status-line and OAuth limits, pricing, model names; port ClaudeMon's 156 tests | M |
 | 3 | Harness switch, combined USAGE (4.3), Claude LIMITS card, MODELS tab | M |
 | 4 | COST per harness and combined (Codex rate card, Claude prices); ACTIVITY and HISTORY combined | M |
 | 5 | `llmon migrate`, `archived_usage`, optional `stats-cache.json` import | S |
@@ -312,8 +312,11 @@ This file records the last ported commit of each:
 - **Fixtures.** Synthetic fixtures only, per harness, generated from real
   logs with all text replaced and only structure and numbers kept. Real
   logs, prompts, session ids, and paths are never committed.
-- **Golden test for phase 1.** llmon and comon produce identical totals on
-  the same Codex logs. Run locally only; the logs are not committed.
+- **Golden test.** The hidden `--dump-usage` flag prints every snapshot
+  aggregate as JSON. Run it on a frozen local copy of real logs (cold and
+  warm cache, unfiltered and with `--project` filters) before and after each
+  refactor; the output must be identical. Run locally only; the logs and the
+  output are not committed.
 - **Per-harness tests:**
   - deduplication (Claude, Gemini)
   - incremental resume
@@ -334,3 +337,4 @@ This file records the last ported commit of each:
 | Prices drift | Tables in config with an `updated` date; recorded costs preferred where they exist |
 | Copilot data only known from third-party docs | Phase 6 waits for real fixtures (D10) |
 | Both upstreams keep changing during the merge | Bug-fix-only freeze; ported-commit markers in this file |
+| Codex parser consumes a partial last line of a live log (inherited from comon) | Cumulative token totals compensate; an agent run can be missed. Fix with the shared line reader in phase 2 |
