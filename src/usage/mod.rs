@@ -1,7 +1,10 @@
+pub(crate) mod archive;
+
 use crate::harness::{Harness, ALL_HARNESSES};
 use crate::locale::{DisplayFormatter, DisplayStyle};
 use crate::providers::codex;
 use anyhow::{Context, Result};
+use archive::{ArchivedUsage, UsageArchive, USAGE_ARCHIVE_DB_FILE_NAME};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -557,6 +560,25 @@ pub(crate) struct CachedFileScanEntry {
     pub(crate) updated_at: i64,
 }
 
+impl CachedFileScanEntry {
+    fn usage(&self) -> FileUsageRef<'_> {
+        FileUsageRef {
+            session_cwd: self.session_cwd.as_deref(),
+            daily: &self.daily,
+            model_totals_by_day: &self.model_totals_by_day,
+        }
+    }
+}
+
+/// The aggregates one log file contributes, from the scan cache or from the
+/// usage archive once the file is gone.
+#[derive(Clone, Copy)]
+pub(crate) struct FileUsageRef<'a> {
+    pub(crate) session_cwd: Option<&'a str>,
+    pub(crate) daily: &'a HashMap<String, DailyTotals>,
+    pub(crate) model_totals_by_day: &'a HashMap<String, HashMap<String, TokenBreakdown>>,
+}
+
 /// Result of parsing one log file, possibly resumed from a cached entry.
 #[derive(Debug, Clone)]
 pub(crate) struct FileScanSummary {
@@ -765,16 +787,49 @@ pub fn compute_snapshot(
         (ScanCacheStore::default(), HashSet::new())
     };
 
-    if scan_cache_db.is_some() {
+    // Rows of logs that were deleted or moved away keep counting from the
+    // usage archive. Rows of files that still exist but are no longer valid
+    // candidates are dropped. Rows outside this sessions root (another
+    // harness home) are kept but not counted.
+    let mut archived_usage: Vec<ArchivedUsage> = Vec::new();
+    if let Some(db) = scan_cache_db.as_ref() {
         let valid_paths: HashSet<&str> =
             candidate_paths.iter().map(|value| value.as_str()).collect();
+        let mut deleted_paths: Vec<String> = Vec::new();
         scan_cache_store.entries.retain(|file_path, _| {
-            let keep = valid_paths.contains(file_path.as_str());
-            if !keep {
-                removed_cache_paths.insert(file_path.clone());
+            if valid_paths.contains(file_path.as_str()) {
+                return true;
             }
-            keep
+            let path = Path::new(file_path);
+            if !path.starts_with(&sessions_root) {
+                return true;
+            }
+            match std::fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    deleted_paths.push(file_path.clone());
+                    true
+                }
+                _ => {
+                    removed_cache_paths.insert(file_path.clone());
+                    false
+                }
+            }
         });
+        deleted_paths.sort();
+        // The archive is best effort: on failure the cache rows stay where
+        // they are and are archived on a later refresh.
+        if let Ok(archive) = UsageArchive::open(&db.path.with_file_name(USAGE_ARCHIVE_DB_FILE_NAME))
+        {
+            archived_usage = sync_usage_archive(
+                archive,
+                harness,
+                &sessions_root,
+                &valid_paths,
+                &deleted_paths,
+                &mut scan_cache_store,
+                &mut removed_cache_paths,
+            );
+        }
     }
 
     let force_reparse_all = limits.full_scan && limits.scan_time_budget_ms == 0;
@@ -882,8 +937,8 @@ pub fn compute_snapshot(
                     if let Some(deadline) = scan_deadline {
                         if Instant::now() >= deadline {
                             if let Some(stale) = cached_entry {
-                                apply_cached_file_entry(
-                                    &stale,
+                                apply_file_usage(
+                                    stale.usage(),
                                     workspace_path,
                                     &mut daily,
                                     &mut model_totals,
@@ -910,8 +965,8 @@ pub fn compute_snapshot(
                         Ok(parsed) => parsed,
                         Err(_) => {
                             if let Some(stale) = cached_entry {
-                                apply_cached_file_entry(
-                                    &stale,
+                                apply_file_usage(
+                                    stale.usage(),
                                     workspace_path,
                                     &mut daily,
                                     &mut model_totals,
@@ -947,8 +1002,8 @@ pub fn compute_snapshot(
                     dirty_cache_paths.insert(candidate_key.clone());
                     entry
                 };
-                apply_cached_file_entry(
-                    &entry,
+                apply_file_usage(
+                    entry.usage(),
                     workspace_path,
                     &mut daily,
                     &mut model_totals,
@@ -963,8 +1018,8 @@ pub fn compute_snapshot(
             }
 
             if let Some(entry) = cached_entry_matches {
-                apply_cached_file_entry(
-                    &entry,
+                apply_file_usage(
+                    entry.usage(),
                     workspace_path,
                     &mut daily,
                     &mut model_totals,
@@ -979,8 +1034,8 @@ pub fn compute_snapshot(
             }
 
             if let Some(stale) = cached_entry {
-                apply_cached_file_entry(
-                    &stale,
+                apply_file_usage(
+                    stale.usage(),
                     workspace_path,
                     &mut daily,
                     &mut model_totals,
@@ -1022,8 +1077,8 @@ pub fn compute_snapshot(
             if cache_entry_matches_candidate(&entry, candidate) {
                 uncached_indexed_files = uncached_indexed_files.saturating_add(1);
             }
-            apply_cached_file_entry(
-                &entry,
+            apply_file_usage(
+                entry.usage(),
                 workspace_path,
                 &mut daily,
                 &mut model_totals,
@@ -1082,11 +1137,30 @@ pub fn compute_snapshot(
         })
         .fold(0_u64, u64::saturating_add);
 
+    for archived in &archived_usage {
+        apply_file_usage(
+            archived.usage(),
+            workspace_path,
+            &mut daily,
+            &mut model_totals,
+            &summary_day_filter,
+            &mut utc_daily,
+            &mut utc_model_totals,
+            &utc_summary_day_filter,
+            &mut project_activity,
+            &mut matched_session_files,
+        );
+    }
+
     let chart_day_keys = make_complete_chart_day_keys(&daily, UsageZone::Local, &summary_day_keys);
     let utc_chart_day_keys =
         make_complete_chart_day_keys(&utc_daily, UsageZone::Utc, &utc_summary_day_keys);
-    let project_usage =
-        build_project_usage_summaries(&candidates, &candidate_paths, &scan_cache_store);
+    let project_usage = build_project_usage_summaries(
+        &candidates,
+        &candidate_paths,
+        &archived_usage,
+        &scan_cache_store,
+    );
 
     Ok(build_snapshot(
         chart_day_keys,
@@ -1105,6 +1179,48 @@ pub fn compute_snapshot(
         scan_pending_files,
         scan_processed_bytes,
     ))
+}
+
+/// Moves cache rows of deleted logs into the archive, drops archive rows of
+/// logs that exist again, and returns the archived usage to count.
+fn sync_usage_archive(
+    mut archive: UsageArchive,
+    harness: Harness,
+    sessions_root: &Path,
+    candidate_paths: &HashSet<&str>,
+    deleted_paths: &[String],
+    cache: &mut ScanCacheStore,
+    removed_cache_paths: &mut HashSet<String>,
+) -> Vec<ArchivedUsage> {
+    let deleted_rows: Vec<(&str, &CachedFileScanEntry)> = deleted_paths
+        .iter()
+        .filter_map(|path| cache.entries.get(path).map(|entry| (path.as_str(), entry)))
+        .collect();
+    if archive
+        .archive(harness, &deleted_rows, unix_time_seconds())
+        .is_ok()
+    {
+        for path in deleted_paths {
+            cache.entries.remove(path);
+            removed_cache_paths.insert(path.clone());
+        }
+    }
+
+    let Ok(rows) = archive.load(harness) else {
+        return Vec::new();
+    };
+    let restored: Vec<&str> = rows
+        .iter()
+        .filter(|row| candidate_paths.contains(row.file_path.as_str()))
+        .map(|row| row.file_path.as_str())
+        .collect();
+    let _ = archive.forget(harness, &restored);
+    rows.into_iter()
+        .filter(|row| {
+            Path::new(&row.file_path).starts_with(sessions_root)
+                && !candidate_paths.contains(row.file_path.as_str())
+        })
+        .collect()
 }
 
 fn parse_candidate(
@@ -1306,21 +1422,23 @@ fn build_zone_snapshot(
 fn build_project_usage_summaries(
     candidates: &[SessionFileCandidate],
     candidate_paths: &[String],
+    archived: &[ArchivedUsage],
     cache: &ScanCacheStore,
 ) -> Vec<ProjectUsageSummary> {
     let mut projects: HashMap<String, ProjectUsageBuilder> = HashMap::new();
 
-    for (index, candidate) in candidates.iter().enumerate() {
-        let Some(path) = candidate_paths.get(index) else {
-            continue;
-        };
-        let Some(entry) = cache.entries.get(path) else {
-            continue;
-        };
-        if !cache_entry_matches_candidate(entry, candidate) {
-            continue;
-        }
-        for cwd in entry_project_paths(entry) {
+    let indexed = candidates
+        .iter()
+        .zip(candidate_paths)
+        .filter_map(|(candidate, path)| {
+            cache
+                .entries
+                .get(path)
+                .filter(|entry| cache_entry_matches_candidate(entry, candidate))
+                .map(CachedFileScanEntry::usage)
+        });
+    for usage in indexed.chain(archived.iter().map(ArchivedUsage::usage)) {
+        for cwd in entry_project_paths(usage) {
             let key = normalize_project_key(&cwd);
             if key.is_empty() {
                 continue;
@@ -1328,7 +1446,7 @@ fn build_project_usage_summaries(
             let project = projects.entry(key).or_default();
             prefer_project_display_path(&mut project.display_path, &cwd);
             project.indexed_files = project.indexed_files.saturating_add(1);
-            for (cache_key, totals) in &entry.daily {
+            for (cache_key, totals) in usage.daily {
                 let Some((UsageZone::Local, _)) = split_cache_day_key(cache_key) else {
                     continue;
                 };
@@ -1357,8 +1475,8 @@ fn build_project_usage_summaries(
     out
 }
 
-fn entry_project_paths(entry: &CachedFileScanEntry) -> Vec<String> {
-    fallback_project_identity(entry.session_cwd.as_deref())
+fn entry_project_paths(usage: FileUsageRef<'_>) -> Vec<String> {
+    fallback_project_identity(usage.session_cwd)
         .into_iter()
         .collect()
 }
@@ -1449,8 +1567,8 @@ pub(crate) fn add_model_tokens_limited(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_cached_file_entry(
-    entry: &CachedFileScanEntry,
+fn apply_file_usage(
+    usage: FileUsageRef<'_>,
     workspace_path: Option<&Path>,
     daily: &mut HashMap<String, DailyTotals>,
     model_totals: &mut HashMap<String, TokenBreakdown>,
@@ -1463,7 +1581,7 @@ fn apply_cached_file_entry(
 ) {
     let matches_workspace = match workspace_path {
         None => true,
-        Some(filter) => entry_project_paths(entry)
+        Some(filter) => entry_project_paths(usage)
             .iter()
             .any(|project| path_matches_workspace(project, filter)),
     };
@@ -1475,7 +1593,7 @@ fn apply_cached_file_entry(
         *matched_session_files = matched_session_files.saturating_add(1);
     }
 
-    for (cache_key, totals) in &entry.daily {
+    for (cache_key, totals) in usage.daily {
         let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
             continue;
         };
@@ -1486,7 +1604,7 @@ fn apply_cached_file_entry(
         target.entry(day_key.to_string()).or_default().add(*totals);
     }
 
-    for (cache_key, per_day_models) in &entry.model_totals_by_day {
+    for (cache_key, per_day_models) in usage.model_totals_by_day {
         let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
             continue;
         };
@@ -1502,8 +1620,8 @@ fn apply_cached_file_entry(
         }
     }
 
-    for project in entry_project_paths(entry) {
-        apply_project_activity(&project, &entry.daily, daily, project_activity);
+    for project in entry_project_paths(usage) {
+        apply_project_activity(&project, usage.daily, daily, project_activity);
     }
 }
 
@@ -1544,18 +1662,25 @@ fn apply_project_activity(
     }
 }
 
-fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
+/// Prepares the private directory of an SQLite file and refuses symlinks or
+/// special files at the database, WAL, and SHM paths.
+fn prepare_private_db_path(path: &Path, label: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         crate::storage::ensure_private_dir(parent)?;
-        ensure_directory_not_symlink(parent, "cache database parent directory")?;
+        ensure_directory_not_symlink(parent, &format!("{label} parent directory"))?;
     }
-    ensure_regular_file_or_missing(path, "cache database file")?;
+    ensure_regular_file_or_missing(path, &format!("{label} file"))?;
     let mut wal_path: OsString = path.as_os_str().to_os_string();
     wal_path.push("-wal");
     let mut shm_path: OsString = path.as_os_str().to_os_string();
     shm_path.push("-shm");
-    ensure_regular_file_or_missing(Path::new(&wal_path), "cache database WAL file")?;
-    ensure_regular_file_or_missing(Path::new(&shm_path), "cache database SHM file")?;
+    ensure_regular_file_or_missing(Path::new(&wal_path), &format!("{label} WAL file"))?;
+    ensure_regular_file_or_missing(Path::new(&shm_path), &format!("{label} SHM file"))?;
+    Ok(())
+}
+
+fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
+    prepare_private_db_path(path, "cache database")?;
 
     let mut conn = Connection::open(path)
         .with_context(|| format!("Unable to open cache database {}", path.display()))?;
@@ -1573,7 +1698,7 @@ fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
         path: path.to_path_buf(),
         conn,
     };
-    enforce_scan_cache_db_permissions(&db.path)?;
+    enforce_private_db_files(&db.path, "cache database")?;
     Ok(db)
 }
 
@@ -1994,7 +2119,7 @@ fn persist_scan_cache_changes(
             db.path.display()
         )
     })?;
-    enforce_scan_cache_db_permissions(&db.path)?;
+    enforce_private_db_files(&db.path, "cache database")?;
     Ok(())
 }
 
@@ -2033,7 +2158,7 @@ fn trim_scan_cache_db_entries_to_limit(
             params![harness.key(), remove_count],
         )
         .with_context(|| format!("Unable to trim cache rows in {}", db.path.display()))?;
-    enforce_scan_cache_db_permissions(&db.path)?;
+    enforce_private_db_files(&db.path, "cache database")?;
     Ok(true)
 }
 
@@ -2061,15 +2186,15 @@ fn is_valid_cached_session_file(
     len > 0 && len <= max_session_file_bytes
 }
 
-fn enforce_scan_cache_db_permissions(path: &Path) -> Result<()> {
-    ensure_regular_file_or_missing(path, "cache database file")?;
+fn enforce_private_db_files(path: &Path, label: &str) -> Result<()> {
+    ensure_regular_file_or_missing(path, &format!("{label} file"))?;
     crate::storage::enforce_private_file_if_exists(path)?;
     let mut wal_path: OsString = path.as_os_str().to_os_string();
     wal_path.push("-wal");
     let mut shm_path: OsString = path.as_os_str().to_os_string();
     shm_path.push("-shm");
-    ensure_regular_file_or_missing(Path::new(&wal_path), "cache database WAL file")?;
-    ensure_regular_file_or_missing(Path::new(&shm_path), "cache database SHM file")?;
+    ensure_regular_file_or_missing(Path::new(&wal_path), &format!("{label} WAL file"))?;
+    ensure_regular_file_or_missing(Path::new(&shm_path), &format!("{label} SHM file"))?;
     let _ = crate::storage::enforce_private_file_if_exists(Path::new(&wal_path));
     let _ = crate::storage::enforce_private_file_if_exists(Path::new(&shm_path));
     Ok(())
@@ -3783,6 +3908,127 @@ mod tests {
             restricted.totals.last30_days_tokens, warmed.totals.last30_days_tokens,
             "unchanged files outside current scan plan should still contribute via cache"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn write_owned_session(path: &Path, timestamp_ms: i64, cwd: &str, input: i64, output: i64) {
+        let _ = std::fs::remove_file(path);
+        append_session_meta_line(path, timestamp_ms, cwd);
+        append_total_token_line(path, timestamp_ms + 1_000, input, 0, output);
+    }
+
+    fn archived_row_count(cache_db_path: &Path) -> i64 {
+        let conn = Connection::open(cache_db_path.with_file_name(USAGE_ARCHIVE_DB_FILE_NAME))
+            .expect("open usage archive");
+        conn.query_row("SELECT COUNT(*) FROM archived_usage;", [], |row| row.get(0))
+            .expect("count archived rows")
+    }
+
+    #[test]
+    fn deleted_log_keeps_counting_from_the_usage_archive() {
+        let root = make_temp_dir("archive-deleted-log");
+        let codex_home = root.join("codex");
+        let sessions_root = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        let session_ms = now_ms - Duration::hours(2).num_milliseconds();
+        let kept = sessions_root.join("kept.jsonl");
+        let deleted = sessions_root.join("deleted.jsonl");
+        write_owned_session(&kept, session_ms, "/outside/Lantern", 100, 20);
+        write_owned_session(&deleted, session_ms, "/outside/Starling", 300, 40);
+        let snapshot = || {
+            compute_snapshot(
+                Harness::Codex,
+                30,
+                &codex_home,
+                None,
+                default_test_limits(false),
+                Some(cache_db_path.as_path()),
+            )
+            .expect("snapshot")
+        };
+        let project_total = |snapshot: &LocalUsageSnapshot, path: &str| {
+            snapshot
+                .project_usage_for_path(path)
+                .map(|project| project.total_tokens)
+        };
+
+        let first = snapshot();
+        assert_eq!(first.totals.last30_days_tokens, 460);
+        assert_eq!(archived_row_count(&cache_db_path), 0);
+
+        std::fs::remove_file(&deleted).expect("delete log");
+        let after_delete = snapshot();
+        assert_eq!(after_delete.totals.last30_days_tokens, 460);
+        assert_eq!(project_total(&after_delete, "/outside/Starling"), Some(340));
+        assert_eq!(after_delete.scan_total_files, 1);
+        assert_eq!(archived_row_count(&cache_db_path), 1);
+        assert_eq!(cache_row_count(&cache_db_path, "codex"), 1);
+
+        // A parser change rebuilds only the scan cache.
+        {
+            let conn = Connection::open(&cache_db_path).expect("open raw cache db");
+            conn.execute(
+                "UPDATE cache_meta SET value = 0 WHERE key = 'schema_version.codex';",
+                [],
+            )
+            .expect("age codex schema version");
+        }
+        assert_eq!(snapshot().totals.last30_days_tokens, 460);
+
+        // So does deleting the cache files (--rebuild-cache-on-start).
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = cache_db_path.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(path));
+        }
+        assert_eq!(snapshot().totals.last30_days_tokens, 460);
+
+        // A restored log counts once, from the scan cache.
+        write_owned_session(&deleted, session_ms, "/outside/Starling", 300, 40);
+        let restored = snapshot();
+        assert_eq!(restored.totals.last30_days_tokens, 460);
+        assert_eq!(project_total(&restored, "/outside/Starling"), Some(340));
+        assert_eq!(archived_row_count(&cache_db_path), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_rows_of_another_home_are_kept_but_not_counted() {
+        let root = make_temp_dir("archive-other-home");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        let session_ms = now_ms - Duration::hours(2).num_milliseconds();
+        let mut totals = Vec::new();
+        for (name, input) in [("first", 100), ("second", 300)] {
+            let home = root.join(name);
+            let sessions_root = home.join("sessions");
+            std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+            write_owned_session(
+                &sessions_root.join("session.jsonl"),
+                session_ms,
+                "/outside/Lantern",
+                input,
+                0,
+            );
+            let snapshot = compute_snapshot(
+                Harness::Codex,
+                30,
+                &home,
+                None,
+                default_test_limits(false),
+                Some(cache_db_path.as_path()),
+            )
+            .expect("snapshot");
+            totals.push(snapshot.totals.last30_days_tokens);
+        }
+
+        assert_eq!(totals, vec![100, 300]);
+        assert_eq!(cache_row_count(&cache_db_path, "codex"), 2);
+        assert_eq!(archived_row_count(&cache_db_path), 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -18,9 +18,10 @@ Reference sources: `_handoff/sources/CoMon` (HEAD `c24855d`, comon 0.5.8) and
 | D5 | Activity, History | Combined and per harness | decided |
 | D6 | More harnesses | Gemini CLI, Grok CLI, GitHub Copilot CLI, after Codex + Claude ship | decided |
 | D7 | Git history | Build on CoMon's history (86 commits) | decided |
-| D8 | Deleted logs | Keep stats of deleted logs for every harness, or Claude only | open |
+| D8 | Deleted logs | Keep stats of deleted or moved logs for every harness (`llmon-archive.db`) | decided |
 | D9 | APISTAT tab | Keep CoMon's APISTAT as the Codex server-history screen, or fold it into cards | open |
 | D10 | Copilot | Needs a machine with Copilot CLI to capture fixtures | open |
+| D11 | Retention | How long to keep usage history; until decided, forever (each archived row records when its log disappeared) | open |
 
 Why D1: ClaudeMon is CoMon 0.5.5 renamed. CoMon added only 2 commits since
 the fork, both UI work. The history browser (`read/catalog.rs`,
@@ -243,8 +244,9 @@ The maintainer adds the rest.
   - `cache_meta` key `layout_version` covers the table layout; each harness
     has its own schema version (`schema_version.<harness>`), so a parser
     change rebuilds only that harness.
-  - A new `archived_usage` table holds daily aggregates of logs that no
-    longer exist. Schema changes never clear it.
+  - The aggregates of logs that no longer exist move to a separate file,
+    `llmon-archive.db` (table `archived_usage`, done in phase 2). Cache
+    schema changes and `--rebuild-cache-on-start` never touch it.
   - ClaudeMon's current `DELETE FROM file_cache` on a version change would
     lose that history; llmon must not repeat this.
 - **Scan budget.** The per-refresh budget is split across harnesses, so a
@@ -266,7 +268,7 @@ The maintainer adds the rest.
 | Source | Unique data | Action |
 |--------|-------------|--------|
 | `~/.comon/comon.db` | none (rows of missing logs are dropped) | do not import; rescan `~/.codex/sessions` |
-| `~/.claudemon/claudemon.db` | rows of deleted transcripts | copy rows whose file is gone into `archived_usage` (harness = claude); rescan the rest |
+| `~/.claudemon/claudemon.db` | rows of deleted transcripts | copy rows whose file is gone into `llmon-archive.db` (harness = claude); rescan the rest |
 | `config.json` (both) | settings | merge into the per-harness layout; `history_project_roots` is the union |
 | `~/.comon/state.json` | UI preferences | copy |
 | `~/.claudemon/limits.json` | latest limits snapshot | read as a fallback until llmon writes its own |

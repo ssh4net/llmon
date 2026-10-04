@@ -85,6 +85,11 @@ same layout; differences are noted per module.
   the table layout. Entry point: `compute_snapshot` -> `LocalUsageSnapshot`.
   `--dump-usage` (hidden) prints every snapshot aggregate as JSON; compare
   it before and after refactors against a frozen copy of real logs.
+  `usage/archive.rs` keeps the aggregates of logs that were deleted or moved
+  away (`llmon-archive.db`, next to `llmon.db`). That file is durable data:
+  cache schema changes and `--rebuild-cache-on-start` never touch it, and its
+  JSON columns (serde formats of `DailyTotals` / `TokenBreakdown`) may only
+  gain `#[serde(default)]` fields without an archive layout migration.
 - `read/` - the session history screen. `scan.rs` reads session metadata and
   titles and builds a catalog grouped by project. `catalog.rs` does
   Strict/Deep/Full discovery. Deep and Full crawl only the roots listed in
