@@ -1360,7 +1360,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "comon-catalog-{label}-{}-{}",
+            "llmon-catalog-{label}-{}-{}",
             std::process::id(),
             TEMP_ID.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1569,7 +1569,7 @@ mod tests {
             max_depth: 2,
             max_candidates: 100,
             progress_interval_ms: 25,
-            cache_db_path: root.join("cache/comon.db"),
+            cache_db_path: root.join("cache/llmon.db"),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
         let snapshot = scan_project_catalog(&config, &strict, |_| {}).expect("catalog scan");

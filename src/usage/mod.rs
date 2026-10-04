@@ -3675,7 +3675,7 @@ mod tests {
                 .unwrap_or(0),
             TEMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let dir = std::env::temp_dir().join(format!("comon-{prefix}-{unique}"));
+        let dir = std::env::temp_dir().join(format!("llmon-{prefix}-{unique}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -4008,7 +4008,7 @@ mod tests {
             now_ms - Duration::hours(1).num_milliseconds(),
         );
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let first = compute_snapshot(
             30,
             &codex_home,
@@ -4118,7 +4118,7 @@ mod tests {
         append_agent_message_line(&child_path, fork_ms + 1_500);
         append_total_token_line(&child_path, fork_ms + 1_600, 1_700, 1_400, 150);
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let blocked = compute_snapshot(
             30,
             &codex_home,
@@ -4293,7 +4293,7 @@ mod tests {
         }
         let mut limits = default_test_limits(false);
         limits.max_session_files_scanned = 1;
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
 
         let first = compute_snapshot(30, &codex_home, None, limits, Some(&cache_db_path))
             .expect("first snapshot");
@@ -4325,7 +4325,7 @@ mod tests {
 
         let mut limits = default_test_limits(false);
         limits.max_session_files_scanned = 1;
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let first = compute_snapshot(30, &codex_home, None, limits, Some(&cache_db_path))
             .expect("first snapshot");
         assert_eq!(first.totals.last30_days_tokens, 0);
@@ -4434,7 +4434,7 @@ mod tests {
         let session_path = sessions_root.join("forked.jsonl");
         let outer_timestamp_ms =
             write_delayed_fork_replay_prefix(&session_path, payload_timestamp_ms, 1_500);
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
 
         let replay_only = compute_snapshot(
             30,
@@ -4570,7 +4570,7 @@ mod tests {
         );
         append_total_token_line(&session, now_ms + 100, 100, 25, 20);
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let first = compute_snapshot(
             30,
             &codex_home,
@@ -4758,7 +4758,7 @@ mod tests {
         let now_ms = Utc::now().timestamp_millis();
         let session = sessions_root.join("session.jsonl");
         write_token_file(&session, now_ms, 100, 20);
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
 
         let first = compute_snapshot(
             30,
@@ -4805,7 +4805,7 @@ mod tests {
         write_token_file(&older_path, older_ms, 100, 25);
         write_token_file(&newer_path, newer_ms, 80, 20);
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let warm_limits = ScanLimits {
             max_session_file_bytes: 4 * 1024 * 1024,
             max_session_total_bytes: 16 * 1024 * 1024,
@@ -4866,7 +4866,7 @@ mod tests {
             20,
         );
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let limits = ScanLimits {
             max_session_file_bytes: 4 * 1024 * 1024,
             max_session_total_bytes: 4 * 1024 * 1024,
@@ -4993,7 +4993,7 @@ mod tests {
         );
         let expected_total = 150_i64;
 
-        let cache_db_path = root.join("comon.db");
+        let cache_db_path = root.join("llmon.db");
         let baseline_limits = ScanLimits {
             max_session_file_bytes: 4 * 1024 * 1024,
             max_session_total_bytes: 4 * 1024 * 1024,
@@ -5061,7 +5061,7 @@ mod tests {
         let root = make_temp_dir("cache-prune");
         let sessions_root = root.join("sessions");
         std::fs::create_dir_all(&sessions_root).expect("create sessions root");
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let mut db = open_or_init_scan_cache_db(&db_path).expect("open cache db");
 
         let keep_path = sessions_root.join("keep.jsonl");
@@ -5148,7 +5148,7 @@ mod tests {
     #[test]
     fn trim_scan_cache_db_to_limit_drops_oldest_entries() {
         let root = make_temp_dir("cache-trim");
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let mut db = open_or_init_scan_cache_db(&db_path).expect("open cache db");
 
         let mut store = ScanCacheStore::default();
@@ -5197,7 +5197,7 @@ mod tests {
         write_token_file(&keep_path, now_ms, 10, 5);
         write_forked_replay_file(&forked_path, now_ms);
 
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let conn = Connection::open(&db_path).expect("open v2 db");
         conn.execute_batch(
             "
@@ -5254,7 +5254,7 @@ mod tests {
         write_token_file(&keep_path, now_ms, 10, 5);
         write_delayed_fork_replay_prefix(&forked_path, now_ms, 1_500);
 
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let conn = Connection::open(&db_path).expect("open v3 db");
         conn.execute_batch(
             "
@@ -5320,7 +5320,7 @@ mod tests {
         write_token_file(&keep_path, now_ms, 10, 5);
         write_forked_replay_file(&forked_path, now_ms);
 
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let conn = Connection::open(&db_path).expect("open v11 db");
         conn.execute_batch(
             "
@@ -5369,7 +5369,7 @@ mod tests {
     fn open_or_init_scan_cache_db_v14_reparses_v12_and_v13_rows() {
         let root = make_temp_dir("cache-migrate-v14");
         for schema_version in [12, 13] {
-            let db_path = root.join(format!("comon-v{schema_version}.db"));
+            let db_path = root.join(format!("llmon-v{schema_version}.db"));
             let conn = Connection::open(&db_path).expect("open legacy db");
             conn.execute_batch(&format!(
                 "
@@ -5609,7 +5609,7 @@ mod tests {
     #[test]
     fn open_or_init_scan_cache_db_migrates_v1_schema_and_clears_stale_rows() {
         let root = make_temp_dir("cache-migrate");
-        let db_path = root.join("comon.db");
+        let db_path = root.join("llmon.db");
         let conn = Connection::open(&db_path).expect("open legacy db");
         conn.execute_batch(
             "

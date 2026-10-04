@@ -97,11 +97,11 @@ fn resolve_workspace_filter(project_override: Option<&Path>) -> Option<PathBuf> 
     )
 }
 
-fn resolve_comon_home(override_home: Option<PathBuf>) -> Option<PathBuf> {
+fn resolve_llmon_home(override_home: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = override_home {
         return Some(path);
     }
-    if let Ok(value) = std::env::var("COMON_HOME") {
+    if let Ok(value) = std::env::var("LLMON_HOME") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             return Some(PathBuf::from(trimmed));
@@ -110,20 +110,20 @@ fn resolve_comon_home(override_home: Option<PathBuf>) -> Option<PathBuf> {
     if let Ok(value) = std::env::var("HOME") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed).join(".comon"));
+            return Some(PathBuf::from(trimmed).join(".llmon"));
         }
     }
     if let Ok(value) = std::env::var("USERPROFILE") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed).join(".comon"));
+            return Some(PathBuf::from(trimmed).join(".llmon"));
         }
     }
     None
 }
 
-fn load_or_bootstrap_user_config(comon_home: &Path) -> Result<UserConfig> {
-    let path = comon_home.join(USER_CONFIG_FILE_NAME);
+fn load_or_bootstrap_user_config(llmon_home: &Path) -> Result<UserConfig> {
+    let path = llmon_home.join(USER_CONFIG_FILE_NAME);
     if !path.exists() {
         let defaults = UserConfig::default();
         let encoded = serde_json::to_vec_pretty(&defaults).with_context(|| {
@@ -140,7 +140,7 @@ fn load_or_bootstrap_user_config(comon_home: &Path) -> Result<UserConfig> {
         .with_context(|| format!("Unable to parse user config {}", path.display()))?;
     if config.schema_version > USER_CONFIG_SCHEMA_VERSION {
         anyhow::bail!(
-            "Unsupported comon config schema version: {} (maximum {})",
+            "Unsupported llmon config schema version: {} (maximum {})",
             config.schema_version,
             USER_CONFIG_SCHEMA_VERSION
         );
@@ -172,7 +172,7 @@ impl From<LiveLimitsArg> for app::LiveLimitsMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "comon", version, about = "Codex usage + session browser TUI")]
+#[command(name = "llmon", version, about = "Usage, limits, and session history TUI for coding-agent CLIs")]
 struct Args {
     /// Launch with the session history screen active.
     #[arg(short = 'r', long = "read")]
@@ -194,11 +194,11 @@ struct Args {
     #[arg(long)]
     codex_home: Option<PathBuf>,
 
-    /// Override COMON_HOME for comon-owned state/cache files (default: $COMON_HOME or ~/.comon).
+    /// Override LLMON_HOME for llmon-owned state/cache files (default: $LLMON_HOME or ~/.llmon).
     #[arg(long)]
-    comon_home: Option<PathBuf>,
+    llmon_home: Option<PathBuf>,
 
-    /// Print effective comon config path and exit.
+    /// Print effective llmon config path and exit.
     #[arg(long)]
     print_config_path: bool,
 
@@ -267,7 +267,7 @@ struct Args {
     #[arg(long)]
     scan_cache_max_entries: Option<usize>,
 
-    /// Rebuild local scan cache on startup (delete `comon.db` before first usage scan).
+    /// Rebuild local scan cache on startup (delete `llmon.db` before first usage scan).
     #[arg(long)]
     rebuild_cache_on_start: bool,
 }
@@ -277,9 +277,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     if args.print_config_path {
-        let comon_home = resolve_comon_home(args.comon_home.clone())
-            .context("Unable to resolve COMON_HOME (default: ~/.comon)")?;
-        println!("{}", comon_home.join(USER_CONFIG_FILE_NAME).display());
+        let llmon_home = resolve_llmon_home(args.llmon_home.clone())
+            .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
+        println!("{}", llmon_home.join(USER_CONFIG_FILE_NAME).display());
         return Ok(());
     }
 
@@ -310,10 +310,10 @@ async fn main() -> Result<()> {
     let cwd = cwd_override
         .or_else(|| project.clone())
         .unwrap_or_else(|| launch_dir.clone());
-    let comon_home = resolve_comon_home(args.comon_home.clone())
-        .context("Unable to resolve COMON_HOME (default: ~/.comon)")?;
-    crate::storage::ensure_private_dir(&comon_home)?;
-    let user_config = load_or_bootstrap_user_config(&comon_home)?;
+    let llmon_home = resolve_llmon_home(args.llmon_home.clone())
+        .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
+    crate::storage::ensure_private_dir(&llmon_home)?;
+    let user_config = load_or_bootstrap_user_config(&llmon_home)?;
     let codex_home = usage::resolve_codex_home(args.codex_home.clone())
         .context("Unable to resolve CODEX_HOME")?;
 
@@ -382,7 +382,7 @@ async fn main() -> Result<()> {
         codex_bin: args.codex_bin.clone(),
         app_server_bin: args.app_server_bin.clone(),
         live_limits_mode: args.live_limits.into(),
-        comon_home,
+        llmon_home,
         codex_home,
         read_sessions_dir: read_config.sessions_dir,
         start_in_read_screen: args.read_mode,
@@ -429,7 +429,7 @@ mod tests {
                 .unwrap_or(0),
             TEMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let dir = test_temp_base_without_git_parent().join(format!("comon-main-{prefix}-{unique}"));
+        let dir = test_temp_base_without_git_parent().join(format!("llmon-main-{prefix}-{unique}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -485,8 +485,8 @@ mod tests {
 
     #[test]
     fn user_config_schema_one_migrates_with_discovery_disabled() {
-        let comon_home = make_temp_dir("config-migration");
-        let path = comon_home.join(USER_CONFIG_FILE_NAME);
+        let llmon_home = make_temp_dir("config-migration");
+        let path = llmon_home.join(USER_CONFIG_FILE_NAME);
         let legacy = serde_json::json!({
             "schema_version": 1,
             "usage_days": 45,
@@ -498,7 +498,7 @@ mod tests {
         )
         .expect("write legacy config");
 
-        let migrated = load_or_bootstrap_user_config(&comon_home).expect("migrate config");
+        let migrated = load_or_bootstrap_user_config(&llmon_home).expect("migrate config");
         assert_eq!(migrated.schema_version, USER_CONFIG_SCHEMA_VERSION);
         assert_eq!(migrated.usage_days, 45);
         assert_eq!(migrated.refresh_usage_secs, 600);
@@ -512,13 +512,13 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).expect("read migrated config"))
                 .expect("parse migrated config");
         assert_eq!(persisted["schema_version"], USER_CONFIG_SCHEMA_VERSION);
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn user_config_schema_two_preserves_explicit_discovery_roots() {
-        let comon_home = make_temp_dir("config-discovery-root-migration");
-        let path = comon_home.join(USER_CONFIG_FILE_NAME);
+        let llmon_home = make_temp_dir("config-discovery-root-migration");
+        let path = llmon_home.join(USER_CONFIG_FILE_NAME);
         let legacy = serde_json::json!({
             "schema_version": 2,
             "history_project_roots": ["/Volumes/Ext/src"]
@@ -529,13 +529,13 @@ mod tests {
         )
         .expect("write legacy config");
 
-        let migrated = load_or_bootstrap_user_config(&comon_home).expect("migrate config");
+        let migrated = load_or_bootstrap_user_config(&llmon_home).expect("migrate config");
         assert_eq!(migrated.schema_version, USER_CONFIG_SCHEMA_VERSION);
         assert_eq!(
             migrated.history_project_roots,
             vec![PathBuf::from("/Volumes/Ext/src")]
         );
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 }

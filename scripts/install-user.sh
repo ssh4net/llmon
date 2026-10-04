@@ -60,7 +60,7 @@ if [ "${#POSITIONAL[@]}" -eq 1 ]; then
   ROOT="${POSITIONAL[0]}"
 fi
 
-COMON_HOME_DIR="${COMON_HOME:-$HOME/.comon}"
+LLMON_HOME_DIR="${LLMON_HOME:-$HOME/.llmon}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -100,18 +100,18 @@ if [ -n "${BUILD_TARGET}" ]; then
   rustup target add "${BUILD_TARGET}"
 fi
 
-if [ -L "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): symlink is not allowed." >&2
+if [ -L "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): symlink is not allowed." >&2
   exit 1
 fi
 
-if [ -e "${COMON_HOME_DIR}" ] && [ ! -d "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): expected a directory." >&2
+if [ -e "${LLMON_HOME_DIR}" ] && [ ! -d "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): expected a directory." >&2
   exit 1
 fi
 
-mkdir -p "${COMON_HOME_DIR}"
-chmod 700 "${COMON_HOME_DIR}" 2>/dev/null || true
+mkdir -p "${LLMON_HOME_DIR}"
+chmod 700 "${LLMON_HOME_DIR}" 2>/dev/null || true
 
 INSTALL_ARGS=(
   --path "${REPO_DIR}"
@@ -127,11 +127,11 @@ fi
 cargo install "${INSTALL_ARGS[@]}"
 
 BIN_DIR="${ROOT}/bin"
-echo "Installed comon to ${BIN_DIR}/comon"
+echo "Installed llmon to ${BIN_DIR}/llmon"
 if [ -n "${BUILD_TARGET}" ]; then
   echo "Build target: ${BUILD_TARGET}"
 fi
-echo "Prepared COMON_HOME at ${COMON_HOME_DIR}"
+echo "Prepared LLMON_HOME at ${LLMON_HOME_DIR}"
 case ":${PATH}:" in
   *":${BIN_DIR}:"*) ;;
   *) echo "Add to PATH: export PATH=\"${BIN_DIR}:\$PATH\"" ;;

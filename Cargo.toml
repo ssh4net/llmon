@@ -1,6 +1,6 @@
 [package]
-name = "comon"
-version = "0.5.8"
+name = "llmon"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"

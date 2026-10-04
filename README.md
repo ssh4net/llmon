@@ -1,24 +1,23 @@
-<img width="1298" height="1050" alt="WindowsTerminal_dhfDXW9bI6" src="https://github.com/user-attachments/assets/15d36486-3406-4680-90c1-18d1d1d918db" />
-# comon
+# llmon
 
-Single-binary, cross-platform TUI for:
+Single-binary, cross-platform TUI for coding-agent CLIs: local usage stats,
+live account limits, and a session-history browser.
+
+llmon merges [CoMon](https://github.com/ssh4net/CoMon) (Codex monitor) and
+ClaudeMon (Claude Code monitor, derived from CoMon) into one tool with a
+combined view and full per-harness views. See [PLAN.md](PLAN.md) for the
+design and phases, and `CHANGELOG.md` for release history.
+
+Status: early development. The code base is CoMon renamed to llmon; it
+currently supports Codex only:
 
 - Local Codex usage stats (last 7/30 days, chart, top models) by scanning `CODEX_HOME/sessions`.
 - Local session-history browser grouped by project path, with session titles and prompt previews.
 - Live account limits/credits by spawning Codex App Server and calling `account/rateLimits/read` when an App Server executable is available.
 
-See `CHANGELOG.md` for release history.
-
 The horizontal Usage token chart shows three columns: **INPUT / NON-CACHED / OUTPUT**.
 Input includes cached input; non-cached is input minus cached input; output is
 generated tokens. Bar lengths and summary-card totals use input plus output.
-See the [synthetic-data preview](docs/screenshots/usage-token-columns.png).
-
-<img width="1298" height="1050" alt="WindowsTerminal_HTSsSPVKmE" src="https://github.com/user-attachments/assets/96719893-3cfc-4d3d-8d44-06721df8e14c" />
-<img width="1298" height="1050" alt="WindowsTerminal_qoqii76JKv" src="https://github.com/user-attachments/assets/15828746-2591-4871-a84c-f1d70e83ac5a" />
-<img width="1298" height="1050" alt="WindowsTerminal_qoqii76JKv" src="https://github.com/user-attachments/assets/748b0ba4-4c1a-4383-8f02-cb1abddacebb" />
-<img width="1298" height="1050" alt="WindowsTerminal_yiKe3HUtMO" src="https://github.com/user-attachments/assets/7a1c4ff5-3401-4f97-92f5-acacb3eb7b5b" />
-
 
 ## Requirements
 
@@ -32,7 +31,7 @@ See the [synthetic-data preview](docs/screenshots/usage-token-columns.png).
 
 ## Run
 
-By default, `comon` shows usage for **All workspaces** (regardless of current directory).
+By default, `llmon` shows usage for **All workspaces** (regardless of current directory).
 
 Press `s` / `F2` at runtime to switch between the Usage and Session history screens.
 
@@ -43,10 +42,10 @@ working directory equals or is under that path (Codex session `cwd`).
 
 ```bash
 # If installed (recommended):
-comon
+llmon
 
 # Start directly on the Session history screen:
-comon --read
+llmon --read
 
 # Or run from the repo without installing:
 cargo run --release
@@ -55,8 +54,8 @@ cargo run --release
 Common flags:
 
 - `--codex-home <path>`: override CODEX_HOME (default: `$CODEX_HOME` or `~/.codex`)
-- `--comon-home <path>`: override COMON_HOME for comon state/cache files (default: `$COMON_HOME` or `~/.comon`)
-- `--print-config-path`: print effective comon config path and exit
+- `--llmon-home <path>`: override LLMON_HOME for llmon state/cache files (default: `$LLMON_HOME` or `~/.llmon`)
+- `--print-config-path`: print effective llmon config path and exit
 - `-r` / `--read`: start on the Session history screen
 - `--sessions-dir <path>`: override the Codex sessions directory used by the Session history screen
 - `--print-sessions-dir`: print effective sessions directory and exit
@@ -75,13 +74,13 @@ Common flags:
 - `--scan-time-budget-ms <n>`: max parse time budget per refresh in ms (`0` disables budget)
 - `--full-scan`: process the complete pending session backlog in one refresh (ignores file/byte planning caps)
 - `--no-full-scan`: disable full scan for this run (overrides config)
-- `--scan-cache-max-entries <n>`: max entries kept in cache database (`comon.db`) (default from config)
-- `--rebuild-cache-on-start`: delete local scan cache DB files (`comon.db`, `comon.db-wal`, `comon.db-shm`) before first usage scan
+- `--scan-cache-max-entries <n>`: max entries kept in cache database (`llmon.db`) (default from config)
+- `--rebuild-cache-on-start`: delete local scan cache DB files (`llmon.db`, `llmon.db-wal`, `llmon.db-shm`) before first usage scan
 
 Config precedence:
 
 - CLI flags
-- `~/.comon/config.json` (or `$COMON_HOME/config.json`, or `--comon-home <path>/config.json`)
+- `~/.llmon/config.json` (or `$LLMON_HOME/config.json`, or `--llmon-home <path>/config.json`)
 - built-in defaults
 
 `config.json` is auto-created on first run. Example:
@@ -118,39 +117,39 @@ roots you intend to scan, for example:
 ```
 
 From the History screen, press `r` or `F5` and confirm the listed roots before
-CoMon enumerates them. Cached Deep/Full results remain available at startup but
+llmon enumerates them. Cached Deep/Full results remain available at startup but
 are marked as cached until explicitly refreshed. Do not use your whole home
-directory as a discovery root unless you deliberately want CoMon to inspect
+directory as a discovery root unless you deliberately want llmon to inspect
 all of its accessible subfolders; macOS can request access to protected folders
 inside such a root.
 
 Example:
 
 ```bash
-comon --codex-home "C:\\Users\\You\\.codex" --cwd "C:\\Repos\\some-git-repo"
+llmon --codex-home "C:\\Users\\You\\.codex" --cwd "C:\\Repos\\some-git-repo"
 ```
 
 Codex App-only Windows installs:
 
 ```bash
 # Usage/session history only; avoids App Server probing.
-comon --live-limits off
+llmon --live-limits off
 
 # If auto-detection misses the bundled CLI-style binary:
-comon --codex-bin "C:\\Path\\To\\Codex\\codex.exe"
+llmon --codex-bin "C:\\Path\\To\\Codex\\codex.exe"
 
 # If the app ships a standalone App Server binary:
-comon --app-server-bin "C:\\Path\\To\\Codex\\app-server.exe"
+llmon --app-server-bin "C:\\Path\\To\\Codex\\app-server.exe"
 ```
 
 Large-log recovery/tuning example:
 
 ```bash
 # One-time backfill for copied/old sessions (full reparse + cache refresh):
-comon --full-scan --scan-time-budget-ms 0
+llmon --full-scan --scan-time-budget-ms 0
 
 # Normal usage with bounded incremental refresh:
-comon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
+llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 ```
 
 ## Key bindings
@@ -204,12 +203,12 @@ cargo build --release
 
 The binary will be at:
 
-- Windows: `target\\release\\comon.exe`
-- Linux/macOS: `target/release/comon`
+- Windows: `target\\release\\llmon.exe`
+- Linux/macOS: `target/release/llmon`
 
 ### 3) Install the app (user scope)
 
-To run `comon` from anywhere:
+To run `llmon` from anywhere:
 
 ```bash
 cargo install --path . --locked --force
@@ -257,11 +256,11 @@ Optional custom install root:
 
 Install script behavior:
 
-- Installs `comon` into the chosen user root.
+- Installs `llmon` into the chosen user root.
 - Supports optional `--target <triple>` and `--musl` build/install mode on Linux.
 - Adds missing Rust target via `rustup target add` when a target is requested.
-- Prepares `COMON_HOME` (default `~/.comon`, or `$COMON_HOME` if set).
-- Refuses to use symlink/reparse-point `COMON_HOME` paths.
+- Prepares `LLMON_HOME` (default `~/.llmon`, or `$LLMON_HOME` if set).
+- Refuses to use symlink/reparse-point `LLMON_HOME` paths.
 
 ### 5) Build a prebuilt zip package (for GitHub releases)
 
@@ -280,7 +279,7 @@ rustup target add x86_64-unknown-linux-musl
 bash scripts/package-prebuilt.sh --musl
 
 # 4) Upload generated zip to GitHub Release
-ls dist/comon-v*-unknown-linux-musl.zip
+ls dist/llmon-v*-unknown-linux-musl.zip
 ```
 
 If a musl build fails with `failed to find tool "x86_64-linux-musl-gcc"`,
@@ -310,30 +309,30 @@ SKIP_NOTARY=1 bash scripts/package-macos.sh
 
 # Developer ID signed package, submitted with a stored notarytool profile:
 SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-NOTARY_PROFILE="comon-notary" \
+NOTARY_PROFILE="llmon-notary" \
 bash scripts/package-macos.sh
 
 # Optional explicit target:
 bash scripts/package-macos.sh --target aarch64-apple-darwin
 ```
 
-The macOS script builds `comon`, signs the executable, bundles Homebrew-linked
+The macOS script builds `llmon`, signs the executable, bundles Homebrew-linked
 dylibs into the package when needed, and creates:
 
-- `dist/comon-v<version>-<apple-target>.zip`
+- `dist/llmon-v<version>-<apple-target>.zip`
 
 Signing identity and notarization profile values are read from environment
 variables only; do not commit credentials or Apple account details into the repo.
 
 Package output:
 
-- `dist/comon-v<version>-<target>.zip`
+- `dist/llmon-v<version>-<target>.zip`
 
 On Linux, prefer `*-unknown-linux-musl.zip` for maximum compatibility across distros.
 
 Each zip includes:
 
-- `comon` binary
+- `llmon` binary
 - `install.sh` (user-scope install, no Cargo needed)
 - `LICENSE`, `README.txt`
 
@@ -342,8 +341,8 @@ Each zip includes:
 User flow:
 
 ```bash
-unzip comon-v<version>-<target>.zip
-cd comon-v<version>-<target>
+unzip llmon-v<version>-<target>.zip
+cd llmon-v<version>-<target>
 bash install.sh
 ```
 
@@ -370,19 +369,19 @@ CI also runs this check on each push and pull request via `.github/workflows/asc
 ## Notes
 
 - Usage stats are derived from Codex session JSONL logs. If you have no session data yet, values will be empty.
-- Usage charts index the complete local session history and cache completed work incrementally. Until the initial backlog is complete, CoMon shows an indexing status instead of partial totals.
+- Usage charts index the complete local session history and cache completed work incrementally. Until the initial backlog is complete, llmon shows an indexing status instead of partial totals.
 - APISTAT displays the server-owned UTC buckets returned by Codex App Server. USAGE reconstructs local estimates from session logs, so small differences can remain even when the date range and UTC grouping match.
-- Limits/credits require Codex App Server to start successfully (auth, environment, and a usable working directory). CoMon auto-detects `codex` on `PATH` and common Windows Codex App bundle locations; use `--codex-bin` or `--app-server-bin` when needed.
+- Limits/credits require Codex App Server to start successfully (auth, environment, and a usable working directory). llmon auto-detects `codex` on `PATH` and common Windows Codex App bundle locations; use `--codex-bin` or `--app-server-bin` when needed.
 - Weekly limit percentages are shown as used / remaining. The weekly Limits gauge shows total weekly usage and shares the weekly text's daily-allowance warning color: white below 50% consumed, yellow from 50%, orange from 70%, and red from 90%. Unused allowance carries forward across reset-anchored 24-hour periods. Its marker shows the cumulative allowance through today, not elapsed clock time; monthly gauges remain white.
-- comon stores local app state in `~/.comon/state.json` by default (or `$COMON_HOME`, or `--comon-home`).
+- llmon stores local app state in `~/.llmon/state.json` by default (or `$LLMON_HOME`, or `--llmon-home`).
 - Display formatting starts in Classic mode; press `n` or use `STYLE CLASS/SCOMP/SFULL` in the Usage controls to choose Classic, System Compact, or System Full. Both System modes use the operating system locale for dates, times, decimals, and calendar labels; Compact uses the detected thousands separator and abbreviates dashboard token values, while Full groups expanded integers with regular spaces. The choice is saved in `state.json` without changing stored data.
 - Vertical chart labels preserve the selected style when they fit and compact only individual values that exceed their bar width. Hovering a filled bar shows the exact value.
 - The quit dialog's `Don't show again` checkbox disables future `q`/`QUIT` confirmations after a confirmed exit. The checkbox beside `QUIT` shows that saved state; clicking it asks before enabling or disabling confirmation.
-- comon stores scan cache in `~/.comon/comon.db` to avoid rereading unchanged session files.
-- Large session logs are parsed incrementally with persisted parser offsets in `comon.db`; unchanged files are reused from cache.
+- llmon stores scan cache in `~/.llmon/llmon.db` to avoid rereading unchanged session files.
+- Large session logs are parsed incrementally with persisted parser offsets in `llmon.db`; unchanged files are reused from cache.
 - If historical days look incomplete after adding old session files, run once with `--full-scan --scan-time-budget-ms 0` to force a full reparse and refresh cached summaries.
-- comon uses embedded SQLite (`rusqlite` with bundled SQLite); no system `sqlite3` CLI is required at runtime.
-- comon stores user-editable runtime settings in `~/.comon/config.json` by default.
-- Privacy: comon stores metadata (workspace paths, timestamps, token/run/time aggregates) and does not persist prompt/completion text.
-- File permissions: on Unix-like systems, comon enforces `0700` on `COMON_HOME` and `0600` on files it writes (`config.json`, `state.json`, `comon.db`).
-- Symlink hardening: comon refuses symlink targets for `COMON_HOME` files (`config.json`, `state.json`, `comon.db`, `comon.db-wal`, `comon.db-shm`) and rejects symlink/reparse-point `COMON_HOME` during install scripts.
+- llmon uses embedded SQLite (`rusqlite` with bundled SQLite); no system `sqlite3` CLI is required at runtime.
+- llmon stores user-editable runtime settings in `~/.llmon/config.json` by default.
+- Privacy: llmon stores metadata (workspace paths, timestamps, token/run/time aggregates) and does not persist prompt/completion text.
+- File permissions: on Unix-like systems, llmon enforces `0700` on `LLMON_HOME` and `0600` on files it writes (`config.json`, `state.json`, `llmon.db`).
+- Symlink hardening: llmon refuses symlink targets for `LLMON_HOME` files (`config.json`, `state.json`, `llmon.db`, `llmon.db-wal`, `llmon.db-shm`) and rejects symlink/reparse-point `LLMON_HOME` during install scripts.

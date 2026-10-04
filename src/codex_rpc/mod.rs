@@ -297,8 +297,8 @@ impl CodexRpc {
     async fn initialize(self: &Arc<Self>) -> Result<()> {
         let init_params = json!({
             "clientInfo": {
-                "name": "comon",
-                "title": "comon",
+                "name": "llmon",
+                "title": "llmon",
                 "version": env!("CARGO_PKG_VERSION")
             }
         });

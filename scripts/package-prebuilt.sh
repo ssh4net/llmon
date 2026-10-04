@@ -150,7 +150,7 @@ if [ "${SKIP_BUILD}" -eq 0 ]; then
   fi
 fi
 
-BIN_NAME="comon"
+BIN_NAME="llmon"
 BIN_SRC="${REPO_DIR}/target/${TARGET}/release/${BIN_NAME}"
 if [ "${TARGET}" = "${HOST_TRIPLE}" ] && [ ! -f "${BIN_SRC}" ]; then
   BIN_SRC="${REPO_DIR}/target/release/${BIN_NAME}"
@@ -167,19 +167,19 @@ if [ -z "${VERSION}" ]; then
   exit 1
 fi
 
-PKG_BASE="comon-v${VERSION}-${TARGET}"
+PKG_BASE="llmon-v${VERSION}-${TARGET}"
 PKG_ROOT="${REPO_DIR}/${OUT_DIR}/${PKG_BASE}"
 ZIP_PATH="${REPO_DIR}/${OUT_DIR}/${PKG_BASE}.zip"
 
 rm -rf "${PKG_ROOT}"
 mkdir -p "${PKG_ROOT}"
 
-install -m 755 "${BIN_SRC}" "${PKG_ROOT}/comon"
+install -m 755 "${BIN_SRC}" "${PKG_ROOT}/llmon"
 install -m 755 "${REPO_DIR}/scripts/install-prebuilt.sh" "${PKG_ROOT}/install.sh"
 install -m 644 "${REPO_DIR}/LICENSE" "${PKG_ROOT}/LICENSE"
 
 cat > "${PKG_ROOT}/README.txt" <<EOF
-comon ${VERSION} (${TARGET})
+llmon ${VERSION} (${TARGET})
 
 Install (user scope, no Cargo required):
   bash install.sh
@@ -188,7 +188,7 @@ Optional custom install root:
   bash install.sh ~/.local
 
 Binary path after install:
-  ~/.local/bin/comon
+  ~/.local/bin/llmon
 EOF
 
 mkdir -p "${REPO_DIR}/${OUT_DIR}"

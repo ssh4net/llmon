@@ -270,7 +270,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
 }
 
 fn app_title() -> String {
-    format!(" comon :: {} ", env!("CARGO_PKG_VERSION"))
+    format!(" llmon :: {} ", env!("CARGO_PKG_VERSION"))
 }
 
 fn usage_screen_layout(area: Rect, footer_height: u16) -> [Rect; 3] {
@@ -5357,7 +5357,7 @@ fn render_history_catalog_scan_confirmation(
 
     let mut lines = vec![
         Line::from(Span::styled(
-            "CoMon will scan these folders for Git repositories.",
+            "llmon will scan these folders for Git repositories.",
             Style::default().fg(Color::Yellow),
         )),
         Line::from(Span::styled(
@@ -7327,7 +7327,7 @@ mod tests {
     fn api_stats_outer_title_matches_usage() {
         assert_eq!(
             app_title(),
-            format!(" comon :: {} ", env!("CARGO_PKG_VERSION"))
+            format!(" llmon :: {} ", env!("CARGO_PKG_VERSION"))
         );
         let (navigation, targets) =
             navigation_title(Rect::new(0, 0, 80, 24), ActiveScreen::ApiStat);

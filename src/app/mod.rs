@@ -21,7 +21,7 @@ pub struct Config {
     pub codex_bin: Option<String>,
     pub app_server_bin: Option<std::path::PathBuf>,
     pub live_limits_mode: LiveLimitsMode,
-    pub comon_home: std::path::PathBuf,
+    pub llmon_home: std::path::PathBuf,
     pub codex_home: std::path::PathBuf,
     pub read_sessions_dir: std::path::PathBuf,
     pub start_in_read_screen: bool,
@@ -631,7 +631,7 @@ async fn run_inner(
     let (catalog_refresh_tx, catalog_refresh_rx) = mpsc::channel::<()>(1);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let restored_ui_state = load_persisted_ui_state_with_history_depth(
-        &config.comon_home,
+        &config.llmon_home,
         config.workspace_path.as_deref(),
         config.history_deep_depth,
     )
@@ -641,7 +641,7 @@ async fn run_inner(
         defaults
     });
 
-    let scan_cache_db_path = config.comon_home.join("comon.db");
+    let scan_cache_db_path = config.llmon_home.join("llmon.db");
     if config.rebuild_cache_on_start {
         clear_scan_cache_files(&scan_cache_db_path)?;
     }
@@ -674,7 +674,7 @@ async fn run_inner(
         let search_roots = config.history_project_roots.clone();
         let excluded_roots = vec![
             config.codex_home.join("sessions"),
-            config.comon_home.clone(),
+            config.llmon_home.clone(),
         ];
         let max_depth = history_catalog_max_depth;
         let max_candidates = config.history_catalog_max_candidates;
@@ -1071,7 +1071,7 @@ async fn run_inner(
         history_project_roots: config.history_project_roots.clone(),
         history_catalog_max_depth,
         history_catalog_max_directories,
-        history_catalog_config_path: config.comon_home.join("config.json"),
+        history_catalog_config_path: config.llmon_home.join("config.json"),
         history_catalog_scan_prompt: false,
         display_style: restored_ui_state.display_style,
         accent_theme: restored_ui_state.accent_theme,
@@ -1123,7 +1123,7 @@ async fn run_inner(
                         &limits_refresh_tx,
                         &limit_reset_tx,
                         &catalog_refresh_tx,
-                        &config.comon_home,
+                        &config.llmon_home,
                     )? {
                         InputOutcome::Continue(should_redraw) => {
                             dirty |= should_redraw;
@@ -1160,13 +1160,13 @@ async fn run_inner(
                 .map(|changed_at| changed_at.elapsed() >= STATE_SAVE_DEBOUNCE)
                 .unwrap_or(true)
         {
-            let _ = save_persisted_ui_state(&config.comon_home, &current_ui_state);
+            let _ = save_persisted_ui_state(&config.llmon_home, &current_ui_state);
             last_saved_ui_state = current_ui_state;
         }
     }
 
     let final_ui_state = PersistedUiState::from_app_state(&state);
-    let _ = save_persisted_ui_state(&config.comon_home, &final_ui_state);
+    let _ = save_persisted_ui_state(&config.llmon_home, &final_ui_state);
 
     Ok(())
 }
@@ -1222,13 +1222,13 @@ fn new_limit_reset_idempotency_key() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("comon-{}-{nanos}-{sequence}", std::process::id())
+    format!("llmon-{}-{nanos}-{sequence}", std::process::id())
 }
 
 fn begin_limit_reset(
     state: &mut AppState,
     limit_reset_tx: &mpsc::Sender<String>,
-    comon_home: &Path,
+    llmon_home: &Path,
 ) -> Result<bool> {
     if state.limit_reset_button_state() != LimitResetButtonState::Enabled {
         state.limit_reset_confirm_open = false;
@@ -1247,7 +1247,7 @@ fn begin_limit_reset(
     // Persist the safety lock before the irreversible request. If persistence fails, do not
     // consume a credit: an immediate restart could otherwise permit an accidental retry.
     if let Err(error) =
-        save_persisted_ui_state(comon_home, &PersistedUiState::from_app_state(state))
+        save_persisted_ui_state(llmon_home, &PersistedUiState::from_app_state(state))
     {
         state.limit_reset_in_flight = false;
         state.limit_reset_cooldown_until = None;
@@ -1262,7 +1262,7 @@ fn begin_limit_reset(
         state.limit_reset_cooldown_until = None;
         state.limit_reset_notice = None;
         state.limit_reset_error = Some(format!("Unable to queue reset request: {error}"));
-        let _ = save_persisted_ui_state(comon_home, &PersistedUiState::from_app_state(state));
+        let _ = save_persisted_ui_state(llmon_home, &PersistedUiState::from_app_state(state));
     }
     Ok(true)
 }
@@ -1271,11 +1271,11 @@ fn handle_limit_reset_confirmation_input(
     state: &mut AppState,
     event: Event,
     limit_reset_tx: &mpsc::Sender<String>,
-    comon_home: &Path,
+    llmon_home: &Path,
 ) -> Result<InputOutcome> {
     let finish = |state: &mut AppState, confirmed: bool| -> Result<InputOutcome> {
         if confirmed {
-            begin_limit_reset(state, limit_reset_tx, comon_home)?;
+            begin_limit_reset(state, limit_reset_tx, llmon_home)?;
         } else {
             state.limit_reset_confirm_open = false;
             state.limit_reset_confirm_yes_selected = false;
@@ -1318,7 +1318,7 @@ fn handle_input_event(
     limits_refresh_tx: &mpsc::Sender<()>,
     limit_reset_tx: &mpsc::Sender<String>,
     catalog_refresh_tx: &mpsc::Sender<()>,
-    comon_home: &Path,
+    llmon_home: &Path,
 ) -> Result<InputOutcome> {
     if state.history_catalog_scan_prompt {
         return match event {
@@ -1369,7 +1369,7 @@ fn handle_input_event(
     }
 
     if state.limit_reset_confirm_open {
-        return handle_limit_reset_confirmation_input(state, event, limit_reset_tx, comon_home);
+        return handle_limit_reset_confirmation_input(state, event, limit_reset_tx, llmon_home);
     }
 
     if let Some(desired_skip_confirmation) = state.quit_preference_prompt {
@@ -2387,22 +2387,22 @@ fn missing_app_server_message() -> &'static str {
 
 #[cfg(test)]
 fn load_persisted_ui_state(
-    comon_home: &Path,
+    llmon_home: &Path,
     workspace_hint: Option<&Path>,
 ) -> Result<PersistedUiState> {
     load_persisted_ui_state_with_history_depth(
-        comon_home,
+        llmon_home,
         workspace_hint,
         crate::read::catalog::DEFAULT_DEEP_DEPTH,
     )
 }
 
 fn load_persisted_ui_state_with_history_depth(
-    comon_home: &Path,
+    llmon_home: &Path,
     workspace_hint: Option<&Path>,
     history_deep_depth: u8,
 ) -> Result<PersistedUiState> {
-    let store = load_or_bootstrap_state_store(comon_home)?;
+    let store = load_or_bootstrap_state_store(llmon_home)?;
     let mut state =
         PersistedUiState::default_for_workspace(workspace_hint.map(|path| path.to_path_buf()));
     state.history_deep_depth = history_deep_depth.clamp(1, crate::read::catalog::MAX_DEEP_DEPTH);
@@ -2503,8 +2503,8 @@ fn load_persisted_ui_state_with_history_depth(
     Ok(state)
 }
 
-fn save_persisted_ui_state(comon_home: &Path, state: &PersistedUiState) -> Result<()> {
-    let mut store = load_or_bootstrap_state_store(comon_home)?;
+fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Result<()> {
+    let mut store = load_or_bootstrap_state_store(llmon_home)?;
     let now = unix_time_seconds();
     let workspace_path_text = state
         .workspace_path
@@ -2564,11 +2564,11 @@ fn save_persisted_ui_state(comon_home: &Path, state: &PersistedUiState) -> Resul
         );
     }
 
-    write_state_store(comon_home, &store)
+    write_state_store(llmon_home, &store)
 }
 
-fn load_or_bootstrap_state_store(comon_home: &Path) -> Result<StateStore> {
-    let store_path = comon_home.join(STATE_STORE_FILE_NAME);
+fn load_or_bootstrap_state_store(llmon_home: &Path) -> Result<StateStore> {
+    let store_path = llmon_home.join(STATE_STORE_FILE_NAME);
     if !store_path.exists() {
         return Ok(StateStore::default());
     }
@@ -2579,7 +2579,7 @@ fn load_or_bootstrap_state_store(comon_home: &Path) -> Result<StateStore> {
         .with_context(|| format!("Unable to parse state store {}", store_path.display()))?;
     if store.schema_version > STATE_STORE_SCHEMA_VERSION {
         anyhow::bail!(
-            "Unsupported comon state schema version: {} (maximum {})",
+            "Unsupported llmon state schema version: {} (maximum {})",
             store.schema_version,
             STATE_STORE_SCHEMA_VERSION
         );
@@ -2589,8 +2589,8 @@ fn load_or_bootstrap_state_store(comon_home: &Path) -> Result<StateStore> {
     Ok(store)
 }
 
-fn write_state_store(comon_home: &Path, store: &StateStore) -> Result<()> {
-    let store_path = comon_home.join(STATE_STORE_FILE_NAME);
+fn write_state_store(llmon_home: &Path, store: &StateStore) -> Result<()> {
+    let store_path = llmon_home.join(STATE_STORE_FILE_NAME);
     let encoded = serde_json::to_vec_pretty(store)
         .with_context(|| format!("Unable to encode state store {}", store_path.display()))?;
     crate::storage::write_private_file(&store_path, &encoded)?;
@@ -3017,7 +3017,7 @@ mod tests {
                 .unwrap_or(0),
             TEMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let dir = std::env::temp_dir().join(format!("comon-app-{prefix}-{unique}"));
+        let dir = std::env::temp_dir().join(format!("llmon-app-{prefix}-{unique}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
@@ -3046,20 +3046,20 @@ mod tests {
 
     #[test]
     fn load_persisted_ui_state_does_not_restore_last_workspace_without_hint() {
-        let comon_home = make_temp_dir("state-no-hint");
+        let llmon_home = make_temp_dir("state-no-hint");
         let mut store = StateStore::default();
         store.global.last_workspace_path = Some("/tmp/old-workspace".to_string());
-        write_state_store(&comon_home, &store).expect("write state store");
+        write_state_store(&llmon_home, &store).expect("write state store");
 
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.workspace_path, None);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn load_persisted_ui_state_uses_workspace_hint_and_workspace_state() {
-        let comon_home = make_temp_dir("state-hint");
+        let llmon_home = make_temp_dir("state-hint");
         let workspace_path = PathBuf::from("/tmp/repo-workspace");
         let mut store = StateStore::default();
         store.global.last_workspace_path = Some("/tmp/other-workspace".to_string());
@@ -3070,74 +3070,74 @@ mod tests {
                 updated_at: 1,
             },
         );
-        write_state_store(&comon_home, &store).expect("write state store");
+        write_state_store(&llmon_home, &store).expect("write state store");
 
-        let loaded = load_persisted_ui_state(&comon_home, Some(workspace_path.as_path()))
+        let loaded = load_persisted_ui_state(&llmon_home, Some(workspace_path.as_path()))
             .expect("load persisted ui state");
         assert_eq!(loaded.workspace_path, Some(workspace_path));
         assert!(loaded.no_sessions_confirm_dismissed);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn legacy_state_without_display_style_defaults_to_classic() {
-        let comon_home = make_temp_dir("legacy-display-style");
+        let llmon_home = make_temp_dir("legacy-display-style");
         let store = StateStore::default();
-        write_state_store(&comon_home, &store).expect("write state store");
+        write_state_store(&llmon_home, &store).expect("write state store");
 
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.display_style, DisplayStyle::Classic);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn display_style_round_trips_through_state_store() {
-        let comon_home = make_temp_dir("system-display-style");
+        let llmon_home = make_temp_dir("system-display-style");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.display_style = DisplayStyle::SystemFull;
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemFull);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn theme_settings_round_trip_through_state_store() {
-        let comon_home = make_temp_dir("theme-settings");
+        let llmon_home = make_temp_dir("theme-settings");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.accent_theme = AccentTheme::Magenta;
         state.bar_fill_mode = BarFillMode::DualColorBackground;
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.accent_theme, AccentTheme::Magenta);
         assert_eq!(loaded.bar_fill_mode, BarFillMode::DualColorBackground);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn active_reset_cooldown_round_trips_through_state_store() {
-        let comon_home = make_temp_dir("limit-reset-cooldown");
+        let llmon_home = make_temp_dir("limit-reset-cooldown");
         let mut state = PersistedUiState::default_for_workspace(None);
         let cooldown_until = unix_time_seconds().saturating_add(3_600);
         state.limit_reset_cooldown_until = Some(cooldown_until);
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.limit_reset_cooldown_until, Some(cooldown_until));
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn legacy_state_without_theme_settings_uses_defaults() {
-        let comon_home = make_temp_dir("legacy-theme-settings");
-        let path = comon_home.join(STATE_STORE_FILE_NAME);
+        let llmon_home = make_temp_dir("legacy-theme-settings");
+        let path = llmon_home.join(STATE_STORE_FILE_NAME);
         let legacy = serde_json::json!({
             "schema_version": 2,
             "global": {
@@ -3152,62 +3152,62 @@ mod tests {
         )
         .expect("write legacy state");
 
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load legacy ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load legacy ui state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemFull);
         assert_eq!(loaded.accent_theme, AccentTheme::Cyan);
         assert_eq!(loaded.bar_fill_mode, BarFillMode::Semigraphic);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn api_stat_controls_round_trip_through_state_store() {
-        let comon_home = make_temp_dir("api-stat-controls");
+        let llmon_home = make_temp_dir("api-stat-controls");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.api_stat_grouping = ApiStatGrouping::Month;
         state.api_stat_graph = ApiStatGraph::Heat;
         state.api_stat_orientation = ChartOrientation::Horizontal;
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.api_stat_grouping, ApiStatGrouping::Month);
         assert_eq!(loaded.api_stat_graph, ApiStatGraph::Heat);
         assert_eq!(loaded.api_stat_orientation, ChartOrientation::Horizontal);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn usage_grouping_and_zone_round_trip_through_state_store() {
-        let comon_home = make_temp_dir("usage-zone-controls");
+        let llmon_home = make_temp_dir("usage-zone-controls");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.range = ChartRange::Month;
         state.usage_zone = UsageZone::Utc;
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.range, ChartRange::Month);
         assert_eq!(loaded.usage_zone, UsageZone::Utc);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn quit_confirmation_preference_round_trips_through_state_store() {
-        let comon_home = make_temp_dir("quit-confirmation-preference");
+        let llmon_home = make_temp_dir("quit-confirmation-preference");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.skip_quit_confirmation = true;
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert!(loaded.skip_quit_confirmation);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn history_project_controls_round_trip_through_state_store() {
-        let comon_home = make_temp_dir("history-project-controls");
+        let llmon_home = make_temp_dir("history-project-controls");
         let mut state = PersistedUiState::default_for_workspace(None);
         state.history_project_view_mode = crate::read::catalog::ProjectViewMode::Custom;
         state.history_deep_depth = 5;
@@ -3218,8 +3218,8 @@ mod tests {
             .history_explicitly_excluded_projects
             .insert("path:/home/example/hidden".to_string());
 
-        save_persisted_ui_state(&comon_home, &state).expect("save persisted ui state");
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(
             loaded.history_project_view_mode,
             crate::read::catalog::ProjectViewMode::Custom
@@ -3234,20 +3234,20 @@ mod tests {
             state.history_explicitly_excluded_projects
         );
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn state_schema_one_migrates_by_applying_catalog_defaults() {
-        let comon_home = make_temp_dir("state-schema-one");
+        let llmon_home = make_temp_dir("state-schema-one");
         let mut store = StateStore {
             schema_version: 1,
             ..StateStore::default()
         };
         store.global.display_style = Some(DisplayStyle::SystemFull.store_value().to_string());
-        write_state_store(&comon_home, &store).expect("write legacy state");
+        write_state_store(&llmon_home, &store).expect("write legacy state");
 
-        let loaded = load_persisted_ui_state_with_history_depth(&comon_home, None, 4)
+        let loaded = load_persisted_ui_state_with_history_depth(&llmon_home, None, 4)
             .expect("load legacy state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemFull);
         assert_eq!(
@@ -3256,19 +3256,19 @@ mod tests {
         );
         assert_eq!(loaded.history_deep_depth, 4);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 
     #[test]
     fn legacy_system_style_restores_as_system_compact() {
-        let comon_home = make_temp_dir("legacy-system-display-style");
+        let llmon_home = make_temp_dir("legacy-system-display-style");
         let mut store = StateStore::default();
         store.global.display_style = Some("system".to_string());
-        write_state_store(&comon_home, &store).expect("write state store");
+        write_state_store(&llmon_home, &store).expect("write state store");
 
-        let loaded = load_persisted_ui_state(&comon_home, None).expect("load persisted ui state");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemCompact);
 
-        let _ = std::fs::remove_dir_all(comon_home);
+        let _ = std::fs::remove_dir_all(llmon_home);
     }
 }

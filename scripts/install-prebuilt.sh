@@ -8,7 +8,7 @@ Usage: install-prebuilt.sh [root]
 Args:
   root    Install root (default: ~/.local)
 
-Installs the bundled `comon` binary from this package into <root>/bin.
+Installs the bundled `llmon` binary from this package into <root>/bin.
 EOF
 }
 
@@ -26,29 +26,29 @@ if [ $# -gt 1 ]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SRC_BIN="${SCRIPT_DIR}/comon"
-COMON_HOME_DIR="${COMON_HOME:-$HOME/.comon}"
+SRC_BIN="${SCRIPT_DIR}/llmon"
+LLMON_HOME_DIR="${LLMON_HOME:-$HOME/.llmon}"
 
 if [ ! -f "${SRC_BIN}" ]; then
   echo "Missing binary: ${SRC_BIN}" >&2
   exit 1
 fi
 
-if [ -L "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): symlink is not allowed." >&2
+if [ -L "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): symlink is not allowed." >&2
   exit 1
 fi
 
-if [ -e "${COMON_HOME_DIR}" ] && [ ! -d "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): expected a directory." >&2
+if [ -e "${LLMON_HOME_DIR}" ] && [ ! -d "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): expected a directory." >&2
   exit 1
 fi
 
-mkdir -p "${COMON_HOME_DIR}"
-chmod 700 "${COMON_HOME_DIR}" 2>/dev/null || true
+mkdir -p "${LLMON_HOME_DIR}"
+chmod 700 "${LLMON_HOME_DIR}" 2>/dev/null || true
 
 BIN_DIR="${ROOT}/bin"
-DST_BIN="${BIN_DIR}/comon"
+DST_BIN="${BIN_DIR}/llmon"
 
 mkdir -p "${BIN_DIR}"
 
@@ -59,8 +59,8 @@ fi
 
 install -m 755 "${SRC_BIN}" "${DST_BIN}"
 
-echo "Installed comon to ${DST_BIN}"
-echo "Prepared COMON_HOME at ${COMON_HOME_DIR}"
+echo "Installed llmon to ${DST_BIN}"
+echo "Prepared LLMON_HOME at ${LLMON_HOME_DIR}"
 case ":${PATH}:" in
   *":${BIN_DIR}:"*) ;;
   *) echo "Add to PATH: export PATH=\"${BIN_DIR}:\$PATH\"" ;;

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- Renamed comon to llmon, the start of the merge of comon (Codex) and
+  ClaudeMon (Claude Code) into one monitor; see `PLAN.md`. Version reset to
+  0.1.0.
+- Renamed the binary, crate, state directory (`~/.llmon`, `LLMON_HOME`,
+  `--llmon-home`), cache database (`llmon.db`), and install/package scripts.
+  Existing `~/.comon` data is not read yet; a migration command is planned.
+
+The entries below are from comon, llmon's predecessor.
+
+## comon (unreleased)
+
 - Fixed musl builds by requesting only the numeric and time locale categories
   used by CoMon instead of the unavailable musl `libc::LC_ALL_MASK` binding.
 - Deep/Full History repository discovery is now opt-in: startup uses only the

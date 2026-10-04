@@ -607,7 +607,7 @@ mod tests {
             std::process::id(),
             TEMP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let dir = std::env::temp_dir().join(format!("comon-read-{prefix}-{unique}"));
+        let dir = std::env::temp_dir().join(format!("llmon-read-{prefix}-{unique}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir

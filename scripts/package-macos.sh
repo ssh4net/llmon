@@ -5,7 +5,7 @@ print_usage() {
   cat <<'EOF'
 Usage: package-macos.sh [--target <triple>] [--out-dir <dir>] [--skip-build]
 
-Builds, signs, and packages a macOS comon release zip.
+Builds, signs, and packages a macOS llmon release zip.
 
 Environment:
   SIGN_IDENTITY    Developer ID Application identity. Defaults to ad-hoc signing.
@@ -153,16 +153,16 @@ if [ "${SKIP_BUILD}" -eq 0 ]; then
   )
 fi
 
-BIN_SRC="${REPO_DIR}/target/${TARGET}/release/comon"
+BIN_SRC="${REPO_DIR}/target/${TARGET}/release/llmon"
 if [ "${TARGET}" = "${HOST_TRIPLE}" ] && [ ! -f "${BIN_SRC}" ]; then
-  BIN_SRC="${REPO_DIR}/target/release/comon"
+  BIN_SRC="${REPO_DIR}/target/release/llmon"
 fi
 if [ ! -f "${BIN_SRC}" ]; then
   echo "Built binary not found: ${BIN_SRC}" >&2
   exit 1
 fi
 
-PKG_BASE="comon-v${VERSION}-${TARGET}"
+PKG_BASE="llmon-v${VERSION}-${TARGET}"
 PKG_ROOT="${DIST_DIR}/${PKG_BASE}"
 ZIP_PATH="${DIST_DIR}/${PKG_BASE}.zip"
 QUEUE_FILE="${DIST_DIR}/dylib-queue.txt"
@@ -215,7 +215,7 @@ bundle_dylibs() {
   : > "${QUEUE_FILE}"
   : > "${PROCESSED_FILE}"
 
-  collect_bundled_dependencies "${PKG_ROOT}/comon" | while IFS= read -r dep; do
+  collect_bundled_dependencies "${PKG_ROOT}/llmon" | while IFS= read -r dep; do
     queue_dependency "${dep}"
   done
 
@@ -239,7 +239,7 @@ bundle_dylibs() {
     printf '%s\n' "${dep}" >> "${PROCESSED_FILE}"
   done < "${QUEUE_FILE}"
 
-  rewrite_dependency_references "${PKG_ROOT}/comon" "@executable_path/lib"
+  rewrite_dependency_references "${PKG_ROOT}/llmon" "@executable_path/lib"
   if [ -d "${PKG_ROOT}/lib" ]; then
     find "${PKG_ROOT}/lib" -type f -name '*.dylib' -print | while IFS= read -r dylib; do
       rewrite_dependency_references "${dylib}" "@loader_path"
@@ -258,8 +258,8 @@ sign_binary() {
 rm -rf "${PKG_ROOT}"
 mkdir -p "${PKG_ROOT}" "${DIST_DIR}"
 
-ditto --noextattr --noacl "${BIN_SRC}" "${PKG_ROOT}/comon"
-chmod 755 "${PKG_ROOT}/comon"
+ditto --noextattr --noacl "${BIN_SRC}" "${PKG_ROOT}/llmon"
+chmod 755 "${PKG_ROOT}/llmon"
 ditto --noextattr --noacl "${REPO_DIR}/LICENSE" "${PKG_ROOT}/LICENSE"
 
 bundle_dylibs
@@ -269,8 +269,8 @@ if [ -d "${PKG_ROOT}/lib" ]; then
     sign_binary "${dylib}"
   done
 fi
-sign_binary "${PKG_ROOT}/comon"
-codesign --verify --strict --verbose=4 "${PKG_ROOT}/comon"
+sign_binary "${PKG_ROOT}/llmon"
+codesign --verify --strict --verbose=4 "${PKG_ROOT}/llmon"
 
 cat > "${PKG_ROOT}/install.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -278,12 +278,12 @@ set -euo pipefail
 
 ROOT="${1:-$HOME/.local}"
 PKG_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SRC_BIN="${PKG_DIR}/comon"
-COMON_HOME_DIR="${COMON_HOME:-$HOME/.comon}"
+SRC_BIN="${PKG_DIR}/llmon"
+LLMON_HOME_DIR="${LLMON_HOME:-$HOME/.llmon}"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   echo "Usage: install.sh [root]"
-  echo "Installs comon into <root>/bin and bundled dylibs into <root>/bin/lib."
+  echo "Installs llmon into <root>/bin and bundled dylibs into <root>/bin/lib."
   exit 0
 fi
 if [ $# -gt 1 ]; then
@@ -294,18 +294,18 @@ if [ ! -f "${SRC_BIN}" ]; then
   echo "Missing binary: ${SRC_BIN}" >&2
   exit 1
 fi
-if [ -L "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): symlink is not allowed." >&2
+if [ -L "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): symlink is not allowed." >&2
   exit 1
 fi
-if [ -e "${COMON_HOME_DIR}" ] && [ ! -d "${COMON_HOME_DIR}" ]; then
-  echo "Refusing to use COMON_HOME (${COMON_HOME_DIR}): expected a directory." >&2
+if [ -e "${LLMON_HOME_DIR}" ] && [ ! -d "${LLMON_HOME_DIR}" ]; then
+  echo "Refusing to use LLMON_HOME (${LLMON_HOME_DIR}): expected a directory." >&2
   exit 1
 fi
 
-mkdir -p "${ROOT}/bin" "${COMON_HOME_DIR}"
-chmod 700 "${COMON_HOME_DIR}" 2>/dev/null || true
-install -m 755 "${SRC_BIN}" "${ROOT}/bin/comon"
+mkdir -p "${ROOT}/bin" "${LLMON_HOME_DIR}"
+chmod 700 "${LLMON_HOME_DIR}" 2>/dev/null || true
+install -m 755 "${SRC_BIN}" "${ROOT}/bin/llmon"
 
 if [ -d "${PKG_DIR}/lib" ]; then
   mkdir -p "${ROOT}/bin/lib"
@@ -314,8 +314,8 @@ if [ -d "${PKG_DIR}/lib" ]; then
   done
 fi
 
-echo "Installed comon to ${ROOT}/bin/comon"
-echo "Prepared COMON_HOME at ${COMON_HOME_DIR}"
+echo "Installed llmon to ${ROOT}/bin/llmon"
+echo "Prepared LLMON_HOME at ${LLMON_HOME_DIR}"
 case ":${PATH}:" in
   *":${ROOT}/bin:"*) ;;
   *) echo "Add to PATH: export PATH=\"${ROOT}/bin:\$PATH\"" ;;
@@ -324,10 +324,10 @@ EOF
 chmod 755 "${PKG_ROOT}/install.sh"
 
 cat > "${PKG_ROOT}/README.txt" <<EOF
-comon ${VERSION} (${TARGET})
+llmon ${VERSION} (${TARGET})
 
 Run from this package:
-  ./comon
+  ./llmon
 
 Install (user scope, no Cargo required):
   bash install.sh
@@ -336,7 +336,7 @@ Optional custom install root:
   bash install.sh ~/.local
 
 Binary path after install:
-  ~/.local/bin/comon
+  ~/.local/bin/llmon
 EOF
 
 rm -f "${ZIP_PATH}"

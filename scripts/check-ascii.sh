@@ -47,7 +47,7 @@ is_checked_file() {
   esac
 }
 
-TMP_BASE="${TMPDIR:-/tmp}/comon-ascii-$$"
+TMP_BASE="${TMPDIR:-/tmp}/llmon-ascii-$$"
 LIST_FILE="${TMP_BASE}.list"
 HITS_FILE="${TMP_BASE}.hits"
 

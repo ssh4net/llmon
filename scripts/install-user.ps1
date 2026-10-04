@@ -4,33 +4,33 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$comonHome = if ($env:COMON_HOME -and $env:COMON_HOME.Trim()) {
-  $env:COMON_HOME
+$llmonHome = if ($env:LLMON_HOME -and $env:LLMON_HOME.Trim()) {
+  $env:LLMON_HOME
 } else {
-  Join-Path $HOME ".comon"
+  Join-Path $HOME ".llmon"
 }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
   throw "cargo not found in PATH. Install Rust first: https://rustup.rs"
 }
 
-if (Test-Path -LiteralPath $comonHome) {
-  $homeItem = Get-Item -LiteralPath $comonHome -Force
+if (Test-Path -LiteralPath $llmonHome) {
+  $homeItem = Get-Item -LiteralPath $llmonHome -Force
   if ($homeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-    throw "Refusing to use COMON_HOME ($comonHome): symlink/reparse point is not allowed."
+    throw "Refusing to use LLMON_HOME ($llmonHome): symlink/reparse point is not allowed."
   }
   if (-not $homeItem.PSIsContainer) {
-    throw "Refusing to use COMON_HOME ($comonHome): expected a directory."
+    throw "Refusing to use LLMON_HOME ($llmonHome): expected a directory."
   }
 } else {
-  New-Item -ItemType Directory -Path $comonHome | Out-Null
+  New-Item -ItemType Directory -Path $llmonHome | Out-Null
 }
 
 cargo install --path $repoDir --locked --force --root $Root
 
 $binDir = Join-Path $Root "bin"
-Write-Host "Installed comon to $(Join-Path $binDir 'comon.exe')"
-Write-Host "Prepared COMON_HOME at $comonHome"
+Write-Host "Installed llmon to $(Join-Path $binDir 'llmon.exe')"
+Write-Host "Prepared LLMON_HOME at $llmonHome"
 
 $pathEntries = $env:PATH -split ";"
 if (-not ($pathEntries -contains $binDir)) {
