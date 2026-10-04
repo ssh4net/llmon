@@ -335,7 +335,7 @@ Each zip includes:
 
 - `llmon` binary
 - `install.sh` (user-scope install, no Cargo needed)
-- `LICENSE`, `README.txt`
+- `LICENSE`, `NOTICE`, `README.txt`
 
 ### 6) Install from prebuilt zip (no compile)
 

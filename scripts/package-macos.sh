@@ -261,6 +261,7 @@ mkdir -p "${PKG_ROOT}" "${DIST_DIR}"
 ditto --noextattr --noacl "${BIN_SRC}" "${PKG_ROOT}/llmon"
 chmod 755 "${PKG_ROOT}/llmon"
 ditto --noextattr --noacl "${REPO_DIR}/LICENSE" "${PKG_ROOT}/LICENSE"
+ditto --noextattr --noacl "${REPO_DIR}/NOTICE" "${PKG_ROOT}/NOTICE"
 
 bundle_dylibs
 

@@ -177,6 +177,7 @@ mkdir -p "${PKG_ROOT}"
 install -m 755 "${BIN_SRC}" "${PKG_ROOT}/llmon"
 install -m 755 "${REPO_DIR}/scripts/install-prebuilt.sh" "${PKG_ROOT}/install.sh"
 install -m 644 "${REPO_DIR}/LICENSE" "${PKG_ROOT}/LICENSE"
+install -m 644 "${REPO_DIR}/NOTICE" "${PKG_ROOT}/NOTICE"
 
 cat > "${PKG_ROOT}/README.txt" <<EOF
 llmon ${VERSION} (${TARGET})
