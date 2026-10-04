@@ -270,6 +270,12 @@ struct Args {
     /// Rebuild local scan cache on startup (delete `llmon.db` before first usage scan).
     #[arg(long)]
     rebuild_cache_on_start: bool,
+
+    /// Compute the usage snapshot once through the scan cache, print its
+    /// aggregates as JSON, and exit. Used to check that refactors keep every
+    /// total unchanged.
+    #[arg(long, hide = true)]
+    dump_usage: bool,
 }
 
 #[tokio::main]
@@ -377,6 +383,21 @@ async fn main() -> Result<()> {
         scan_cache_max_entries,
     };
     let system_locale = locale::SystemLocale::detect();
+
+    if args.dump_usage {
+        let snapshot = usage::compute_snapshot(
+            usage_days,
+            &codex_home,
+            project.as_deref(),
+            usage_scan_limits,
+            Some(&llmon_home.join(usage::SCAN_CACHE_DB_FILE_NAME)),
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&usage::snapshot_dump_json(&snapshot))?
+        );
+        return Ok(());
+    }
 
     let config = app::Config {
         codex_bin: args.codex_bin.clone(),

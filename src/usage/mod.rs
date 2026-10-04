@@ -26,6 +26,7 @@ const MAX_OWNER_IDENTITY_LINE_BYTES: usize = 512 * 1024;
 const FORK_REPLAY_END_GAP_MS: i64 = 1_000;
 const FORK_REPLAY_NO_TOKEN_GRACE_MS: i64 = 2_000;
 pub const DEFAULT_SCAN_CACHE_MAX_ENTRIES: usize = 50_000;
+pub const SCAN_CACHE_DB_FILE_NAME: &str = "llmon.db";
 pub const ACTIVITY_TIMELINE_WEEKS: usize = 54;
 pub const ACTIVITY_TIMELINE_DAYS: usize = ACTIVITY_TIMELINE_WEEKS * 7;
 
@@ -584,6 +585,82 @@ fn default_true() -> bool {
 struct ScanCacheDb {
     path: PathBuf,
     conn: Connection,
+}
+
+/// All snapshot aggregates as JSON, for `--dump-usage`. The field set is a
+/// regression contract: refactors must keep the output identical for the
+/// same logs.
+pub fn snapshot_dump_json(snapshot: &LocalUsageSnapshot) -> Value {
+    fn day_json(day: &UsageDay) -> Value {
+        serde_json::json!({
+            "day": day.day,
+            "input": day.input_tokens,
+            "cached": day.cached_input_tokens,
+            "total": day.total_tokens,
+            "agent_ms": day.agent_time_ms,
+            "runs": day.agent_runs,
+        })
+    }
+    fn totals_json(totals: &UsageTotalsTokens) -> Value {
+        serde_json::json!({
+            "last7": totals.last7_days_tokens,
+            "last30": totals.last30_days_tokens,
+            "average_daily": totals.average_daily_tokens,
+            "cache_hit_rate_percent": totals.cache_hit_rate_percent,
+            "peak_day": totals.peak_day,
+            "peak_day_tokens": totals.peak_day_tokens,
+        })
+    }
+    fn models_json(models: &[LocalUsageModel]) -> Value {
+        models
+            .iter()
+            .map(|model| {
+                serde_json::json!({
+                    "model": model.model,
+                    "tokens": model.tokens,
+                    "share_percent": model.share_percent,
+                })
+            })
+            .collect()
+    }
+    let active_days = |days: &[UsageDay]| -> Value {
+        days.iter()
+            .filter(|day| day.total_tokens != 0 || day.agent_time_ms != 0 || day.agent_runs != 0)
+            .map(day_json)
+            .collect()
+    };
+    serde_json::json!({
+        "days": active_days(&snapshot.days),
+        "day_count": snapshot.days.len(),
+        "totals": totals_json(&snapshot.totals),
+        "top_models": models_json(&snapshot.top_models),
+        "utc_days": active_days(&snapshot.utc_days),
+        "utc_day_count": snapshot.utc_days.len(),
+        "utc_totals": totals_json(&snapshot.utc_totals),
+        "utc_top_models": models_json(&snapshot.utc_top_models),
+        "project_activity": snapshot.project_activity.iter().map(|project| serde_json::json!({
+            "path": project.display_path,
+            "days": active_days(&project.days),
+            "last_activity_day": project.last_activity_day,
+            "total": project.total_tokens,
+            "cached": project.cached_input_tokens,
+            "agent_ms": project.agent_time_ms,
+            "runs": project.agent_runs,
+        })).collect::<Vec<_>>(),
+        "project_usage": snapshot.project_usage.iter().map(|project| serde_json::json!({
+            "path": project.display_path,
+            "total": project.total_tokens,
+            "cached": project.cached_input_tokens,
+            "agent_ms": project.agent_time_ms,
+            "runs": project.agent_runs,
+            "indexed_files": project.indexed_files,
+        })).collect::<Vec<_>>(),
+        "matched_session_files": snapshot.matched_session_files,
+        "scan_total_files": snapshot.scan_total_files,
+        "scan_indexed_files": snapshot.scan_indexed_files,
+        "scan_pending_files": snapshot.scan_pending_files,
+        "scan_processed_bytes": snapshot.scan_processed_bytes,
+    })
 }
 
 pub fn resolve_codex_home(override_home: Option<PathBuf>) -> Option<PathBuf> {
