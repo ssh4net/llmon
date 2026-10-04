@@ -1,5 +1,6 @@
 mod app;
 mod codex_rpc;
+mod harness;
 mod locale;
 mod read;
 mod storage;

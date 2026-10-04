@@ -1,3 +1,4 @@
+use crate::harness::{Harness, ALL_HARNESSES};
 use crate::locale::{DisplayFormatter, DisplayStyle};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
@@ -20,7 +21,12 @@ const DEFAULT_SCAN_TIME_BUDGET_MS: u64 = 1500;
 const MAX_DISTINCT_MODELS: usize = 5_000;
 // v14: each session has one immutable owner cwd. Derived cache rows from
 // earlier schemas can contain mutable-context or git-collapsed attribution.
-const SCAN_CACHE_DB_SCHEMA_VERSION: i64 = 14;
+/// Layout of the scan cache tables (`cache_meta` key `layout_version`).
+const SCAN_CACHE_DB_LAYOUT_VERSION: i64 = 1;
+/// Meaning of the Codex rows in the scan cache (`cache_meta` key
+/// `schema_version.codex`). Bump it whenever the Codex parser or the cached
+/// aggregates change; only Codex rows are rebuilt.
+const CODEX_CACHE_SCHEMA_VERSION: i64 = 1;
 pub(crate) const PROJECT_IDENTITY_LINE_LIMIT: usize = 128;
 const MAX_OWNER_IDENTITY_LINE_BYTES: usize = 512 * 1024;
 const FORK_REPLAY_END_GAP_MS: i64 = 1_000;
@@ -761,7 +767,7 @@ pub fn compute_snapshot(
         .map(|candidate| candidate.path.to_string_lossy().to_string())
         .collect();
     let (mut scan_cache_store, mut removed_cache_paths) = if let Some(db) = scan_cache_db.as_ref() {
-        load_scan_cache_store(db)?
+        load_scan_cache_store(db, Harness::Codex)?
     } else {
         (ScanCacheStore::default(), HashSet::new())
     };
@@ -1047,6 +1053,7 @@ pub fn compute_snapshot(
         if !dirty_cache_paths.is_empty() || !removed_cache_paths.is_empty() {
             let _ = persist_scan_cache_changes(
                 scan_cache_db,
+                Harness::Codex,
                 &scan_cache_store,
                 &removed_cache_paths,
                 &dirty_cache_paths,
@@ -1054,6 +1061,7 @@ pub fn compute_snapshot(
         }
         let _ = trim_scan_cache_db_entries_to_limit(
             scan_cache_db,
+            Harness::Codex,
             limits.scan_cache_max_entries.max(1),
         );
     }
@@ -2348,7 +2356,7 @@ fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
     ensure_regular_file_or_missing(Path::new(&wal_path), "cache database WAL file")?;
     ensure_regular_file_or_missing(Path::new(&shm_path), "cache database SHM file")?;
 
-    let conn = Connection::open(path)
+    let mut conn = Connection::open(path)
         .with_context(|| format!("Unable to open cache database {}", path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .with_context(|| format!("Unable to set WAL journal mode for {}", path.display()))?;
@@ -2357,188 +2365,8 @@ fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
     conn.pragma_update(None, "foreign_keys", "ON")
         .with_context(|| format!("Unable to enable foreign keys for {}", path.display()))?;
 
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS cache_meta (
-            key TEXT PRIMARY KEY,
-            value INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS file_cache (
-            file_path TEXT PRIMARY KEY,
-            file_size INTEGER NOT NULL,
-            file_mtime INTEGER,
-            file_offset INTEGER NOT NULL DEFAULT 0,
-            fully_parsed INTEGER NOT NULL DEFAULT 1,
-            session_cwd TEXT,
-            parser_state_json TEXT NOT NULL DEFAULT '{}',
-            daily_json TEXT NOT NULL,
-            model_daily_json TEXT NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_file_cache_updated_at
-            ON file_cache(updated_at);
-        ",
-    )
-    .with_context(|| format!("Unable to initialize cache database {}", path.display()))?;
-    conn.execute(
-        "
-        INSERT INTO cache_meta(key, value)
-        SELECT 'schema_version', ?1
-        WHERE NOT EXISTS (
-            SELECT 1 FROM cache_meta WHERE key = 'schema_version'
-        );
-        ",
-        params![SCAN_CACHE_DB_SCHEMA_VERSION],
-    )
-    .with_context(|| {
-        format!(
-            "Unable to write schema version metadata for {}",
-            path.display()
-        )
-    })?;
-
-    let schema_version: Option<i64> = conn
-        .query_row(
-            "SELECT value FROM cache_meta WHERE key = 'schema_version';",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .with_context(|| {
-            format!(
-                "Unable to read schema version metadata for {}",
-                path.display()
-            )
-        })?;
-    let Some(schema_version) = schema_version else {
-        anyhow::bail!("Missing scan cache schema version metadata");
-    };
-    let has_v2_columns = table_has_column(&conn, "file_cache", "file_offset")?
-        && table_has_column(&conn, "file_cache", "fully_parsed")?
-        && table_has_column(&conn, "file_cache", "parser_state_json")?;
-    if schema_version == 1 || !has_v2_columns {
-        migrate_scan_cache_db_v1_to_v2(&conn, path)?;
-    }
-    if schema_version < 4 {
-        invalidate_forked_session_cache_rows(&conn, path)?;
-    }
-    if schema_version < 5 {
-        // v5 stores both local and UTC day buckets (L:/U: prefixes). Old
-        // unqualified rows cannot be converted without replaying timestamps.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| format!("Unable to rebuild v5 day buckets in {}", path.display()))?;
-    } else if schema_version < 6 {
-        // v6 applies replay-boundary detection even when a parent cumulative
-        // baseline is available. Reparse only fork rows so the first live
-        // response after the copied prefix contributes to run/activity data.
-        invalidate_forked_session_cache_rows(&conn, path)?;
-    }
-    if schema_version < 9 {
-        // v9 identifies the effective project from the dominant structured
-        // tool workdir before falling back to the session cwd.
-        // Existing rows must be replayed because parser_state_json did not yet
-        // retain that identity.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v9 project identities in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < 10 {
-        // v10 stores many-to-many project membership and per-project token,
-        // activity, and model aggregates in parser_state_json. Old rows only
-        // contain whole-session totals and cannot be split without replay.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v10 project attribution in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < 11 {
-        // v11 also recognizes existing Git roots named explicitly in command
-        // arguments when the tool itself runs from a generic launcher cwd.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v11 command-path project identities in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < 12 {
-        // v12 attributes project usage only to authoritative session contexts.
-        // v11 rows mix permission-granted and command-referenced paths into
-        // membership, so they must be rebuilt from the raw session log.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v12 session-context attribution in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < 13 {
-        // v13 keys projects by normalized session cwd only. Older rows may have
-        // collapsed paths to a filesystem git root and must be rebuilt.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v13 session-cwd project identities in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < 14 {
-        // v14 gives every session one immutable owner selected before token
-        // parsing. v12/v13 rows can split a session across later turn contexts
-        // or mutable thread-settings cwd values, so no aggregate is reusable.
-        conn.execute("DELETE FROM file_cache;", [])
-            .with_context(|| {
-                format!(
-                    "Unable to rebuild v14 immutable session-owner attribution in {}",
-                    path.display()
-                )
-            })?;
-    }
-    if schema_version < SCAN_CACHE_DB_SCHEMA_VERSION {
-        conn.execute(
-            "UPDATE cache_meta SET value = ?1 WHERE key = 'schema_version';",
-            params![SCAN_CACHE_DB_SCHEMA_VERSION],
-        )
-        .with_context(|| {
-            format!(
-                "Unable to update schema version metadata for {}",
-                path.display()
-            )
-        })?;
-    }
-    let effective_schema_version: Option<i64> = conn
-        .query_row(
-            "SELECT value FROM cache_meta WHERE key = 'schema_version';",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .with_context(|| {
-            format!(
-                "Unable to re-read schema version metadata for {}",
-                path.display()
-            )
-        })?;
-    let Some(effective_schema_version) = effective_schema_version else {
-        anyhow::bail!("Missing scan cache schema version metadata after migration");
-    };
-    if effective_schema_version != SCAN_CACHE_DB_SCHEMA_VERSION {
-        anyhow::bail!(
-            "Unsupported scan cache schema version: {} (expected {})",
-            effective_schema_version,
-            SCAN_CACHE_DB_SCHEMA_VERSION
-        );
-    }
+    init_scan_cache_tables(&mut conn)
+        .with_context(|| format!("Unable to initialize cache database {}", path.display()))?;
 
     let db = ScanCacheDb {
         path: path.to_path_buf(),
@@ -2548,148 +2376,103 @@ fn open_or_init_scan_cache_db(path: &Path) -> Result<ScanCacheDb> {
     Ok(db)
 }
 
-fn migrate_scan_cache_db_v1_to_v2(conn: &Connection, path: &Path) -> Result<()> {
-    if !table_has_column(conn, "file_cache", "file_offset")? {
-        conn.execute(
-            "ALTER TABLE file_cache ADD COLUMN file_offset INTEGER NOT NULL DEFAULT 0;",
-            [],
-        )
-        .with_context(|| {
-            format!(
-                "Unable to add file_offset column while migrating {}",
-                path.display()
-            )
-        })?;
+fn harness_cache_schema_version(harness: Harness) -> i64 {
+    match harness {
+        Harness::Codex => CODEX_CACHE_SCHEMA_VERSION,
     }
-    if !table_has_column(conn, "file_cache", "fully_parsed")? {
-        conn.execute(
-            "ALTER TABLE file_cache ADD COLUMN fully_parsed INTEGER NOT NULL DEFAULT 1;",
+}
+
+/// Creates the cache tables and applies version changes. Cached rows are
+/// derived from the raw logs, so a database without a layout version (for
+/// example a copied comon.db) is reset, and a harness whose schema version
+/// changed loses only its own rows.
+fn init_scan_cache_tables(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS cache_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
+        );
+        ",
+    )?;
+    let layout_version: Option<i64> = tx
+        .query_row(
+            "SELECT value FROM cache_meta WHERE key = 'layout_version';",
             [],
+            |row| row.get(0),
         )
-        .with_context(|| {
-            format!(
-                "Unable to add fully_parsed column while migrating {}",
-                path.display()
-            )
-        })?;
+        .optional()?;
+    match layout_version {
+        Some(SCAN_CACHE_DB_LAYOUT_VERSION) => {}
+        Some(other) => anyhow::bail!(
+            "Unsupported scan cache layout version: {other} (expected {SCAN_CACHE_DB_LAYOUT_VERSION})"
+        ),
+        None => {
+            tx.execute_batch(
+                "
+                DROP TABLE IF EXISTS file_cache;
+                DELETE FROM cache_meta;
+                ",
+            )?;
+            tx.execute(
+                "INSERT INTO cache_meta(key, value) VALUES('layout_version', ?1);",
+                params![SCAN_CACHE_DB_LAYOUT_VERSION],
+            )?;
+        }
     }
-    if !table_has_column(conn, "file_cache", "parser_state_json")? {
-        conn.execute(
-            "ALTER TABLE file_cache ADD COLUMN parser_state_json TEXT NOT NULL DEFAULT '{}';",
-            [],
-        )
-        .with_context(|| {
-            format!(
-                "Unable to add parser_state_json column while migrating {}",
-                path.display()
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS file_cache (
+            harness TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_mtime INTEGER,
+            file_offset INTEGER NOT NULL DEFAULT 0,
+            fully_parsed INTEGER NOT NULL DEFAULT 1,
+            session_cwd TEXT,
+            parser_state_json TEXT NOT NULL DEFAULT '{}',
+            daily_json TEXT NOT NULL,
+            model_daily_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (harness, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_cache_harness_updated_at
+            ON file_cache(harness, updated_at);
+        ",
+    )?;
+    for harness in ALL_HARNESSES {
+        let key = format!("schema_version.{}", harness.key());
+        let expected = harness_cache_schema_version(harness);
+        let stored: Option<i64> = tx
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = ?1;",
+                params![key],
+                |row| row.get(0),
             )
-        })?;
+            .optional()?;
+        if stored != Some(expected) {
+            tx.execute(
+                "DELETE FROM file_cache WHERE harness = ?1;",
+                params![harness.key()],
+            )?;
+            tx.execute(
+                "
+                INSERT INTO cache_meta(key, value) VALUES(?1, ?2)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                ",
+                params![key, expected],
+            )?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
-fn invalidate_forked_session_cache_rows(conn: &Connection, path: &Path) -> Result<()> {
-    // Fork replay/accounting semantics changed in v3, v4, and v6. Reusing older
-    // fork rows would preserve stale aggregates, while non-fork rows remain valid.
-    let mut stmt = conn
-        .prepare("SELECT file_path FROM file_cache;")
-        .with_context(|| {
-            format!(
-                "Unable to list cache rows while migrating {}",
-                path.display()
-            )
-        })?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .with_context(|| {
-            format!(
-                "Unable to read cache row paths while migrating {}",
-                path.display()
-            )
-        })?;
-    let mut stale_paths = Vec::new();
-    for row in rows {
-        let file_path = row.with_context(|| {
-            format!(
-                "Unable to read cache row path while migrating {}",
-                path.display()
-            )
-        })?;
-        if forked_session_cache_needs_reparse(&file_path) {
-            stale_paths.push(file_path);
-        }
-    }
-    drop(stmt);
-
-    let mut delete_stmt = conn
-        .prepare("DELETE FROM file_cache WHERE file_path = ?1;")
-        .with_context(|| {
-            format!(
-                "Unable to prepare stale row delete while migrating {}",
-                path.display()
-            )
-        })?;
-    for file_path in stale_paths {
-        delete_stmt
-            .execute(params![file_path])
-            .with_context(|| format!("Unable to clear stale cache row in {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn forked_session_cache_needs_reparse(file_path: &str) -> bool {
-    let file = match File::open(file_path) {
-        Ok(file) => file,
-        Err(_) => return true,
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    if reader
-        .read_line(&mut line)
-        .ok()
-        .filter(|bytes| *bytes > 0)
-        .is_none()
-    {
-        return true;
-    }
-    let value = match serde_json::from_str::<Value>(&line) {
-        Ok(value) => value,
-        Err(_) => return true,
-    };
-    value
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|entry_type| entry_type == "session_meta")
-        && value
-            .get("payload")
-            .and_then(|payload| payload.get("forked_from_id"))
-            .and_then(Value::as_str)
-            .is_some()
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let pragma = format!("PRAGMA table_info({table});");
-    let mut stmt = conn
-        .prepare(&pragma)
-        .with_context(|| format!("Unable to inspect table metadata for {table}"))?;
-    let mut rows = stmt
-        .query([])
-        .with_context(|| format!("Unable to query table metadata for {table}"))?;
-    while let Some(row) = rows
-        .next()
-        .with_context(|| format!("Unable to read table metadata row for {table}"))?
-    {
-        let name: String = row.get(1).with_context(|| {
-            format!("Unable to read column name while inspecting table {table}")
-        })?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn load_scan_cache_store(db: &ScanCacheDb) -> Result<(ScanCacheStore, HashSet<String>)> {
+fn load_scan_cache_store(
+    db: &ScanCacheDb,
+    harness: Harness,
+) -> Result<(ScanCacheStore, HashSet<String>)> {
     let mut store = ScanCacheStore::default();
     let mut invalid_paths: HashSet<String> = HashSet::new();
     let mut stmt = db
@@ -2707,12 +2490,13 @@ fn load_scan_cache_store(db: &ScanCacheDb) -> Result<(ScanCacheStore, HashSet<St
                 daily_json,
                 model_daily_json,
                 updated_at
-            FROM file_cache;
+            FROM file_cache
+            WHERE harness = ?1;
             ",
         )
         .with_context(|| format!("Unable to query cache entries from {}", db.path.display()))?;
     let mut rows = stmt
-        .query([])
+        .query(params![harness.key()])
         .with_context(|| format!("Unable to iterate cache entries from {}", db.path.display()))?;
     while let Some(row) = rows
         .next()
@@ -2884,6 +2668,7 @@ fn trim_scan_cache_to_limit(
 
 fn persist_scan_cache_changes(
     db: &mut ScanCacheDb,
+    harness: Harness,
     store: &ScanCacheStore,
     removed_paths: &HashSet<String>,
     dirty_paths: &HashSet<String>,
@@ -2903,7 +2688,7 @@ fn persist_scan_cache_changes(
         })?;
 
     let mut delete_stmt = tx
-        .prepare("DELETE FROM file_cache WHERE file_path = ?1;")
+        .prepare("DELETE FROM file_cache WHERE harness = ?1 AND file_path = ?2;")
         .with_context(|| {
             format!(
                 "Unable to prepare delete statement for {}",
@@ -2914,6 +2699,7 @@ fn persist_scan_cache_changes(
         .prepare(
             "
             INSERT INTO file_cache(
+                harness,
                 file_path,
                 file_size,
                 file_mtime,
@@ -2925,8 +2711,8 @@ fn persist_scan_cache_changes(
                 model_daily_json,
                 updated_at
             )
-            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ON CONFLICT(file_path) DO UPDATE SET
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(harness, file_path) DO UPDATE SET
                 file_size=excluded.file_size,
                 file_mtime=excluded.file_mtime,
                 file_offset=excluded.file_offset,
@@ -2949,7 +2735,7 @@ fn persist_scan_cache_changes(
     removed_sorted.sort();
     for file_path in removed_sorted {
         delete_stmt
-            .execute(params![file_path])
+            .execute(params![harness.key(), file_path])
             .with_context(|| format!("Unable to delete cache entry in {}", db.path.display()))?;
     }
 
@@ -2983,6 +2769,7 @@ fn persist_scan_cache_changes(
 
         upsert_stmt
             .execute(params![
+                harness.key(),
                 file_path,
                 file_size,
                 file_mtime,
@@ -3009,12 +2796,20 @@ fn persist_scan_cache_changes(
     Ok(())
 }
 
-fn trim_scan_cache_db_entries_to_limit(db: &ScanCacheDb, max_entries: usize) -> Result<bool> {
+fn trim_scan_cache_db_entries_to_limit(
+    db: &ScanCacheDb,
+    harness: Harness,
+    max_entries: usize,
+) -> Result<bool> {
     let max_entries = max_entries.max(1);
     let max_entries_i64 = i64::try_from(max_entries).unwrap_or(i64::MAX);
     let total_rows: i64 = db
         .conn
-        .query_row("SELECT COUNT(*) FROM file_cache;", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM file_cache WHERE harness = ?1;",
+            params![harness.key()],
+            |row| row.get(0),
+        )
         .with_context(|| format!("Unable to count cache rows in {}", db.path.display()))?;
     if total_rows <= max_entries_i64 {
         return Ok(false);
@@ -3025,14 +2820,15 @@ fn trim_scan_cache_db_entries_to_limit(db: &ScanCacheDb, max_entries: usize) -> 
         .execute(
             "
             DELETE FROM file_cache
-            WHERE file_path IN (
+            WHERE harness = ?1 AND file_path IN (
                 SELECT file_path
                 FROM file_cache
+                WHERE harness = ?1
                 ORDER BY updated_at ASC, file_path ASC
-                LIMIT ?1
+                LIMIT ?2
             );
             ",
-            params![remove_count],
+            params![harness.key(), remove_count],
         )
         .with_context(|| format!("Unable to trim cache rows in {}", db.path.display()))?;
     enforce_scan_cache_db_permissions(&db.path)?;
@@ -4235,7 +4031,7 @@ mod tests {
         assert_eq!(usage.indexed_files, 1);
 
         let db = open_or_init_scan_cache_db(&cache_db_path).expect("open cache db");
-        let (store, _) = load_scan_cache_store(&db).expect("load cache store");
+        let (store, _) = load_scan_cache_store(&db, Harness::Codex).expect("load cache store");
         assert_eq!(store.entries.len(), 1, "archived parent must not be cached");
         let child_entry = store
             .entries
@@ -4977,7 +4773,7 @@ mod tests {
         );
 
         let db = open_or_init_scan_cache_db(&cache_db_path).expect("open cache db");
-        let (store, _) = load_scan_cache_store(&db).expect("load cache store");
+        let (store, _) = load_scan_cache_store(&db, Harness::Codex).expect("load cache store");
         let key = session_path.to_string_lossy().to_string();
         let entry = store
             .entries
@@ -5199,10 +4995,10 @@ mod tests {
             },
         );
         let dirty_paths: HashSet<String> = initial_store.entries.keys().cloned().collect();
-        persist_scan_cache_changes(&mut db, &initial_store, &HashSet::new(), &dirty_paths)
+        persist_scan_cache_changes(&mut db, Harness::Codex, &initial_store, &HashSet::new(), &dirty_paths)
             .expect("persist initial rows");
 
-        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db).expect("load store");
+        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db, Harness::Codex).expect("load store");
         let pruned = prune_scan_cache_store(
             &mut loaded_store,
             &sessions_root,
@@ -5211,15 +5007,141 @@ mod tests {
             &mut removed_paths,
         );
         assert!(pruned, "expected stale rows to be removed");
-        persist_scan_cache_changes(&mut db, &loaded_store, &removed_paths, &HashSet::new())
+        persist_scan_cache_changes(&mut db, Harness::Codex, &loaded_store, &removed_paths, &HashSet::new())
             .expect("persist pruned rows");
 
-        let (reloaded_store, _) = load_scan_cache_store(&db).expect("reload store");
+        let (reloaded_store, _) = load_scan_cache_store(&db, Harness::Codex).expect("reload store");
         assert_eq!(reloaded_store.entries.len(), 1);
         assert!(reloaded_store.entries.contains_key(&keep_key));
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside_root);
+    }
+
+    fn cache_row_count(db_path: &Path, harness: &str) -> i64 {
+        let conn = Connection::open(db_path).expect("open raw cache db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM file_cache WHERE harness = ?1;",
+            params![harness],
+            |row| row.get(0),
+        )
+        .expect("count rows")
+    }
+
+    #[test]
+    fn harness_schema_version_change_clears_only_that_harness() {
+        let root = make_temp_dir("cache-harness-version");
+        let db_path = root.join("llmon.db");
+        let mut db = open_or_init_scan_cache_db(&db_path).expect("open cache db");
+        let mut store = ScanCacheStore::default();
+        store.entries.insert(
+            "/sessions/a.jsonl".to_string(),
+            CachedFileScanEntry {
+                size: 1,
+                modified_epoch_secs: Some(1),
+                file_offset: 1,
+                fully_parsed: true,
+                session_cwd: None,
+                parser_state: ParserState::default(),
+                daily: HashMap::new(),
+                model_totals_by_day: HashMap::new(),
+                updated_at: 1,
+            },
+        );
+        let dirty_paths: HashSet<String> = store.entries.keys().cloned().collect();
+        persist_scan_cache_changes(&mut db, Harness::Codex, &store, &HashSet::new(), &dirty_paths)
+            .expect("persist codex row");
+        drop(db);
+        {
+            let conn = Connection::open(&db_path).expect("open raw cache db");
+            conn.execute(
+                "INSERT INTO file_cache(harness, file_path, file_size, daily_json, model_daily_json, updated_at)
+                 VALUES('future', '/other/b.jsonl', 1, '{}', '{}', 1);",
+                [],
+            )
+            .expect("insert row of another harness");
+            conn.execute(
+                "UPDATE cache_meta SET value = 0 WHERE key = 'schema_version.codex';",
+                [],
+            )
+            .expect("age codex schema version");
+        }
+
+        let db = open_or_init_scan_cache_db(&db_path).expect("reopen cache db");
+        let stored: i64 = db
+            .conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'schema_version.codex';",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read codex schema version");
+        assert_eq!(stored, CODEX_CACHE_SCHEMA_VERSION);
+        drop(db);
+        assert_eq!(cache_row_count(&db_path, "codex"), 0);
+        assert_eq!(cache_row_count(&db_path, "future"), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_without_layout_version_is_reset_to_the_current_layout() {
+        let root = make_temp_dir("cache-legacy-layout");
+        let db_path = root.join("llmon.db");
+        {
+            let conn = Connection::open(&db_path).expect("create legacy cache db");
+            conn.execute_batch(
+                "
+                CREATE TABLE cache_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                INSERT INTO cache_meta(key, value) VALUES('schema_version', 14);
+                CREATE TABLE file_cache (
+                    file_path TEXT PRIMARY KEY,
+                    file_size INTEGER NOT NULL,
+                    daily_json TEXT NOT NULL,
+                    model_daily_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO file_cache VALUES('/sessions/old.jsonl', 1, '{}', '{}', 1);
+                ",
+            )
+            .expect("write legacy layout");
+        }
+
+        let db = open_or_init_scan_cache_db(&db_path).expect("open legacy cache db");
+        let (store, _) = load_scan_cache_store(&db, Harness::Codex).expect("load store");
+        assert!(store.entries.is_empty());
+        let legacy_key: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = 'schema_version';",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("read legacy key");
+        assert_eq!(legacy_key, None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_with_unknown_layout_version_is_rejected() {
+        let root = make_temp_dir("cache-future-layout");
+        let db_path = root.join("llmon.db");
+        drop(open_or_init_scan_cache_db(&db_path).expect("create cache db"));
+        {
+            let conn = Connection::open(&db_path).expect("open raw cache db");
+            conn.execute(
+                "UPDATE cache_meta SET value = 99 WHERE key = 'layout_version';",
+                [],
+            )
+            .expect("set future layout version");
+        }
+
+        let error = open_or_init_scan_cache_db(&db_path).expect_err("future layout must fail");
+        assert!(format!("{error:#}").contains("layout version"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5246,246 +5168,19 @@ mod tests {
             );
         }
         let dirty_paths: HashSet<String> = store.entries.keys().cloned().collect();
-        persist_scan_cache_changes(&mut db, &store, &HashSet::new(), &dirty_paths)
+        persist_scan_cache_changes(&mut db, Harness::Codex, &store, &HashSet::new(), &dirty_paths)
             .expect("persist initial rows");
 
-        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db).expect("load store");
+        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db, Harness::Codex).expect("load store");
         let pruned = trim_scan_cache_to_limit(&mut loaded_store, 2, &mut removed_paths);
         assert!(pruned, "expected trim to remove one row");
-        persist_scan_cache_changes(&mut db, &loaded_store, &removed_paths, &HashSet::new())
+        persist_scan_cache_changes(&mut db, Harness::Codex, &loaded_store, &removed_paths, &HashSet::new())
             .expect("persist trimmed rows");
 
-        let (reloaded_store, _) = load_scan_cache_store(&db).expect("reload store");
+        let (reloaded_store, _) = load_scan_cache_store(&db, Harness::Codex).expect("reload store");
         let mut paths: Vec<String> = reloaded_store.entries.keys().cloned().collect();
         paths.sort();
         assert_eq!(paths, vec!["a".to_string(), "c".to_string()]);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn open_or_init_scan_cache_db_rebuilds_v2_day_buckets() {
-        let root = make_temp_dir("cache-migrate-v3");
-        let sessions_root = root.join("sessions");
-        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
-        let keep_path = sessions_root.join("keep.jsonl");
-        let forked_path = sessions_root.join("forked.jsonl");
-        let now_ms = Utc::now().timestamp_millis();
-        write_token_file(&keep_path, now_ms, 10, 5);
-        write_forked_replay_file(&forked_path, now_ms);
-
-        let db_path = root.join("llmon.db");
-        let conn = Connection::open(&db_path).expect("open v2 db");
-        conn.execute_batch(
-            "
-            CREATE TABLE cache_meta (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            );
-            INSERT INTO cache_meta(key, value) VALUES('schema_version', 2);
-            CREATE TABLE file_cache (
-                file_path TEXT PRIMARY KEY,
-                file_size INTEGER NOT NULL,
-                file_mtime INTEGER,
-                file_offset INTEGER NOT NULL DEFAULT 0,
-                fully_parsed INTEGER NOT NULL DEFAULT 1,
-                session_cwd TEXT,
-                parser_state_json TEXT NOT NULL DEFAULT '{}',
-                daily_json TEXT NOT NULL,
-                model_daily_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .expect("create v2 schema");
-        for path in [&keep_path, &forked_path] {
-            let key = path.to_string_lossy().to_string();
-            conn.execute(
-                "
-                INSERT INTO file_cache(
-                    file_path, file_size, file_mtime, file_offset, fully_parsed,
-                    session_cwd, parser_state_json, daily_json, model_daily_json, updated_at
-                ) VALUES(?1, 1, 1, 1, 1, '/tmp', '{}', '{}', '{}', 1);
-                ",
-                rusqlite::params![key],
-            )
-            .expect("insert cache row");
-        }
-        drop(conn);
-
-        let db = open_or_init_scan_cache_db(&db_path).expect("open and migrate");
-        let (store, _) = load_scan_cache_store(&db).expect("load migrated cache");
-        assert!(store.entries.is_empty());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn open_or_init_scan_cache_db_rebuilds_v3_day_buckets() {
-        let root = make_temp_dir("cache-migrate-v4");
-        let sessions_root = root.join("sessions");
-        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
-        let keep_path = sessions_root.join("keep.jsonl");
-        let forked_path = sessions_root.join("forked.jsonl");
-        let now_ms = Utc::now().timestamp_millis();
-        write_token_file(&keep_path, now_ms, 10, 5);
-        write_delayed_fork_replay_prefix(&forked_path, now_ms, 1_500);
-
-        let db_path = root.join("llmon.db");
-        let conn = Connection::open(&db_path).expect("open v3 db");
-        conn.execute_batch(
-            "
-            CREATE TABLE cache_meta (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            );
-            INSERT INTO cache_meta(key, value) VALUES('schema_version', 3);
-            CREATE TABLE file_cache (
-                file_path TEXT PRIMARY KEY,
-                file_size INTEGER NOT NULL,
-                file_mtime INTEGER,
-                file_offset INTEGER NOT NULL DEFAULT 0,
-                fully_parsed INTEGER NOT NULL DEFAULT 1,
-                session_cwd TEXT,
-                parser_state_json TEXT NOT NULL DEFAULT '{}',
-                daily_json TEXT NOT NULL,
-                model_daily_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .expect("create v3 schema");
-        for path in [&keep_path, &forked_path] {
-            conn.execute(
-                "
-                INSERT INTO file_cache(
-                    file_path, file_size, file_mtime, file_offset, fully_parsed,
-                    session_cwd, parser_state_json, daily_json, model_daily_json, updated_at
-                ) VALUES(?1, 1, 1, 1, 1, '/tmp', '{}', '{}', '{}', 1);
-                ",
-                rusqlite::params![path.to_string_lossy().to_string()],
-            )
-            .expect("insert cache row");
-        }
-        drop(conn);
-
-        let db = open_or_init_scan_cache_db(&db_path).expect("open and migrate");
-        let (store, _) = load_scan_cache_store(&db).expect("load migrated cache");
-        assert!(store.entries.is_empty());
-
-        let schema_version: i64 = db
-            .conn
-            .query_row(
-                "SELECT value FROM cache_meta WHERE key = 'schema_version';",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read schema version");
-        assert_eq!(schema_version, SCAN_CACHE_DB_SCHEMA_VERSION);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn open_or_init_scan_cache_db_v12_reparses_v11_rows_for_session_context_attribution() {
-        let root = make_temp_dir("cache-migrate-v12");
-        let sessions_root = root.join("sessions");
-        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
-        let keep_path = sessions_root.join("keep.jsonl");
-        let forked_path = sessions_root.join("forked.jsonl");
-        let now_ms = Utc::now().timestamp_millis();
-        write_token_file(&keep_path, now_ms, 10, 5);
-        write_forked_replay_file(&forked_path, now_ms);
-
-        let db_path = root.join("llmon.db");
-        let conn = Connection::open(&db_path).expect("open v11 db");
-        conn.execute_batch(
-            "
-            CREATE TABLE cache_meta (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            );
-            INSERT INTO cache_meta(key, value) VALUES('schema_version', 11);
-            CREATE TABLE file_cache (
-                file_path TEXT PRIMARY KEY,
-                file_size INTEGER NOT NULL,
-                file_mtime INTEGER,
-                file_offset INTEGER NOT NULL DEFAULT 0,
-                fully_parsed INTEGER NOT NULL DEFAULT 1,
-                session_cwd TEXT,
-                parser_state_json TEXT NOT NULL DEFAULT '{}',
-                daily_json TEXT NOT NULL,
-                model_daily_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .expect("create v11 schema");
-        for path in [&keep_path, &forked_path] {
-            conn.execute(
-                "
-                INSERT INTO file_cache(
-                    file_path, file_size, file_mtime, file_offset, fully_parsed,
-                    session_cwd, parser_state_json, daily_json, model_daily_json, updated_at
-                ) VALUES(?1, 1, 1, 1, 1, '/tmp', '{}', '{}', '{}', 1);
-                ",
-                rusqlite::params![path.to_string_lossy().to_string()],
-            )
-            .expect("insert cache row");
-        }
-        drop(conn);
-
-        let db = open_or_init_scan_cache_db(&db_path).expect("open and migrate");
-        let (store, _) = load_scan_cache_store(&db).expect("load migrated cache");
-        assert!(store.entries.is_empty());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn open_or_init_scan_cache_db_v14_reparses_v12_and_v13_rows() {
-        let root = make_temp_dir("cache-migrate-v14");
-        for schema_version in [12, 13] {
-            let db_path = root.join(format!("llmon-v{schema_version}.db"));
-            let conn = Connection::open(&db_path).expect("open legacy db");
-            conn.execute_batch(&format!(
-                "
-                CREATE TABLE cache_meta (
-                    key TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL
-                );
-                INSERT INTO cache_meta(key, value) VALUES('schema_version', {schema_version});
-                CREATE TABLE file_cache (
-                    file_path TEXT PRIMARY KEY,
-                    file_size INTEGER NOT NULL,
-                    file_mtime INTEGER,
-                    file_offset INTEGER NOT NULL DEFAULT 0,
-                    fully_parsed INTEGER NOT NULL DEFAULT 1,
-                    session_cwd TEXT,
-                    parser_state_json TEXT NOT NULL DEFAULT '{{}}',
-                    daily_json TEXT NOT NULL,
-                    model_daily_json TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                "
-            ))
-            .expect("create legacy schema");
-            conn.execute(
-                "
-                INSERT INTO file_cache(
-                    file_path, file_size, file_mtime, file_offset, fully_parsed,
-                    session_cwd, parser_state_json, daily_json, model_daily_json, updated_at
-                ) VALUES('/tmp/session.jsonl', 1, 1, 1, 1, '/tmp/wrong-owner', '{}', '{}', '{}', 1);
-                ",
-                [],
-            )
-            .expect("insert legacy row");
-            drop(conn);
-
-            let db = open_or_init_scan_cache_db(&db_path).expect("open and migrate");
-            let (store, _) = load_scan_cache_store(&db).expect("load migrated cache");
-            assert!(store.entries.is_empty(), "schema v{schema_version}");
-        }
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5683,60 +5378,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn open_or_init_scan_cache_db_migrates_v1_schema_and_clears_stale_rows() {
-        let root = make_temp_dir("cache-migrate");
-        let db_path = root.join("llmon.db");
-        let conn = Connection::open(&db_path).expect("open legacy db");
-        conn.execute_batch(
-            "
-            CREATE TABLE cache_meta (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            );
-            INSERT INTO cache_meta(key, value) VALUES('schema_version', 1);
-            CREATE TABLE file_cache (
-                file_path TEXT PRIMARY KEY,
-                file_size INTEGER NOT NULL,
-                file_mtime INTEGER,
-                session_cwd TEXT,
-                daily_json TEXT NOT NULL,
-                model_daily_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            INSERT INTO file_cache(
-                file_path, file_size, file_mtime, session_cwd, daily_json, model_daily_json, updated_at
-            ) VALUES(
-                'legacy.jsonl', 42, 123, '/tmp', '{}', '{}', 1
-            );
-            ",
-        )
-        .expect("create legacy schema");
-        drop(conn);
-
-        let db = open_or_init_scan_cache_db(&db_path).expect("open and migrate");
-        let schema_version: i64 = db
-            .conn
-            .query_row(
-                "SELECT value FROM cache_meta WHERE key = 'schema_version';",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read schema version");
-        assert_eq!(schema_version, SCAN_CACHE_DB_SCHEMA_VERSION);
-        assert!(table_has_column(&db.conn, "file_cache", "file_offset").expect("file_offset"));
-        assert!(table_has_column(&db.conn, "file_cache", "fully_parsed").expect("fully_parsed"));
-        assert!(
-            table_has_column(&db.conn, "file_cache", "parser_state_json")
-                .expect("parser_state_json")
-        );
-
-        let (store, _) = load_scan_cache_store(&db).expect("load migrated cache");
-        assert!(
-            store.entries.is_empty(),
-            "v3 migration should clear rows computed with older parser semantics"
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
 }
