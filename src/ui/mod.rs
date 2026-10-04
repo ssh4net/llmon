@@ -1431,8 +1431,7 @@ fn render_api_grouped_vertical_bars(
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(' ');
                     if filled > 0 && y >= top {
-                        cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style);
+                        cell.set_char(bar_fill.glyph).set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -1540,8 +1539,7 @@ fn render_api_grouped_horizontal_bars(
                 if let Some(cell) = buf.cell_mut((bar_x + offset, y)) {
                     cell.set_char(' ');
                     if offset < filled {
-                        cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style);
+                        cell.set_char(bar_fill.glyph).set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -1915,8 +1913,7 @@ fn render_api_daily_chart(
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(' ');
                     if filled_height > 0 && y >= top {
-                        cell.set_char(bar_fill.glyph)
-                            .set_style(bar_fill.cell_style);
+                        cell.set_char(bar_fill.glyph).set_style(bar_fill.cell_style);
                     }
                 }
             }
@@ -4034,7 +4031,9 @@ fn aggregate_usage_days(days: &[UsageDay], grouping: ChartRange) -> Vec<UsageDay
         entry.cache_write_tokens = entry
             .cache_write_tokens
             .saturating_add(day.cache_write_tokens);
-        entry.cache_read_tokens = entry.cache_read_tokens.saturating_add(day.cache_read_tokens);
+        entry.cache_read_tokens = entry
+            .cache_read_tokens
+            .saturating_add(day.cache_read_tokens);
         entry.output_tokens = entry.output_tokens.saturating_add(day.output_tokens);
         entry.total_tokens = entry.total_tokens.saturating_add(day.total_tokens);
         entry.agent_time_ms = entry.agent_time_ms.saturating_add(day.agent_time_ms);
@@ -4364,8 +4363,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                         if let Some(cell) = buf.cell_mut((xx, yy)) {
                             cell.set_char(' ');
                             if filled_h > 0 && yy >= top_filled_y {
-                                cell.set_char(bar_fill.glyph)
-                                    .set_style(bar_fill.cell_style);
+                                cell.set_char(bar_fill.glyph).set_style(bar_fill.cell_style);
                             }
                         }
                     }
@@ -4608,8 +4606,7 @@ fn render_usage_chart(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
                         if let Some(cell) = buf.cell_mut((xx, yy)) {
                             cell.set_char(' ');
                             if xx < bar_area.x.saturating_add(filled) {
-                                cell.set_char(bar_fill.glyph)
-                                    .set_style(bar_fill.cell_style);
+                                cell.set_char(bar_fill.glyph).set_style(bar_fill.cell_style);
                             }
                         }
                     }
@@ -5785,7 +5782,11 @@ fn render_today_card(
         .as_ref()
         .and_then(|snapshot| snapshot.days_for_zone(state.usage_zone).last())
         .map(|day| {
-            cache_hit_rate_label(day.prompt_tokens(), day.cache_read_tokens, state.formatter())
+            cache_hit_rate_label(
+                day.prompt_tokens(),
+                day.cache_read_tokens,
+                state.formatter(),
+            )
         });
     frame.render_widget(
         card_with_captions(

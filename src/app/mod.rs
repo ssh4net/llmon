@@ -641,7 +641,9 @@ async fn run_inner(
         defaults
     });
 
-    let scan_cache_db_path = config.llmon_home.join(crate::usage::SCAN_CACHE_DB_FILE_NAME);
+    let scan_cache_db_path = config
+        .llmon_home
+        .join(crate::usage::SCAN_CACHE_DB_FILE_NAME);
     if config.rebuild_cache_on_start {
         clear_scan_cache_files(&scan_cache_db_path)?;
     }

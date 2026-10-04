@@ -1745,7 +1745,10 @@ fn add_model_tokens_limited(
     if model_totals.len() <= MAX_DISTINCT_MODELS || model_totals.contains_key(&model) {
         model_totals.entry(model).or_default().add(tokens);
     } else {
-        model_totals.entry("other".to_string()).or_default().add(tokens);
+        model_totals
+            .entry("other".to_string())
+            .or_default()
+            .add(tokens);
     }
 }
 
@@ -1837,7 +1840,11 @@ fn apply_project_activity(
         if !day_filter.contains_key(day_key) {
             continue;
         }
-        builder.daily.entry(day_key.to_string()).or_default().add(*totals);
+        builder
+            .daily
+            .entry(day_key.to_string())
+            .or_default()
+            .add(*totals);
     }
 }
 
@@ -2461,9 +2468,10 @@ fn load_scan_cache_store(
                 continue;
             }
         };
-        let model_totals_by_day = match serde_json::from_str::<HashMap<String, HashMap<String, TokenBreakdown>>>(
-            &model_daily_json,
-        ) {
+        let model_totals_by_day = match serde_json::from_str::<
+            HashMap<String, HashMap<String, TokenBreakdown>>,
+        >(&model_daily_json)
+        {
             Ok(value) => value,
             Err(_) => {
                 invalid_paths.insert(file_path);
@@ -4867,10 +4875,17 @@ mod tests {
             },
         );
         let dirty_paths: HashSet<String> = initial_store.entries.keys().cloned().collect();
-        persist_scan_cache_changes(&mut db, Harness::Codex, &initial_store, &HashSet::new(), &dirty_paths)
-            .expect("persist initial rows");
+        persist_scan_cache_changes(
+            &mut db,
+            Harness::Codex,
+            &initial_store,
+            &HashSet::new(),
+            &dirty_paths,
+        )
+        .expect("persist initial rows");
 
-        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db, Harness::Codex).expect("load store");
+        let (mut loaded_store, mut removed_paths) =
+            load_scan_cache_store(&db, Harness::Codex).expect("load store");
         let pruned = prune_scan_cache_store(
             &mut loaded_store,
             &sessions_root,
@@ -4879,8 +4894,14 @@ mod tests {
             &mut removed_paths,
         );
         assert!(pruned, "expected stale rows to be removed");
-        persist_scan_cache_changes(&mut db, Harness::Codex, &loaded_store, &removed_paths, &HashSet::new())
-            .expect("persist pruned rows");
+        persist_scan_cache_changes(
+            &mut db,
+            Harness::Codex,
+            &loaded_store,
+            &removed_paths,
+            &HashSet::new(),
+        )
+        .expect("persist pruned rows");
 
         let (reloaded_store, _) = load_scan_cache_store(&db, Harness::Codex).expect("reload store");
         assert_eq!(reloaded_store.entries.len(), 1);
@@ -4921,8 +4942,14 @@ mod tests {
             },
         );
         let dirty_paths: HashSet<String> = store.entries.keys().cloned().collect();
-        persist_scan_cache_changes(&mut db, Harness::Codex, &store, &HashSet::new(), &dirty_paths)
-            .expect("persist codex row");
+        persist_scan_cache_changes(
+            &mut db,
+            Harness::Codex,
+            &store,
+            &HashSet::new(),
+            &dirty_paths,
+        )
+        .expect("persist codex row");
         drop(db);
         {
             let conn = Connection::open(&db_path).expect("open raw cache db");
@@ -5040,14 +5067,27 @@ mod tests {
             );
         }
         let dirty_paths: HashSet<String> = store.entries.keys().cloned().collect();
-        persist_scan_cache_changes(&mut db, Harness::Codex, &store, &HashSet::new(), &dirty_paths)
-            .expect("persist initial rows");
+        persist_scan_cache_changes(
+            &mut db,
+            Harness::Codex,
+            &store,
+            &HashSet::new(),
+            &dirty_paths,
+        )
+        .expect("persist initial rows");
 
-        let (mut loaded_store, mut removed_paths) = load_scan_cache_store(&db, Harness::Codex).expect("load store");
+        let (mut loaded_store, mut removed_paths) =
+            load_scan_cache_store(&db, Harness::Codex).expect("load store");
         let pruned = trim_scan_cache_to_limit(&mut loaded_store, 2, &mut removed_paths);
         assert!(pruned, "expected trim to remove one row");
-        persist_scan_cache_changes(&mut db, Harness::Codex, &loaded_store, &removed_paths, &HashSet::new())
-            .expect("persist trimmed rows");
+        persist_scan_cache_changes(
+            &mut db,
+            Harness::Codex,
+            &loaded_store,
+            &removed_paths,
+            &HashSet::new(),
+        )
+        .expect("persist trimmed rows");
 
         let (reloaded_store, _) = load_scan_cache_store(&db, Harness::Codex).expect("reload store");
         let mut paths: Vec<String> = reloaded_store.entries.keys().cloned().collect();
@@ -5249,5 +5289,4 @@ mod tests {
             Path::new("/mnt/c/Users/user/project")
         ));
     }
-
 }

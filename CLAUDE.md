@@ -31,11 +31,12 @@ cargo build --release
 cargo test
 cargo test <name_substring>                  # run matching tests only
 cargo clippy --all-targets -- -D warnings    # must stay clean (CI)
+cargo fmt --check                            # rustfmt-clean (CI); run cargo fmt after edits
 bash scripts/check-ascii.sh                  # ASCII guard over tracked files (CI)
 bash scripts/check-ascii.sh --staged         # staged files; scripts/install-pre-commit-hook.sh
 ```
 
-CI (`.github/workflows/`) runs the ASCII check, plus clippy and tests on
+CI (`.github/workflows/`) runs the ASCII check, plus rustfmt, clippy, and tests on
 Linux, macOS, and Windows. Run the binary against a scratch state dir with
 `LLMON_HOME=<dir> cargo run` to avoid touching `~/.llmon`.
 

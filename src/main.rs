@@ -173,7 +173,11 @@ impl From<LiveLimitsArg> for app::LiveLimitsMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "llmon", version, about = "Usage, limits, and session history TUI for coding-agent CLIs")]
+#[command(
+    name = "llmon",
+    version,
+    about = "Usage, limits, and session history TUI for coding-agent CLIs"
+)]
 struct Args {
     /// Launch with the session history screen active.
     #[arg(short = 'r', long = "read")]
