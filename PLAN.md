@@ -292,7 +292,7 @@ version, because that clears its saved history of deleted transcripts.
 
 | Phase | Work | Size |
 |-------|------|------|
-| 0 | Repo setup per D7; rename comon to llmon (crate, binary, `~/.llmon`, `LLMON_HOME`, `llmon.db`); CI (ASCII check, `cargo test`, clippy on Linux, macOS, Windows) | S |
+| 0 | Done: repo setup per D7; rename comon to llmon (crate, binary, `~/.llmon`, `LLMON_HOME`, `llmon.db`); CI (ASCII check, `cargo test`, clippy on Linux, macOS, Windows) | S |
 | 1 | Provider seam with Codex only, no behavior change: move Codex code into `providers/codex`, add the canonical token model and the `harness` column. CoMon's 185 tests stay green, and output matches comon on the same logs | L |
 | 2 | NOTICE credits the ClaudeMon author. Claude provider: usage parser, owner, history scan, status-line and OAuth limits, pricing, model names; port ClaudeMon's 156 tests | M |
 | 3 | Harness switch, combined USAGE (4.3), Claude LIMITS card, MODELS tab | M |
