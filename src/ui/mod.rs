@@ -7194,19 +7194,12 @@ fn format_rolling_limit_lines(
         .unwrap_or_else(|| "5h limit:".to_string());
     let weekly_label = if compact { "7d:" } else { "Weekly:" };
 
-    // The newer response can expose the seven-day window as `primary` with no
-    // short window. Keep the populated weekly limit in the card's value slot.
-    if short_window.is_none() && weekly_window.is_some() {
-        let weekly =
-            format_limit_compact_line(weekly_label, weekly_window, compact, formatter, true);
-        let short =
-            format_limit_compact_line(&short_label, short_window, compact, formatter, false);
-        return (weekly, short);
-    }
-
-    let short = format_limit_compact_line(&short_label, short_window, compact, formatter, false);
+    // The weekly limit comes first (the card's value slot) and the short
+    // window under it, for Codex and Claude alike. Newer Codex responses
+    // often have no short window at all.
     let weekly = format_limit_compact_line(weekly_label, weekly_window, compact, formatter, true);
-    (short, weekly)
+    let short = format_limit_compact_line(&short_label, short_window, compact, formatter, false);
+    (weekly, short)
 }
 
 /// `credits_line` replaces the credits line built from `l.credits`.
@@ -8634,13 +8627,13 @@ mod tests {
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::Off;
         assert_eq!(lines(&state)[0], "Disabled");
 
-        // Like the Codex card: 5h remaining, weekly used / remaining, the
+        // Like the Codex card: weekly used / remaining, 5h remaining, the
         // model bucket, and extra usage in place of credits.
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::OAuth;
         state.claude_limits = Some(synthetic_claude_limits());
         let texts = lines(&state);
-        assert!(texts[0].starts_with("5h limit: 58% "), "{texts:?}");
-        assert!(texts[1].starts_with("Weekly:   55% / 45% "), "{texts:?}");
+        assert!(texts[0].starts_with("Weekly:   55% / 45% "), "{texts:?}");
+        assert!(texts[1].starts_with("5h limit: 58% "), "{texts:?}");
         assert!(texts[2].starts_with("Opus 5.5:"), "{texts:?}");
         assert_eq!(texts[3], "Extra:    3.20 / 50.00 USD");
         assert_eq!(texts.len(), 4, "a fresh snapshot has no note");
@@ -9654,13 +9647,13 @@ mod tests {
             format_limits_compact_card_lines(&limits, false, formatter, None);
         assert_eq!(value, "Monthly:  99%");
         assert_eq!(caption1.as_deref(), Some("Credits:  564/60,000 used"));
-        assert_eq!(caption2.as_deref(), Some("5h limit: 100%"));
-        assert_eq!(caption3.as_deref(), Some("Weekly:   0% / 100%"));
+        assert_eq!(caption2.as_deref(), Some("Weekly:   0% / 100%"));
+        assert_eq!(caption3.as_deref(), Some("5h limit: 100%"));
 
         let (_, _, compact_primary, compact_secondary) =
             format_limits_compact_card_lines(&limits, true, formatter, None);
-        assert_eq!(compact_primary.as_deref(), Some("5h: 100%"));
-        assert_eq!(compact_secondary.as_deref(), Some("7d: 0% / 100%"));
+        assert_eq!(compact_primary.as_deref(), Some("7d: 0% / 100%"));
+        assert_eq!(compact_secondary.as_deref(), Some("5h: 100%"));
     }
 
     #[test]

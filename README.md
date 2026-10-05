@@ -41,8 +41,8 @@ switches them):
 - **Codex** and **Claude Code**: the full single-harness screen. The Claude
   Code view shows input / cache-write / cache-read / output token columns
   (input includes the cached input, as in the Codex columns)
-  and a LIMITS card laid out like the Codex one: the 5-hour limit (remaining),
-  the weekly limit (used / remaining, colored by pace), the per-model limit,
+  and a LIMITS card laid out like the Codex one: the weekly limit (used /
+  remaining, colored by pace), the 5-hour limit (remaining), the per-model limit,
   extra usage in place of credits, and the weekly gauge. An old status-line
   snapshot is noted on the card.
 
