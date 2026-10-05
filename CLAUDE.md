@@ -88,7 +88,12 @@ same layout; differences are noted per module.
   as `Arc` so the chart can borrow the state mutably). Per-harness parts
   dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude
   gauge rows reusing CoMon's segmented gauges and weekly pacing) and the token
-  columns (3 for Codex, 4 for Claude). The combined view stacks two labeled
+  columns (3 for Codex, 4 for Claude). In the horizontal chart the token
+  heading is drawn in the top border with each label over its column
+  (`horizontal_chart_layout` computes the geometry before the frame is
+  drawn; `render_token_heading` draws it). Narrow charts use the short
+  labels, then drop the TOKENS prefix, and shorten the left title rather
+  than cut it mid-word. The combined view stacks two labeled
   panels' card groups (one row each), then draws both charts in equal-width
   halves from `aligned_usage_days`, so the days line up and one scroll offset
   drives both. Each card group puts three cards in each of the same halves

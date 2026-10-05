@@ -4588,50 +4588,12 @@ fn render_usage_chart(
             viewport_label(all_days.len(), start, end, formatter)
         )
     };
-    let full_metric_label = usage_chart_metric_label(state.metric, panel.harness);
-    let title_cells = UnicodeWidthStr::width(range_title.as_str())
-        .saturating_add(UnicodeWidthStr::width(full_metric_label))
-        .saturating_add(8);
-    let metric_label =
-        if state.metric == UsageMetric::Tokens && title_cells > usize::from(area.width) {
-            short_token_heading(panel.harness)
-        } else {
-            full_metric_label
-        };
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(border_style)
-        .title_top(
-            Line::from(Span::styled(
-                format!(" {range_title} "),
-                Style::default().fg(Color::Gray),
-            ))
-            .left_aligned(),
-        );
-    // Only show TOKENS/TIME in horizontal mode, per request.
-    if state.orientation == ChartOrientation::Horizontal {
-        block = block.title_top(
-            Line::from(Span::styled(
-                format!(" {metric_label} "),
-                Style::default().add_modifier(Modifier::BOLD),
-            ))
-            .right_aligned(),
-        );
-    }
-    frame.render_widget(block, area);
-
     let inner = chart_inner;
-
-    if inner.height < 2 {
-        return;
-    }
-
     let mut labels: Vec<String> = Vec::with_capacity(days.len());
     let mut tooltip_labels: Vec<String> = Vec::with_capacity(days.len());
     let mut values: Vec<u64> = Vec::with_capacity(days.len());
     let mut token_rows: Vec<TokenColumns> = Vec::with_capacity(days.len());
-    let (token_column_count, _) = token_column_layout(panel.harness);
+    let token_column_count = token_column_count(panel.harness);
     for day in days {
         let date = NaiveDate::parse_from_str(&day.day, "%Y-%m-%d").ok();
         let label = date
@@ -4658,6 +4620,71 @@ fn render_usage_chart(
         };
         values.push(value);
         token_rows.push(usage_day_token_columns(day, panel.harness));
+    }
+
+    // The horizontal layout is known before the frame is drawn, so the token
+    // heading can sit over the value columns.
+    let left_title_end = area.x.saturating_add(1).saturating_add(
+        u16::try_from(UnicodeWidthStr::width(range_label.as_str()).saturating_add(2))
+            .unwrap_or(u16::MAX),
+    );
+    let horizontal_layout = if state.orientation == ChartOrientation::Horizontal {
+        horizontal_chart_layout(
+            inner,
+            HorizontalChartRows {
+                labels: &labels,
+                values: &values,
+                token_rows: &token_rows,
+            },
+            state.metric,
+            panel.harness,
+            left_title_end,
+            formatter,
+        )
+    } else {
+        None
+    };
+    let token_heading = horizontal_layout.and_then(|layout| layout.token_heading);
+    let left_title = fitted_left_title(
+        &range_title,
+        &range_label,
+        area,
+        token_heading.map(|heading| token_heading_start(inner.right(), heading)),
+    );
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(border_style)
+        .title_top(
+            Line::from(Span::styled(
+                format!(" {left_title} "),
+                Style::default().fg(Color::Gray),
+            ))
+            .left_aligned(),
+        );
+    // Only show TOKENS/TIME in horizontal mode, per request. Token columns
+    // too narrow for their labels get the short heading as one title.
+    if state.orientation == ChartOrientation::Horizontal && token_heading.is_none() {
+        let metric_label = match state.metric {
+            UsageMetric::Tokens => token_heading_text(panel.harness, true),
+            UsageMetric::Time => "TIME".to_string(),
+            UsageMetric::Runs => "RUNS".to_string(),
+        };
+        block = block.title_top(
+            Line::from(Span::styled(
+                format!(" {metric_label} "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    frame.render_widget(block, area);
+    if let Some(heading) = token_heading {
+        render_token_heading(frame.buffer_mut(), area, inner.right(), heading);
+    }
+
+    if inner.height < 2 {
+        return;
     }
 
     match state.orientation {
@@ -4799,111 +4826,25 @@ fn render_usage_chart(
             }
         }
         ChartOrientation::Horizontal => {
-            // Multi-line horizontal bars, values outside to the right.
-            //
-            // Behavior:
-            // - Prefer bar height 5, else 3, else 1, depending on how many bars fit for the current range.
-            // - If even height=1 can't fit all bars, show the most recent subset that fits.
-            // - Label is on the left, bar is in the middle, and the value is outside the bar with 1 space after bar.
-
-            let count = values.len();
-            if count == 0 || inner.width < 10 || inner.height < 1 {
+            // Multi-line horizontal bars, values outside to the right; the
+            // geometry comes from `horizontal_chart_layout`.
+            let Some(HorizontalChartLayout {
+                bar_h,
+                start,
+                label_w,
+                bar_w,
+                value_w,
+                token_column_widths,
+                ..
+            }) = horizontal_layout
+            else {
                 return;
-            }
-
-            // Decide bar height based on available space and selected range.
-            let max_per_bar = inner.height / (count as u16).max(1);
-            let preferred_h = if max_per_bar >= 5 {
-                5
-            } else if max_per_bar >= 4 {
-                4
-            } else if max_per_bar >= 3 {
-                3
-            } else {
-                1
             };
-            let bar_h = preferred_h.clamp(1, 5);
-
-            let fit_bars = (inner.height / bar_h).max(1) as usize;
-            let start = count.saturating_sub(fit_bars);
-
+            let value_gap = HORIZONTAL_VALUE_GAP;
             let visible_labels = &labels[start..];
             let visible_values = &values[start..];
             let visible_token_rows = &token_rows[start..];
-
             let max_value = visible_values.iter().copied().max().unwrap_or(0).max(1);
-
-            // Compute label column width based on label lengths (clamped).
-            let mut max_label_len = 0usize;
-            for l in visible_labels {
-                max_label_len = max_label_len.max(l.len());
-            }
-            let label_w = (max_label_len as u16)
-                .saturating_add(1)
-                .min(inner.width.saturating_sub(12).max(4))
-                .max(4);
-
-            let value_gap: u16 = 1; // spaces between bar and value
-            let min_bar_w: u16 = 10;
-
-            let available = inner.width.saturating_sub(label_w);
-            if available <= value_gap + 1 {
-                return;
-            }
-
-            // Reserve the space needed by independently aligned token columns.
-            let desired_value_w = if state.metric == UsageMetric::Tokens {
-                horizontal_token_columns_widths(
-                    visible_token_rows,
-                    token_column_count,
-                    u16::MAX,
-                    formatter,
-                )
-                .map(|widths| {
-                    widths
-                        .iter()
-                        .sum::<usize>()
-                        .saturating_add(token_column_separators_width(token_column_count))
-                })
-                .unwrap_or(1)
-            } else {
-                let mut max_len = 0usize;
-                for v in visible_values {
-                    let s = format_horizontal_value(*v, None, state.metric, u16::MAX, formatter);
-                    max_len = max_len.max(s.len());
-                }
-                max_len
-            };
-            let desired_value_w = if state.metric == UsageMetric::Tokens {
-                (desired_value_w as u16).max(1)
-            } else {
-                (desired_value_w as u16).clamp(6, 32)
-            };
-
-            let mut value_w = desired_value_w.min(available.saturating_sub(value_gap).max(1));
-            if available > min_bar_w.saturating_add(value_gap) {
-                value_w = value_w.min(
-                    available
-                        .saturating_sub(value_gap)
-                        .saturating_sub(min_bar_w),
-                );
-            }
-            // Keep at least 1 cell for the bar; if we're extremely cramped, shrink values.
-            value_w = value_w.clamp(1, available.saturating_sub(value_gap).max(1));
-            let bar_w = available
-                .saturating_sub(value_gap)
-                .saturating_sub(value_w)
-                .max(1);
-            let token_column_widths = if state.metric == UsageMetric::Tokens {
-                horizontal_token_columns_widths(
-                    visible_token_rows,
-                    token_column_count,
-                    value_w,
-                    formatter,
-                )
-            } else {
-                None
-            };
 
             let buf = frame.buffer_mut();
 
@@ -5035,30 +4976,303 @@ fn render_usage_chart(
     }
 }
 
-fn usage_chart_metric_label(metric: UsageMetric, harness: Harness) -> &'static str {
-    match metric {
-        UsageMetric::Tokens => token_column_layout(harness).1,
-        UsageMetric::Time => "TIME",
-        UsageMetric::Runs => "RUNS",
-    }
-}
-
 /// Token values of one chart row: the first `count` of up to four columns.
 type TokenColumns = [u64; 4];
 
-/// Number of token columns a harness shows, and their chart heading.
-fn token_column_layout(harness: Harness) -> (usize, &'static str) {
+/// Number of token columns a harness shows.
+fn token_column_count(harness: Harness) -> usize {
     match harness {
-        Harness::Codex => (3, "TOKENS (INPUT / NON-CACHED / OUTPUT)"),
-        Harness::Claude => (4, "TOKENS (INPUT / CACHE-WRITE / CACHE-READ / OUTPUT)"),
+        Harness::Codex => 3,
+        Harness::Claude => 4,
     }
 }
 
-/// Token heading for a chart too narrow for the full one.
-fn short_token_heading(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Codex => "TOKENS (IN / NC / OUT)",
-        Harness::Claude => "TOKENS (IN / CW / CR / OUT)",
+/// Labels of the token columns, in full or short form.
+fn token_column_labels(harness: Harness, short: bool) -> [&'static str; 4] {
+    match (harness, short) {
+        (Harness::Codex, false) => ["INPUT", "NON-CACHED", "OUTPUT", ""],
+        (Harness::Codex, true) => ["IN", "NC", "OUT", ""],
+        (Harness::Claude, false) => ["INPUT", "CACHE-WRITE", "CACHE-READ", "OUTPUT"],
+        (Harness::Claude, true) => ["IN", "CW", "CR", "OUT"],
+    }
+}
+
+/// The token heading as one title, for columns too narrow for their labels.
+fn token_heading_text(harness: Harness, short: bool) -> String {
+    let labels = token_column_labels(harness, short);
+    format!(
+        "TOKENS ({})",
+        labels[..token_column_count(harness)].join(" / ")
+    )
+}
+
+/// Token column labels drawn in the chart's top border over their columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TokenHeading {
+    /// " TOKENS: ", or a single space where the chart is too narrow for it.
+    prefix: &'static str,
+    labels: [&'static str; 4],
+    widths: [usize; 4],
+    count: usize,
+}
+
+/// Column where the token heading starts; it ends where the value columns end.
+fn token_heading_start(value_right: u16, heading: TokenHeading) -> u16 {
+    let width = heading
+        .prefix
+        .len()
+        .saturating_add(heading.labels[0].len())
+        .saturating_add(
+            (1..heading.count)
+                .map(|idx| heading.widths[idx].saturating_add(3))
+                .sum::<usize>(),
+        );
+    value_right.saturating_sub(u16::try_from(width).unwrap_or(u16::MAX))
+}
+
+/// Draws the token heading in the chart's top border: each label is
+/// right-aligned over its column like the values below, with the separators
+/// in line.
+fn render_token_heading(buf: &mut Buffer, area: Rect, value_right: u16, heading: TokenHeading) {
+    let mut text = String::from(heading.prefix);
+    text.push_str(heading.labels[0]);
+    for idx in 1..heading.count {
+        text.push_str(" / ");
+        text.push_str(&right_align_token_cell(
+            heading.labels[idx],
+            heading.widths[idx],
+        ));
+    }
+    // A space before the border resumes, unless the corner follows.
+    if value_right < area.right().saturating_sub(1) {
+        text.push(' ');
+    }
+    buf.set_string(
+        token_heading_start(value_right, heading),
+        area.y,
+        text,
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+}
+
+/// Rows of the horizontal chart: period labels, bar values, and token columns.
+struct HorizontalChartRows<'a> {
+    labels: &'a [String],
+    values: &'a [u64],
+    token_rows: &'a [TokenColumns],
+}
+
+/// Geometry of the horizontal chart.
+#[derive(Debug, Clone, Copy)]
+struct HorizontalChartLayout {
+    bar_h: u16,
+    /// First row that fits; the rows before it are not drawn.
+    start: usize,
+    label_w: u16,
+    bar_w: u16,
+    value_w: u16,
+    token_column_widths: Option<[usize; 4]>,
+    token_heading: Option<TokenHeading>,
+}
+
+/// Spaces between a bar and its value.
+const HORIZONTAL_VALUE_GAP: u16 = 1;
+
+/// Lays out the horizontal chart: the label is on the left, the bar in the
+/// middle, and the value outside the bar after `HORIZONTAL_VALUE_GAP`.
+/// `left_title_end` is where the essential part of the chart's left title
+/// (harness and range) ends; the token heading prefers to leave it whole.
+fn horizontal_chart_layout(
+    inner: Rect,
+    rows: HorizontalChartRows<'_>,
+    metric: UsageMetric,
+    harness: Harness,
+    left_title_end: u16,
+    formatter: DisplayFormatter<'_>,
+) -> Option<HorizontalChartLayout> {
+    // - Prefer bar height 5, else 3, else 1, depending on how many bars fit for the current range.
+    // - If even height=1 can't fit all bars, show the most recent subset that fits.
+    let count = rows.values.len();
+    if count == 0 || inner.width < 10 || inner.height < 1 {
+        return None;
+    }
+
+    // Decide bar height based on available space and selected range.
+    let max_per_bar = inner.height / (count as u16).max(1);
+    let preferred_h = if max_per_bar >= 5 {
+        5
+    } else if max_per_bar >= 4 {
+        4
+    } else if max_per_bar >= 3 {
+        3
+    } else {
+        1
+    };
+    let bar_h = preferred_h.clamp(1, 5);
+
+    let fit_bars = (inner.height / bar_h).max(1) as usize;
+    let start = count.saturating_sub(fit_bars);
+
+    let visible_labels = &rows.labels[start..];
+    let visible_values = &rows.values[start..];
+    let visible_token_rows = &rows.token_rows[start..];
+
+    // Compute label column width based on label lengths (clamped).
+    let mut max_label_len = 0usize;
+    for l in visible_labels {
+        max_label_len = max_label_len.max(l.len());
+    }
+    let label_w = (max_label_len as u16)
+        .saturating_add(1)
+        .min(inner.width.saturating_sub(12).max(4))
+        .max(4);
+
+    let value_gap = HORIZONTAL_VALUE_GAP;
+    let min_bar_w: u16 = 10;
+
+    let available = inner.width.saturating_sub(label_w);
+    if available <= value_gap + 1 {
+        return None;
+    }
+
+    // Reserve the space needed by independently aligned token columns, wide
+    // enough for the full labels.
+    let column_count = token_column_count(harness);
+    let desired_value_w = if metric == UsageMetric::Tokens {
+        horizontal_token_columns_widths(
+            visible_token_rows,
+            column_count,
+            u16::MAX,
+            token_column_labels(harness, false).map(str::len),
+            formatter,
+        )
+        .map(|widths| {
+            widths
+                .iter()
+                .sum::<usize>()
+                .saturating_add(token_column_separators_width(column_count))
+        })
+        .unwrap_or(1)
+    } else {
+        let mut max_len = 0usize;
+        for v in visible_values {
+            let s = format_horizontal_value(*v, None, metric, u16::MAX, formatter);
+            max_len = max_len.max(s.len());
+        }
+        max_len
+    };
+    let desired_value_w = if metric == UsageMetric::Tokens {
+        (desired_value_w as u16).max(1)
+    } else {
+        (desired_value_w as u16).clamp(6, 32)
+    };
+
+    let mut value_w = desired_value_w.min(available.saturating_sub(value_gap).max(1));
+    if available > min_bar_w.saturating_add(value_gap) {
+        value_w = value_w.min(
+            available
+                .saturating_sub(value_gap)
+                .saturating_sub(min_bar_w),
+        );
+    }
+    // Keep at least 1 cell for the bar; if we're extremely cramped, shrink values.
+    value_w = value_w.clamp(1, available.saturating_sub(value_gap).max(1));
+    let bar_w = available
+        .saturating_sub(value_gap)
+        .saturating_sub(value_w)
+        .max(1);
+    let (token_column_widths, token_heading) = if metric == UsageMetric::Tokens {
+        token_columns_with_heading(
+            visible_token_rows,
+            harness,
+            value_w,
+            inner.right(),
+            left_title_end,
+            formatter,
+        )
+    } else {
+        (None, None)
+    };
+
+    Some(HorizontalChartLayout {
+        bar_h,
+        start,
+        label_w,
+        bar_w,
+        value_w,
+        token_column_widths,
+        token_heading,
+    })
+}
+
+/// Token column widths and the heading that fits over them. In order of
+/// preference: full labels, short labels, short labels without the TOKENS
+/// prefix; the first that fits its columns and leaves the left title whole
+/// wins, else the smallest that fits its columns. Columns too narrow even
+/// for the short labels get no aligned heading.
+fn token_columns_with_heading(
+    rows: &[TokenColumns],
+    harness: Harness,
+    value_w: u16,
+    value_right: u16,
+    left_title_end: u16,
+    formatter: DisplayFormatter<'_>,
+) -> (Option<[usize; 4]>, Option<TokenHeading>) {
+    let count = token_column_count(harness);
+    let mut smallest = None;
+    for (short, prefix) in [(false, " TOKENS: "), (true, " TOKENS: "), (true, " ")] {
+        let labels = token_column_labels(harness, short);
+        let min_widths = labels.map(str::len);
+        let Some(widths) =
+            horizontal_token_columns_widths(rows, count, value_w, min_widths, formatter)
+        else {
+            continue;
+        };
+        if (0..count).any(|idx| widths[idx] < min_widths[idx]) {
+            continue;
+        }
+        let heading = TokenHeading {
+            prefix,
+            labels,
+            widths,
+            count,
+        };
+        if token_heading_start(value_right, heading) > left_title_end {
+            return (Some(widths), Some(heading));
+        }
+        smallest = Some((widths, heading));
+    }
+    match smallest {
+        Some((widths, heading)) => (Some(widths), Some(heading)),
+        None => (
+            horizontal_token_columns_widths(rows, count, value_w, [0; 4], formatter),
+            None,
+        ),
+    }
+}
+
+/// The chart's left title, shortened to end before the token heading: the
+/// full title, else the harness and range without the viewport, else that
+/// cut to fit.
+fn fitted_left_title(
+    full: &str,
+    essential: &str,
+    area: Rect,
+    heading_start: Option<u16>,
+) -> String {
+    let Some(heading_start) = heading_start else {
+        return full.to_string();
+    };
+    // The title is drawn as " {title} " after the corner, with one border
+    // cell before the heading.
+    let room = usize::from(heading_start.saturating_sub(area.x.saturating_add(2)));
+    let fits = |title: &str| UnicodeWidthStr::width(title).saturating_add(2) <= room;
+    if fits(full) {
+        full.to_string()
+    } else if fits(essential) {
+        essential.to_string()
+    } else {
+        essential.chars().take(room.saturating_sub(2)).collect()
     }
 }
 
@@ -5067,7 +5281,7 @@ fn token_column_separators_width(count: usize) -> usize {
 }
 
 /// Codex: all prompt input, the part not read from cache, and output.
-/// Claude Code: uncached input, cache writes, cache reads, and output.
+/// Claude Code: all prompt input, cache writes, cache reads, and output.
 fn usage_day_token_columns(day: &UsageDay, harness: Harness) -> TokenColumns {
     match harness {
         Harness::Codex => {
@@ -5363,15 +5577,20 @@ fn format_horizontal_value(
     format_compact_kmb(value, max_width, formatter)
 }
 
+/// Widths of the token columns that fit in `max_width`: full values, else
+/// compact ones, else an even split. Each column is at least its
+/// `min_widths` entry (its heading label) unless only the even split fits.
 fn horizontal_token_columns_widths(
     rows: &[TokenColumns],
     count: usize,
     max_width: u16,
+    min_widths: [usize; 4],
     formatter: DisplayFormatter<'_>,
 ) -> Option<[usize; 4]> {
     let count = count.min(4);
     let separators = token_column_separators_width(count);
     let mut widths = [0usize; 4];
+    widths[..count].copy_from_slice(&min_widths[..count]);
     for row in rows {
         for idx in 0..count {
             let formatted = format_tokens_overview(row[idx] as i64, formatter);
@@ -5389,6 +5608,7 @@ fn horizontal_token_columns_widths(
 
     let digits_width = usize::from(max_width).saturating_sub(separators);
     let mut compact_widths = [0usize; 4];
+    compact_widths[..count].copy_from_slice(&min_widths[..count]);
     for row in rows {
         for idx in 0..count {
             let compact = format_compact_kmb(row[idx], 5, formatter);
@@ -8520,6 +8740,75 @@ mod tests {
     }
 
     #[test]
+    fn token_heading_labels_sit_over_their_columns() {
+        // Wide charts show the full labels, narrow ones the short labels.
+        for (width, height, label) in [(200_u16, 50_u16, "NON-CACHED"), (120, 40, "NC")] {
+            let mut state = AppState::for_tests();
+            state.harness_view = HarnessView::Combined;
+            state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+            state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+            let text = render_screen_text(&mut state, width, height);
+            let rows: Vec<Vec<char>> = text.lines().map(|line| line.chars().collect()).collect();
+            let heading_y = rows
+                .iter()
+                .position(|row| {
+                    row.iter()
+                        .collect::<String>()
+                        .contains("CODEX :: Usage by day")
+                })
+                .expect("chart heading");
+            let heading = &rows[heading_y];
+            assert!(heading.iter().collect::<String>().contains(label));
+            let divider = heading
+                .iter()
+                .position(|symbol| *symbol == '\u{2510}')
+                .expect("codex chart corner");
+            for (from, to) in [(0, divider), (divider + 1, heading.len())] {
+                // Value separators are " / "; date labels have bare slashes.
+                let separators = |row: &[char]| -> Vec<usize> {
+                    (from + 1..to - 1)
+                        .filter(|x| row[*x] == '/' && row[x - 1] == ' ' && row[x + 1] == ' ')
+                        .collect()
+                };
+                let data = rows[heading_y + 1..]
+                    .iter()
+                    .find(|row| !separators(row).is_empty())
+                    .expect("a row with token columns");
+                // Every value separator has a heading separator above it.
+                for x in separators(data) {
+                    assert_eq!(heading[x], '/', "column {x} at width {width}");
+                }
+                // The last label ends where the last value ends.
+                let last = |row: &[char]| {
+                    (from..to)
+                        .rev()
+                        .find(|x| row[*x].is_ascii_alphanumeric())
+                        .expect("text")
+                };
+                assert_eq!(last(heading), last(data), "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn left_title_shortens_before_the_token_heading() {
+        let area = Rect::new(0, 0, 60, 10);
+        let full = "CODEX :: Usage by day :: < 1-10 / 20";
+        let essential = "CODEX :: Usage by day";
+        assert_eq!(fitted_left_title(full, essential, area, None), full);
+        assert_eq!(fitted_left_title(full, essential, area, Some(50)), full);
+        assert_eq!(
+            fitted_left_title(full, essential, area, Some(30)),
+            essential
+        );
+        assert_eq!(
+            fitted_left_title(full, essential, area, Some(12)),
+            // " CODEX :: " ends at column 10, one border cell before the heading.
+            "CODEX ::"
+        );
+    }
+
+    #[test]
     fn reset_countdown_is_compact() {
         assert_eq!(format_reset_countdown(-5), "0m");
         assert_eq!(format_reset_countdown(45 * 60), "45m");
@@ -8941,8 +9230,12 @@ mod tests {
     #[test]
     fn token_chart_header_explains_the_slash_pair() {
         assert_eq!(
-            usage_chart_metric_label(UsageMetric::Tokens, Harness::Codex),
+            token_heading_text(Harness::Codex, false),
             "TOKENS (INPUT / NON-CACHED / OUTPUT)"
+        );
+        assert_eq!(
+            token_heading_text(Harness::Claude, true),
+            "TOKENS (IN / CW / CR / OUT)"
         );
     }
 
@@ -10131,7 +10424,7 @@ mod tests {
         };
         let row = usage_day_token_columns(&day, Harness::Codex);
         assert_eq!(row, codex_row(10_000, 2_000, 500));
-        let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, formatter);
+        let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, [0; 4], formatter);
         assert_eq!(
             format_horizontal_token_columns(row, 3, 24, columns, formatter),
             "10,000 / 2,000 / 500"
@@ -10164,7 +10457,7 @@ mod tests {
             (codex_row(0, 0, 500), "0 / 0 / 500"),
         ] {
             let width = expected.len() as u16;
-            let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, formatter);
+            let columns = horizontal_token_columns_widths(&[row], 3, u16::MAX, [0; 4], formatter);
             assert_eq!(
                 format_horizontal_token_columns(row, 3, width, columns, formatter),
                 expected
@@ -10189,13 +10482,13 @@ mod tests {
         // INPUT includes the cache writes and reads, as Codex's INPUT does.
         let row = usage_day_token_columns(&day, Harness::Claude);
         assert_eq!(row, [13_000, 3_000, 8_000, 500]);
-        let columns = horizontal_token_columns_widths(&[row], 4, u16::MAX, formatter);
+        let columns = horizontal_token_columns_widths(&[row], 4, u16::MAX, [0; 4], formatter);
         assert_eq!(
             format_horizontal_token_columns(row, 4, 40, columns, formatter),
             "13,000 / 3,000 / 8,000 / 500"
         );
         assert_eq!(
-            usage_chart_metric_label(UsageMetric::Tokens, Harness::Claude),
+            token_heading_text(Harness::Claude, false),
             "TOKENS (INPUT / CACHE-WRITE / CACHE-READ / OUTPUT)"
         );
     }
@@ -10210,7 +10503,7 @@ mod tests {
             codex_row(121_030_387, 7_630_451, 8_681_443),
             codex_row(403_643_361, 15_714_273, 287_431_139),
         ];
-        let columns = horizontal_token_columns_widths(&rows, 3, u16::MAX, formatter);
+        let columns = horizontal_token_columns_widths(&rows, 3, u16::MAX, [0; 4], formatter);
         let rendered = rows
             .iter()
             .map(|row| format_horizontal_token_columns(*row, 3, u16::MAX, columns, formatter))
@@ -10224,7 +10517,7 @@ mod tests {
             .all(|row| row.rfind(" / ") == rendered[0].rfind(" / ")));
 
         let millions = codex_row(1_000_000, 2_000_000, 3_000_000);
-        let tight = horizontal_token_columns_widths(&[millions], 3, 15, formatter);
+        let tight = horizontal_token_columns_widths(&[millions], 3, 15, [0; 4], formatter);
         let compact = format_horizontal_token_columns(millions, 3, 15, tight, formatter);
         assert!(UnicodeWidthStr::width(compact.as_str()) <= 15);
         assert_eq!(compact.matches(" / ").count(), 2);
@@ -10236,7 +10529,8 @@ mod tests {
         ] {
             let mixed_formatter = DisplayFormatter::new(style, &system_locale);
             let mixed = codex_row(1_000_000, 0, 500);
-            let mixed_columns = horizontal_token_columns_widths(&[mixed], 3, 15, mixed_formatter);
+            let mixed_columns =
+                horizontal_token_columns_widths(&[mixed], 3, 15, [0; 4], mixed_formatter);
             assert_eq!(
                 format_horizontal_token_columns(mixed, 3, 15, mixed_columns, mixed_formatter),
                 "1M / 0 / 500",
@@ -10244,7 +10538,7 @@ mod tests {
             );
         }
         assert_eq!(
-            horizontal_token_columns_widths(&rows, 3, 8, formatter),
+            horizontal_token_columns_widths(&rows, 3, 8, [0; 4], formatter),
             None
         );
         assert_eq!(
@@ -10252,14 +10546,15 @@ mod tests {
             "\u{2026}"
         );
         let nines = codex_row(999, 999, 999);
-        let one_cell_columns = horizontal_token_columns_widths(&[nines], 3, 9, formatter);
+        let one_cell_columns = horizontal_token_columns_widths(&[nines], 3, 9, [0; 4], formatter);
         assert_eq!(
             format_horizontal_token_columns(nines, 3, 9, one_cell_columns, formatter),
             "\u{2026} / \u{2026} / \u{2026}"
         );
 
         let full_formatter = DisplayFormatter::new(DisplayStyle::SystemFull, &system_locale);
-        let full_columns = horizontal_token_columns_widths(&rows, 3, u16::MAX, full_formatter);
+        let full_columns =
+            horizontal_token_columns_widths(&rows, 3, u16::MAX, [0; 4], full_formatter);
         let full =
             format_horizontal_token_columns(rows[2], 3, u16::MAX, full_columns, full_formatter);
         assert!(
@@ -10271,7 +10566,7 @@ mod tests {
             "\u{2026}"
         );
         let small = codex_row(10_000, 2_000, 500);
-        let narrow_full = horizontal_token_columns_widths(&[small], 3, 9, full_formatter);
+        let narrow_full = horizontal_token_columns_widths(&[small], 3, 9, [0; 4], full_formatter);
         assert_eq!(
             format_horizontal_token_columns(small, 3, 9, narrow_full, full_formatter),
             "\u{2026} / \u{2026} / \u{2026}"
