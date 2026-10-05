@@ -53,7 +53,9 @@ Gotchas by harness:
     credits, `plan_type`). That gives an offline limits fallback when the App
     Server cannot start.
 - **Claude.** One API response is written as several lines that repeat the
-  same usage, so dedupe by `(message.id, requestId)`. Skip `<synthetic>`.
+  usage, so dedupe by `(message.id, requestId)`, keeping the largest value of
+  each field (an early line can carry a lower output count). Skip
+  `<synthetic>`.
   Transcripts are deleted after `cleanupPeriodDays` (30 by default). See
   ClaudeMon `PLAN.md` and `docs/sources.md`.
 - **Gemini.**

@@ -162,9 +162,14 @@ that tools touched. See `history_refactoring.md` for why.
   not ownership.
 - **Claude Code:** logs are `<claude-dir>/projects/<slug>/<session>.jsonl`
   plus `<session>/subagents/*.jsonl`. One API response is written as several
-  lines that repeat the same usage, so dedupe by `(message.id, requestId)`.
-  Without that, totals come out 2-3x too high. Skip
-  `message.model == "<synthetic>"`.
+  lines that repeat the usage, so dedupe by `(message.id, requestId)`.
+  Without that, totals come out 2-3x too high. An early line can carry a
+  lower `output_tokens` than a later one, so a response counts the largest
+  value of each field. Skip `message.model == "<synthetic>"`.
+  `usage.input_tokens` is only the uncached input after the last cache
+  breakpoint (API prompt-caching docs: total input = `input_tokens +
+  cache_creation_input_tokens + cache_read_input_tokens`). Claude Code caches
+  almost every prompt, so it is a few tokens per request.
 - Neither format is documented. Parsers must tolerate changes and ignore
   unknown record types.
 - Token columns differ between the two:

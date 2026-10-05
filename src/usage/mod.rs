@@ -30,8 +30,9 @@ const SCAN_CACHE_DB_LAYOUT_VERSION: i64 = 1;
 /// aggregates change; only Codex rows are rebuilt.
 const CODEX_CACHE_SCHEMA_VERSION: i64 = 2;
 /// Meaning of the Claude Code rows in the scan cache (`cache_meta` key
-/// `schema_version.claude`).
-const CLAUDE_CACHE_SCHEMA_VERSION: i64 = 1;
+/// `schema_version.claude`). 2: a response counts the largest usage of its
+/// repeated lines, not the first.
+const CLAUDE_CACHE_SCHEMA_VERSION: i64 = 2;
 pub const DEFAULT_SCAN_CACHE_MAX_ENTRIES: usize = 50_000;
 pub const SCAN_CACHE_DB_FILE_NAME: &str = "llmon.db";
 pub const ACTIVITY_TIMELINE_WEEKS: usize = 54;
@@ -212,6 +213,19 @@ impl TokenBreakdown {
         self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
         self.output = self.output.saturating_add(other.output);
+    }
+
+    /// The amount by which each field of `other` exceeds this one (zero where
+    /// it does not).
+    pub fn excess_of(self, other: TokenBreakdown) -> TokenBreakdown {
+        let excess = |mine: i64, theirs: i64| theirs.saturating_sub(mine).max(0);
+        TokenBreakdown {
+            input: excess(self.input, other.input),
+            cache_write: excess(self.cache_write, other.cache_write),
+            cache_write_1h: excess(self.cache_write_1h, other.cache_write_1h),
+            cache_read: excess(self.cache_read, other.cache_read),
+            output: excess(self.output, other.output),
+        }
     }
 }
 

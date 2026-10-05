@@ -23,10 +23,15 @@ pub(crate) struct ParserState {
     #[serde(default)]
     last_activity_ms: Option<i64>,
     /// `message.id` + `requestId` of the last counted response. Claude Code
-    /// writes one line per content block and repeats the same usage on each;
-    /// those lines are contiguous, so remembering the last key deduplicates.
+    /// writes one line per content block and repeats the usage on each; those
+    /// lines are contiguous, so remembering the last key deduplicates.
     #[serde(default)]
     last_usage_key: Option<String>,
+    /// Usage counted so far for `last_usage_key`. An earlier line of a
+    /// response can carry a lower output count than a later one, so the
+    /// response counts the largest value of each field.
+    #[serde(default)]
+    last_usage: TokenBreakdown,
     /// `promptId` of the current turn; a new value starts a new run.
     #[serde(default)]
     last_prompt_id: Option<String>,
@@ -149,16 +154,23 @@ pub(crate) fn parse_file_summary(
                 let Some((key, model, usage)) = extract_assistant_usage(&value) else {
                     continue;
                 };
-                if state.last_usage_key.as_deref() == Some(key.as_str()) {
+                let counted = if state.last_usage_key.as_deref() == Some(key.as_str()) {
+                    state.last_usage.excess_of(usage)
+                } else {
+                    state.last_usage_key = Some(key);
+                    state.last_usage = TokenBreakdown::default();
+                    usage
+                };
+                if counted.total() == 0 {
                     continue;
                 }
-                state.last_usage_key = Some(key);
+                state.last_usage.add(counted);
                 add_token_usage(
                     &mut daily,
                     &mut model_totals_by_day,
                     timestamp_ms,
                     &model,
-                    usage,
+                    counted,
                 );
             }
             "user" => {
@@ -493,6 +505,42 @@ mod tests {
         assert_eq!(today.output_tokens, 44);
         assert_eq!(today.total_tokens, 110);
         assert_eq!(snapshot.utc_totals.cache_hit_rate_percent, 50.0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_lines_count_the_largest_usage_of_a_response() {
+        let root = make_temp_dir("dedupe-largest");
+        let (claude_dir, sessions_root) = make_claude_dir(&root);
+        let path = sessions_root.join("session.jsonl");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        // An early content-block line can carry a partial output count.
+        append_json_line(
+            &path,
+            assistant_line(now_ms, TEST_PROJECT_CWD, "msg-a", [2, 100, 1_000, 8]),
+        );
+        let first = snapshot(&claude_dir, Some(&cache_db_path));
+        assert_eq!(first.utc_totals.last30_days_tokens, 1_110);
+
+        // The rest of the response arrives after the refresh, with the final
+        // output count, then a line repeating a lower count.
+        append_json_line(
+            &path,
+            assistant_line(now_ms + 1, TEST_PROJECT_CWD, "msg-a", [2, 100, 1_000, 50]),
+        );
+        append_json_line(
+            &path,
+            assistant_line(now_ms + 2, TEST_PROJECT_CWD, "msg-a", [2, 100, 1_000, 8]),
+        );
+        let second = snapshot(&claude_dir, Some(&cache_db_path));
+        let today = second.utc_days.last().expect("today");
+        assert_eq!(today.input_tokens, 2);
+        assert_eq!(today.cache_write_tokens, 100);
+        assert_eq!(today.cache_read_tokens, 1_000);
+        assert_eq!(today.output_tokens, 50);
+        assert_eq!(second.utc_totals.last30_days_tokens, 1_152);
 
         let _ = std::fs::remove_dir_all(root);
     }
