@@ -2300,6 +2300,22 @@ fn unix_time_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long a log must stay unmodified before its unterminated last line is
+/// final. Harnesses append whole records, so a tail without a newline that has
+/// not changed for this long was cut off (a crash can also leave NUL padding
+/// there) and will never be completed.
+const UNTERMINATED_TAIL_SETTLE_SECS: u64 = 10 * 60;
+
+/// Whether a parser should read an unterminated last line instead of leaving
+/// it for the next refresh. A cut-off tail that is not valid JSON is then
+/// skipped like any other bad line, so the file no longer stays pending.
+pub(crate) fn unterminated_tail_is_final(modified_epoch_secs: Option<u64>) -> bool {
+    modified_epoch_secs.is_some_and(|modified| {
+        u64::try_from(unix_time_seconds())
+            .is_ok_and(|now| now.saturating_sub(modified) >= UNTERMINATED_TAIL_SETTLE_SECS)
+    })
+}
+
 pub(crate) fn track_activity(
     daily: &mut HashMap<String, DailyTotals>,
     last_activity_ms: &mut Option<i64>,
@@ -4152,6 +4168,45 @@ mod tests {
         assert_eq!(second.totals.last30_days_tokens, 120);
         assert_eq!(runs(&second), 1);
         assert_eq!(second.scan_pending_files, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_settled_cut_off_tail_does_not_stay_pending() {
+        let root = make_temp_dir("codex-cut-off-tail");
+        let codex_home = root.join("codex");
+        let sessions_root = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        let session_ms = now_ms - Duration::hours(2).num_milliseconds();
+        let path = sessions_root.join("session.jsonl");
+        append_session_meta_line(&path, session_ms, "/outside/Lantern");
+        append_total_token_line(&path, session_ms + 1_000, 100, 0, 20);
+        {
+            // A crash can leave NUL padding with no newline at the end.
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for padding");
+            file.write_all(&[0_u8; 848]).expect("write padding");
+            file.set_modified(SystemTime::now() - StdDuration::from_secs(60 * 60))
+                .expect("age the log");
+        }
+
+        let snapshot = compute_snapshot(
+            Harness::Codex,
+            30,
+            &codex_home,
+            None,
+            default_test_limits(false),
+            Some(cache_db_path.as_path()),
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.totals.last30_days_tokens, 120);
+        assert_eq!(snapshot.scan_pending_files, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

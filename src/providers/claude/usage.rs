@@ -4,8 +4,8 @@
 
 use crate::usage::{
     add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms, read_timestamp_ms,
-    CachedFileScanEntry, DailyTotals, FileScanSummary, HarnessParserState, TokenBreakdown,
-    UsageZone, MAX_ACTIVITY_GAP_MS,
+    unterminated_tail_is_final, CachedFileScanEntry, DailyTotals, FileScanSummary,
+    HarnessParserState, TokenBreakdown, UsageZone, MAX_ACTIVITY_GAP_MS,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,7 @@ pub(crate) fn parse_file_summary(
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     let mut fully_parsed = true;
+    let tail_is_final = unterminated_tail_is_final(current_modified_epoch);
 
     loop {
         if let Some(deadline) = deadline {
@@ -122,9 +123,10 @@ pub(crate) fn parse_file_summary(
         if bytes_read == 0 {
             break;
         }
-        if !line.ends_with('\n') {
-            // Claude Code is still writing this record. Leave it for the next
-            // refresh instead of consuming a truncated line.
+        if !line.ends_with('\n') && !tail_is_final {
+            // Claude Code may still be writing this record. Leave it for the
+            // next refresh instead of consuming a truncated line. A tail that
+            // has stopped changing was cut off and is read like any other line.
             fully_parsed = false;
             break;
         }
@@ -571,6 +573,34 @@ mod tests {
         let second = snapshot(&claude_dir, Some(&cache_db_path));
         assert_eq!(second.utc_totals.last30_days_tokens, 110);
         assert_eq!(second.scan_pending_files, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settled_unterminated_last_record_is_counted() {
+        let root = make_temp_dir("settled-tail");
+        let (claude_dir, sessions_root) = make_claude_dir(&root);
+        let path = sessions_root.join("session.jsonl");
+        let cache_db_path = root.join("llmon.db");
+        let now_ms = Utc::now().timestamp_millis();
+        append_token_file(&path, now_ms, 7, 3);
+        // The last record lost its newline and the log stopped changing.
+        let last = assistant_line(now_ms + 1, TEST_PROJECT_CWD, "msg-last", [50, 0, 0, 50]);
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for last record");
+            write!(file, "{last}").expect("write last record");
+            file.set_modified(SystemTime::now() - std::time::Duration::from_secs(60 * 60))
+                .expect("age the log");
+        }
+
+        let snapshot = snapshot(&claude_dir, Some(&cache_db_path));
+        assert_eq!(snapshot.utc_totals.last30_days_tokens, 110);
+        assert_eq!(snapshot.scan_pending_files, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

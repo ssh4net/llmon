@@ -94,7 +94,10 @@ same layout; differences are noted per module.
   cache (`llmon.db`). The cache stores per-file byte offsets and parser state
   so a refresh resumes mid-file. `ScanLimits` bounds each refresh by file
   count, bytes, line size, and time. Parsers leave a partial last line (a
-  record still being written) for the next refresh. Rows are keyed by `(harness, file_path)`. Each harness has
+  record still being written) for the next refresh, until the log has been
+  unchanged for 10 minutes (`unterminated_tail_is_final`): such a tail was
+  cut off, often by a crash that left NUL padding, so it is read once (and
+  skipped if it is not valid JSON) instead of keeping the file pending. Rows are keyed by `(harness, file_path)`. Each harness has
   its own cache schema version (for example `CODEX_CACHE_SCHEMA_VERSION`);
   bump it whenever that parser or its cached aggregates change meaning, and
   only that harness's rows are rebuilt. `SCAN_CACHE_DB_LAYOUT_VERSION` covers

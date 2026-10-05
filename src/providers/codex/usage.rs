@@ -4,8 +4,8 @@
 use crate::usage::{
     add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms, is_uuid_like,
     parse_timestamp_value_ms, read_timestamp_ms, session_cwd_identity, track_activity,
-    CachedFileScanEntry, DailyTotals, FileScanSummary, HarnessParserState, ScanCacheStore,
-    SessionFileCandidate, TokenBreakdown, UsageZone,
+    unterminated_tail_is_final, CachedFileScanEntry, DailyTotals, FileScanSummary,
+    HarnessParserState, ScanCacheStore, SessionFileCandidate, TokenBreakdown, UsageZone,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -473,6 +473,7 @@ pub(crate) fn parse_file_summary(
     let mut seen_runs: HashSet<i64> = HashSet::new();
     let mut line = String::new();
     let mut fully_parsed = true;
+    let tail_is_final = unterminated_tail_is_final(current_modified_epoch);
 
     loop {
         if let Some(deadline) = deadline {
@@ -490,9 +491,10 @@ pub(crate) fn parse_file_summary(
         if bytes_read == 0 {
             break;
         }
-        if !line.ends_with('\n') {
-            // Codex is still writing this record. Consuming it now would lose
-            // the rest of the line on the next refresh.
+        if !line.ends_with('\n') && !tail_is_final {
+            // Codex may still be writing this record. Consuming it now would
+            // lose the rest of the line on the next refresh. A tail that has
+            // stopped changing was cut off and is read like any other line.
             fully_parsed = false;
             break;
         }
