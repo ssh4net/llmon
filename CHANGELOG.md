@@ -2,7 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.5.0
+
+Codex and Claude Code in one monitor.
+
+- Claude Code support, ported from ClaudeMon: token usage from the
+  transcripts (each API response counted once, at its final usage), session
+  history with subagent transcripts, and live limits from the
+  `llmon statusline [--wrap]` subcommand or the opt-in OAuth endpoint
+  (`--claude-limits`).
+- Usage of logs that are deleted or moved away is kept in
+  `llmon-archive.db`, for every harness.
+- A COMBINED / CODEX / CLAUDE switch (`h`, or the header pills) on USAGE,
+  MODELS, COST, ACTIVITY, and HISTORY. The combined USAGE view stacks both
+  card groups and puts the Codex and Claude charts side by side on the same
+  days.
+- Each harness has its own color theme: select a chart or its cards (click,
+  or `x`) and pick a swatch (or `c`).
+- New MODELS screen (tokens per day per model) and COST screen (cost by
+  day, model, and project) with built-in Codex and Claude price tables and
+  `pricing` overrides in `config.json`.
+- The Claude LIMITS card uses the Codex card layout, weekly limit first.
+- The Claude INPUT column is total input, as for Codex; the token heading
+  sits over its columns.
+- A log whose last line was cut off (for example by a crash) no longer
+  keeps indexing pending.
+
+## 0.1.0
 
 - Renamed comon to llmon, the start of the merge of comon (Codex) and
   ClaudeMon (Claude Code) into one monitor; see `PLAN.md`. Version reset to
