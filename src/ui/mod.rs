@@ -154,6 +154,7 @@ fn cache_hit_rate_label(
 pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
     state.ui_hit_targets.clear();
     state.usage_scroll_area = None;
+    state.cost_projects_area = None;
     state.activity_scroll_area = None;
     state.api_stat_scroll_area = None;
     let area = frame.area();
@@ -2087,7 +2088,7 @@ fn footer_hint(screen: ActiveScreen) -> &'static str {
             "Models: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Cost => {
-            "Cost: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Cost: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Project [up/down/wheel], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
             "Activity: View [h] (combined/codex/claude), Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -6084,6 +6085,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
             Line::from("Keys:"),
             Line::from("  h    - switch view (Combined/Codex/Claude)"),
             Line::from("  d    - cycle dates (All time/7 days/30 days)"),
+            Line::from("  Up/Down/wheel - select a project (COST)"),
             Line::from("  n    - cycle display style (Classic/System Compact/Full)"),
             Line::from("  c    - cycle the color theme"),
             Line::from("  Mouse - click tabs/controls/quit"),
@@ -8908,6 +8910,68 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("TODAY_"), "{text}");
+    }
+
+    #[test]
+    fn cost_projects_show_a_selected_row() {
+        let mut overrides = crate::pricing::PricingOverrides::default();
+        for model in ["gpt-test", "gpt-test-mini"] {
+            overrides.codex.insert(
+                model.to_string(),
+                crate::pricing::PriceOverride {
+                    input: 2.0,
+                    output: 10.0,
+                    cache_read: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
+                },
+            );
+        }
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Cost;
+        state.pricing = crate::pricing::Pricing::new(&overrides);
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+        state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+        // Three Codex projects and one Claude project.
+        let text = render_screen_text(&mut state, 200, 50);
+        assert!(text.contains("BY PROJECT 1/4"), "{text}");
+
+        // A selection past the end is clamped to the last row.
+        state.cost_projects.select(Some(9));
+        let backend = ratatui::backend::TestBackend::new(200, 50);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("draw");
+        assert_eq!(state.cost_projects.selected(), Some(3));
+        let buffer = terminal.backend().buffer();
+        let row = (0..50)
+            .find(|y| {
+                (0..200)
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("BY PROJECT 4/4")
+            })
+            .expect("project list title");
+        // Rows of the list are highlighted only on the selected one.
+        let highlighted: Vec<u16> = (row + 1..row + 5)
+            .filter(|y| {
+                (0..200).any(|x| {
+                    buffer[(x, *y)].bg == state.accent_text_color()
+                        && buffer[(x, *y)].fg == Color::Black
+                })
+            })
+            .collect();
+        assert_eq!(highlighted, vec![row + 4]);
+        let rows: Vec<usize> = state
+            .ui_hit_targets
+            .iter()
+            .filter_map(|target| match target.action {
+                UiClickAction::SelectCostProject(index) => Some(index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, vec![0, 1, 2, 3]);
     }
 
     #[test]

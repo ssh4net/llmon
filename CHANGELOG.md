@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.1
+
+- COST: the BY PROJECT list has a selected row (Up/Down, the wheel, or a
+  click) that highlights a project with its cost, and it scrolls through
+  every project.
+
 ## 0.5.0
 
 Codex and Claude Code in one monitor.

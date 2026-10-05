@@ -236,6 +236,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 
 - `h` Switch the USAGE, MODELS, COST, ACTIVITY, and HISTORY view: Combined, Codex, or Claude Code (or click the pills in the header)
 - `d` Cycle the dates on MODELS and COST (all time, 7 days, 30 days)
+- `Up` / `Down` (or `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, the mouse wheel, a click) Select a row of the COST screen's BY PROJECT list
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)
 - `f` Toggle layout (Horz/Vert)

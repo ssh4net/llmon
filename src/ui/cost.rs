@@ -3,7 +3,7 @@
 //! of them.
 
 use super::{range_days, truncate_middle, view_snapshots};
-use crate::app::{AppState, DayRange};
+use crate::app::{AppState, DayRange, UiClickAction, UiHitTarget};
 use crate::harness::Harness;
 use crate::locale::DisplayFormatter;
 use crate::pricing::{CostBreakdown, PriceTable, Pricing, CODEX_USD_PER_CREDIT};
@@ -17,7 +17,6 @@ use ratatui::Frame;
 use std::collections::{BTreeMap, HashMap};
 use unicode_width::UnicodeWidthStr;
 
-const MAX_PROJECT_ROWS: usize = 12;
 const MIDDLE_DOT: &str = "\u{00b7}";
 const FULL_BLOCK: &str = "\u{2588}";
 const SQUARE: &str = "\u{25a0}";
@@ -215,15 +214,12 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         ])
         .split(area);
     let range = state.cost_range;
-    super::render_range_controls(
-        frame,
-        chunks[0],
-        state,
-        range,
-        crate::app::UiClickAction::SetCostRange,
-    );
+    super::render_range_controls(frame, chunks[0], state, range, UiClickAction::SetCostRange);
 
-    let formatter = state.formatter();
+    // The project list needs `state` mutably, so the formatter borrows a
+    // copy of the locale.
+    let system_locale = state.system_locale.clone();
+    let formatter = DisplayFormatter::new(state.display_style, &system_locale);
     if snapshots.is_empty() {
         frame.render_widget(
             Paragraph::new("Indexing local sessions...").block(boxed("COST")),
@@ -255,13 +251,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .constraints([Constraint::Length(model_rows), Constraint::Min(3)])
         .split(columns[1]);
     render_models(frame, tables[0], &view, &colors, formatter);
-    render_projects(
-        frame,
-        tables[1],
-        &view,
-        state.accent_text_color(),
-        formatter,
-    );
+    render_projects(frame, tables[1], state, &view, formatter);
     render_notes(frame, chunks[3], &view, formatter);
 }
 
@@ -506,35 +496,69 @@ fn render_models(
     );
 }
 
+/// Cost per project with a selected row, so a path and its cost read as one
+/// line. Up/Down, the wheel, or a click move the selection; the list scrolls
+/// to keep it in view.
 fn render_projects(
     frame: &mut Frame<'_>,
     area: Rect,
+    state: &mut AppState,
     view: &CostView,
-    accent: Color,
     formatter: DisplayFormatter<'_>,
 ) {
+    let accent = state.accent_text_color();
+    let count = view.projects.len();
+    let rows = usize::from(area.height.saturating_sub(2));
+    state.cost_project_count = count;
+    state.cost_projects_area = Some(area);
+    let selected = (count > 0).then(|| state.cost_projects.selected().unwrap_or(0).min(count - 1));
+    state.cost_projects.select(selected);
+    let mut offset = state.cost_projects.offset();
+    if let Some(selected) = selected {
+        if selected < offset {
+            offset = selected;
+        } else if rows > 0 && selected >= offset + rows {
+            offset = selected + 1 - rows;
+        }
+    }
+    offset = offset.min(count.saturating_sub(rows));
+    *state.cost_projects.offset_mut() = offset;
+
     let width = area.width.saturating_sub(18) as usize;
-    let mut lines: Vec<Line<'static>> = view
-        .projects
-        .iter()
-        .take(MAX_PROJECT_ROWS.min(area.height.saturating_sub(2) as usize))
-        .map(|(project, cost)| {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows);
+    for (row, (project, cost)) in view.projects.iter().enumerate().skip(offset).take(rows) {
+        let path = format!("{:<width$}", truncate_middle(project, width));
+        let cost = format!(" {:>12} ", format_usd(*cost, formatter));
+        lines.push(if Some(row) == selected {
+            let style = Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD);
+            Line::from(vec![Span::styled(path, style), Span::styled(cost, style)])
+        } else {
             Line::from(vec![
-                Span::raw(format!("{:<width$}", truncate_middle(project, width))),
-                Span::styled(
-                    format!(" {:>12}", format_usd(*cost, formatter)),
-                    Style::default().fg(accent),
-                ),
+                Span::raw(path),
+                Span::styled(cost, Style::default().fg(accent)),
             ])
-        })
-        .collect();
+        });
+        state.ui_hit_targets.push(UiHitTarget {
+            area: Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1 + (row - offset) as u16),
+                area.width.saturating_sub(2),
+                1,
+            ),
+            action: UiClickAction::SelectCostProject(row),
+        });
+    }
     if lines.is_empty() {
         lines.push(Line::from("--"));
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(boxed("BY PROJECT")),
-        area,
-    );
+    let title = match selected {
+        Some(selected) => format!("BY PROJECT {}/{count}", selected + 1),
+        None => "BY PROJECT".to_string(),
+    };
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(boxed(&title)), area);
 }
 
 /// Models priced by family and models without a price.

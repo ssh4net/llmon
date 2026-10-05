@@ -396,6 +396,10 @@ enum RangeScreenCommand {
     CycleRange,
     CycleHarnessView,
     ToggleHelp,
+    /// Moves the COST screen's project selection by this many rows.
+    MoveProjectSelection(isize),
+    FirstProject,
+    LastProject,
 }
 
 #[derive(Debug)]
@@ -444,6 +448,7 @@ pub(crate) enum UiClickAction {
     SetUsageFocus(Harness),
     SetModelsRange(DayRange),
     SetCostRange(DayRange),
+    SelectCostProject(usize),
     ToggleBarFillMode,
     SetHistoryProjectMode(crate::read::catalog::ProjectViewMode),
     ConfirmHistoryCatalogScan,
@@ -575,6 +580,11 @@ pub(crate) struct AppState {
     pub(crate) usage_visible_periods: usize,
     pub(crate) usage_total_periods: usize,
     pub(crate) usage_scroll_area: Option<Rect>,
+    /// The COST screen's BY PROJECT list: selected row and scroll, its rows
+    /// (set while drawing), and its area for the mouse wheel.
+    pub(crate) cost_projects: ratatui::widgets::ListState,
+    pub(crate) cost_project_count: usize,
+    pub(crate) cost_projects_area: Option<Rect>,
     pub(crate) api_stat_period_offset: usize,
     pub(crate) api_stat_visible_periods: usize,
     pub(crate) api_stat_total_periods: usize,
@@ -1349,6 +1359,9 @@ async fn run_inner(
         usage_visible_periods: 0,
         usage_total_periods: 0,
         usage_scroll_area: None,
+        cost_projects: ratatui::widgets::ListState::default(),
+        cost_project_count: 0,
+        cost_projects_area: None,
         api_stat_period_offset: 0,
         api_stat_visible_periods: 0,
         api_stat_total_periods: 0,
@@ -1805,6 +1818,13 @@ fn handle_input_event(
                 return Ok(InputOutcome::Continue(changed));
             }
             let changed = match state.active_screen {
+                ActiveScreen::Cost
+                    if state
+                        .cost_projects_area
+                        .is_some_and(|area| rect_contains(area, mouse.column, mouse.row)) =>
+                {
+                    move_cost_project_selection(state, if older { -1 } else { 1 })
+                }
                 ActiveScreen::Usage
                     if state
                         .usage_scroll_area
@@ -2047,6 +2067,11 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
         UiClickAction::SetCostRange(range) => {
             let changed = state.cost_range != range;
             state.cost_range = range;
+            changed
+        }
+        UiClickAction::SelectCostProject(index) => {
+            let changed = state.cost_projects.selected() != Some(index);
+            state.cost_projects.select(Some(index));
             changed
         }
         UiClickAction::ToggleBarFillMode => {
@@ -2457,8 +2482,26 @@ fn map_event_to_range_screen_cmd(event: Event) -> Option<RangeScreenCommand> {
         KeyCode::Char('d') | KeyCode::Char('D') => Some(RangeScreenCommand::CycleRange),
         KeyCode::Char('h') | KeyCode::Char('H') => Some(RangeScreenCommand::CycleHarnessView),
         KeyCode::Char('?') => Some(RangeScreenCommand::ToggleHelp),
+        KeyCode::Up | KeyCode::Char('k') => Some(RangeScreenCommand::MoveProjectSelection(-1)),
+        KeyCode::Down | KeyCode::Char('j') => Some(RangeScreenCommand::MoveProjectSelection(1)),
+        KeyCode::PageUp => Some(RangeScreenCommand::MoveProjectSelection(-10)),
+        KeyCode::PageDown => Some(RangeScreenCommand::MoveProjectSelection(10)),
+        KeyCode::Home => Some(RangeScreenCommand::FirstProject),
+        KeyCode::End => Some(RangeScreenCommand::LastProject),
         _ => None,
     }
+}
+
+/// Moves the BY PROJECT selection on the COST screen, within its rows.
+fn move_cost_project_selection(state: &mut AppState, delta: isize) -> bool {
+    if state.active_screen != ActiveScreen::Cost || state.cost_project_count == 0 {
+        return false;
+    }
+    let last = state.cost_project_count - 1;
+    let current = state.cost_projects.selected().unwrap_or(0).min(last);
+    let next = current.saturating_add_signed(delta).min(last);
+    state.cost_projects.select(Some(next));
+    next != current
 }
 
 fn handle_range_screen_command(
@@ -2489,6 +2532,11 @@ fn handle_range_screen_command(
             state.show_help = !state.show_help;
             true
         }
+        RangeScreenCommand::MoveProjectSelection(delta) => {
+            move_cost_project_selection(state, delta)
+        }
+        RangeScreenCommand::FirstProject => move_cost_project_selection(state, isize::MIN),
+        RangeScreenCommand::LastProject => move_cost_project_selection(state, isize::MAX),
     }
 }
 
@@ -3227,6 +3275,9 @@ impl AppState {
             usage_visible_periods: 0,
             usage_total_periods: 0,
             usage_scroll_area: None,
+            cost_projects: ratatui::widgets::ListState::default(),
+            cost_project_count: 0,
+            cost_projects_area: None,
             api_stat_period_offset: 0,
             api_stat_visible_periods: 0,
             api_stat_total_periods: 0,
@@ -3839,6 +3890,22 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn cost_project_selection_moves_within_the_list() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Cost;
+        state.cost_project_count = 5;
+        assert!(move_cost_project_selection(&mut state, 1));
+        assert_eq!(state.cost_projects.selected(), Some(1));
+        assert!(move_cost_project_selection(&mut state, isize::MAX));
+        assert_eq!(state.cost_projects.selected(), Some(4));
+        assert!(!move_cost_project_selection(&mut state, 10), "already last");
+        assert!(move_cost_project_selection(&mut state, isize::MIN));
+        assert_eq!(state.cost_projects.selected(), Some(0));
+        state.active_screen = ActiveScreen::Models;
+        assert!(!move_cost_project_selection(&mut state, 1));
     }
 
     #[test]
