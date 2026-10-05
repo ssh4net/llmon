@@ -9,7 +9,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Week
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant, SystemTime};
@@ -328,6 +328,13 @@ pub struct LocalUsageSnapshot {
     pub activity_first_weekday: Weekday,
     pub project_activity: Vec<ProjectActivity>,
     pub project_usage: Vec<ProjectUsageSummary>,
+    /// Tokens per model per day, over every cached day (not only the chart
+    /// window), largest model first.
+    pub model_daily: Vec<ModelDailyUsage>,
+    pub utc_model_daily: Vec<ModelDailyUsage>,
+    /// The same per project (session owner).
+    pub project_model_daily: Vec<ProjectModelDaily>,
+    pub utc_project_model_daily: Vec<ProjectModelDaily>,
     // Number of session files that were identified as belonging to the selected workspace filter.
     // When no workspace filter is used, this is 0.
     pub matched_session_files: u32,
@@ -347,6 +354,33 @@ pub struct UsageTotalsView {
     pub runs_label: String,
     pub peak_day_label: String,
     pub peak_sub_label: String,
+}
+
+/// Daily token usage of one model, keyed by `YYYY-MM-DD`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDailyUsage {
+    pub model: String,
+    pub days: BTreeMap<String, TokenBreakdown>,
+}
+
+impl ModelDailyUsage {
+    /// Usage on days `>= first_day` (all days when `None`).
+    pub fn total_since(&self, first_day: Option<&str>) -> TokenBreakdown {
+        let mut total = TokenBreakdown::default();
+        for (day, tokens) in &self.days {
+            if first_day.is_none_or(|first| day.as_str() >= first) {
+                total.add(*tokens);
+            }
+        }
+        total
+    }
+}
+
+/// Per-model daily usage of one project (session owner).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectModelDaily {
+    pub project: String,
+    pub models: Vec<ModelDailyUsage>,
 }
 
 impl LocalUsageSnapshot {
@@ -641,6 +675,107 @@ impl FileScanSummary {
     }
 }
 
+type ModelDays = HashMap<String, BTreeMap<String, TokenBreakdown>>;
+
+/// Collects per-model daily usage, overall and per project, in both zones.
+#[derive(Debug, Default)]
+struct ModelDailyBuilder {
+    local: ModelDays,
+    utc: ModelDays,
+    /// Keyed by `normalize_project_key`, with the display path kept apart.
+    local_projects: HashMap<String, ModelDays>,
+    utc_projects: HashMap<String, ModelDays>,
+    project_display: HashMap<String, String>,
+}
+
+impl ModelDailyBuilder {
+    fn add(&mut self, usage: FileUsageRef<'_>) {
+        let project = entry_project_paths(usage)
+            .into_iter()
+            .next()
+            .and_then(|path| {
+                let key = normalize_project_key(&path);
+                if key.is_empty() {
+                    return None;
+                }
+                prefer_project_display_path(
+                    self.project_display.entry(key.clone()).or_default(),
+                    &path,
+                );
+                Some(key)
+            });
+        for (cache_key, models) in usage.model_totals_by_day {
+            let Some((zone, day)) = split_cache_day_key(cache_key) else {
+                continue;
+            };
+            let (overall, projects) = match zone {
+                UsageZone::Local => (&mut self.local, &mut self.local_projects),
+                UsageZone::Utc => (&mut self.utc, &mut self.utc_projects),
+            };
+            for (model, tokens) in models {
+                overall
+                    .entry(model.clone())
+                    .or_default()
+                    .entry(day.to_string())
+                    .or_default()
+                    .add(*tokens);
+                if let Some(project) = project.as_ref() {
+                    projects
+                        .entry(project.clone())
+                        .or_default()
+                        .entry(model.clone())
+                        .or_default()
+                        .entry(day.to_string())
+                        .or_default()
+                        .add(*tokens);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> ModelDailySeries {
+        fn series(models: ModelDays) -> Vec<ModelDailyUsage> {
+            let mut out: Vec<ModelDailyUsage> = models
+                .into_iter()
+                .map(|(model, days)| ModelDailyUsage { model, days })
+                .collect();
+            out.sort_by(|left, right| {
+                right
+                    .total_since(None)
+                    .total()
+                    .cmp(&left.total_since(None).total())
+                    .then_with(|| left.model.cmp(&right.model))
+            });
+            out
+        }
+        let display = self.project_display;
+        let projects = |map: HashMap<String, ModelDays>| -> Vec<ProjectModelDaily> {
+            let mut out: Vec<ProjectModelDaily> = map
+                .into_iter()
+                .map(|(key, models)| ProjectModelDaily {
+                    project: display.get(&key).cloned().unwrap_or(key),
+                    models: series(models),
+                })
+                .collect();
+            out.sort_by(|left, right| left.project.cmp(&right.project));
+            out
+        };
+        ModelDailySeries {
+            local_projects: projects(self.local_projects),
+            utc_projects: projects(self.utc_projects),
+            local: series(self.local),
+            utc: series(self.utc),
+        }
+    }
+}
+
+struct ModelDailySeries {
+    local: Vec<ModelDailyUsage>,
+    utc: Vec<ModelDailyUsage>,
+    local_projects: Vec<ProjectModelDaily>,
+    utc_projects: Vec<ProjectModelDaily>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ProjectActivityBuilder {
     display_path: String,
@@ -699,6 +834,35 @@ pub fn snapshot_dump_json(snapshot: &LocalUsageSnapshot) -> Value {
             })
             .collect()
     }
+    fn series_json(series: &[ModelDailyUsage]) -> Value {
+        series
+            .iter()
+            .map(|series| {
+                serde_json::json!({
+                    "model": series.model,
+                    "days": series.days.iter().map(|(day, tokens)| serde_json::json!({
+                        "day": day,
+                        "input": tokens.input,
+                        "cache_write": tokens.cache_write,
+                        "cache_write_1h": tokens.cache_write_1h,
+                        "cache_read": tokens.cache_read,
+                        "output": tokens.output,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+    fn projects_series_json(projects: &[ProjectModelDaily]) -> Value {
+        projects
+            .iter()
+            .map(|project| {
+                serde_json::json!({
+                    "project": project.project,
+                    "models": series_json(&project.models),
+                })
+            })
+            .collect()
+    }
     let active_days = |days: &[UsageDay]| -> Value {
         days.iter()
             .filter(|day| day.total_tokens != 0 || day.agent_time_ms != 0 || day.agent_runs != 0)
@@ -731,6 +895,10 @@ pub fn snapshot_dump_json(snapshot: &LocalUsageSnapshot) -> Value {
             "runs": project.agent_runs,
             "indexed_files": project.indexed_files,
         })).collect::<Vec<_>>(),
+        "model_daily": series_json(&snapshot.model_daily),
+        "utc_model_daily": series_json(&snapshot.utc_model_daily),
+        "project_model_daily": projects_series_json(&snapshot.project_model_daily),
+        "utc_project_model_daily": projects_series_json(&snapshot.utc_project_model_daily),
         "matched_session_files": snapshot.matched_session_files,
         "scan_total_files": snapshot.scan_total_files,
         "scan_indexed_files": snapshot.scan_indexed_files,
@@ -778,6 +946,7 @@ pub fn compute_snapshot(
     let mut model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
     let mut utc_model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
     let mut project_activity: HashMap<String, ProjectActivityBuilder> = HashMap::new();
+    let mut model_daily = ModelDailyBuilder::default();
 
     if !sessions_root.exists() {
         return Ok(build_snapshot(
@@ -792,6 +961,7 @@ pub fn compute_snapshot(
             activity_day_keys,
             project_activity,
             Vec::new(),
+            model_daily,
             0,
             0,
             0,
@@ -984,6 +1154,7 @@ pub fn compute_snapshot(
                                     &utc_summary_day_filter,
                                     &mut project_activity,
                                     &mut matched_session_files,
+                                    &mut model_daily,
                                 );
                             }
                             continue;
@@ -1012,6 +1183,7 @@ pub fn compute_snapshot(
                                     &utc_summary_day_filter,
                                     &mut project_activity,
                                     &mut matched_session_files,
+                                    &mut model_daily,
                                 );
                             }
                             continue;
@@ -1049,6 +1221,7 @@ pub fn compute_snapshot(
                     &utc_summary_day_filter,
                     &mut project_activity,
                     &mut matched_session_files,
+                    &mut model_daily,
                 );
                 continue;
             }
@@ -1065,6 +1238,7 @@ pub fn compute_snapshot(
                     &utc_summary_day_filter,
                     &mut project_activity,
                     &mut matched_session_files,
+                    &mut model_daily,
                 );
                 continue;
             }
@@ -1081,6 +1255,7 @@ pub fn compute_snapshot(
                     &utc_summary_day_filter,
                     &mut project_activity,
                     &mut matched_session_files,
+                    &mut model_daily,
                 );
             }
         }
@@ -1124,6 +1299,7 @@ pub fn compute_snapshot(
                 &utc_summary_day_filter,
                 &mut project_activity,
                 &mut matched_session_files,
+                &mut model_daily,
             );
             scan_cache_store
                 .entries
@@ -1185,6 +1361,7 @@ pub fn compute_snapshot(
             &utc_summary_day_filter,
             &mut project_activity,
             &mut matched_session_files,
+            &mut model_daily,
         );
     }
 
@@ -1210,6 +1387,7 @@ pub fn compute_snapshot(
         activity_day_keys,
         project_activity,
         project_usage,
+        model_daily,
         scan_total_files,
         scan_indexed_files,
         scan_pending_files,
@@ -1362,6 +1540,7 @@ fn build_snapshot(
     activity_day_keys: Vec<String>,
     project_activity: HashMap<String, ProjectActivityBuilder>,
     project_usage: Vec<ProjectUsageSummary>,
+    model_daily: ModelDailyBuilder,
     scan_total_files: usize,
     scan_indexed_files: usize,
     scan_pending_files: usize,
@@ -1370,6 +1549,7 @@ fn build_snapshot(
     let (days, totals, top_models) = build_zone_snapshot(day_keys, daily, model_totals);
     let (utc_days, utc_totals, utc_top_models) =
         build_zone_snapshot(utc_day_keys, utc_daily, utc_model_totals);
+    let model_daily = model_daily.finish();
 
     LocalUsageSnapshot {
         days,
@@ -1381,6 +1561,10 @@ fn build_snapshot(
         activity_first_weekday,
         project_activity: build_project_activity(activity_day_keys, project_activity),
         project_usage,
+        model_daily: model_daily.local,
+        utc_model_daily: model_daily.utc,
+        project_model_daily: model_daily.local_projects,
+        utc_project_model_daily: model_daily.utc_projects,
         matched_session_files,
         scan_total_files,
         scan_indexed_files,
@@ -1617,6 +1801,7 @@ fn apply_file_usage(
     utc_chart_day_filter: &HashSet<String>,
     project_activity: &mut HashMap<String, ProjectActivityBuilder>,
     matched_session_files: &mut u32,
+    model_daily: &mut ModelDailyBuilder,
 ) {
     let matches_workspace = match workspace_path {
         None => true,
@@ -1631,6 +1816,7 @@ fn apply_file_usage(
     if workspace_path.is_some() {
         *matched_session_files = matched_session_files.saturating_add(1);
     }
+    model_daily.add(usage);
 
     for (cache_key, totals) in usage.daily {
         let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
@@ -4115,6 +4301,61 @@ mod tests {
         assert_eq!(totals, vec![100, 300]);
         assert_eq!(cache_row_count(&cache_db_path, "codex"), 2);
         assert_eq!(archived_row_count(&cache_db_path), 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn model_daily_covers_every_cached_day_per_model_and_project() {
+        let root = make_temp_dir("model-daily");
+        let codex_home = root.join("codex");
+        let sessions_root = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let now_ms = Utc::now().timestamp_millis();
+        let recent = sessions_root.join("recent.jsonl");
+        append_session_meta_line(&recent, now_ms - 60_000, "/outside/alpha");
+        append_total_token_line(&recent, now_ms - 50_000, 1_000, 600, 100);
+        // Older than the 30-day chart window.
+        let old_ms = now_ms - Duration::days(40).num_milliseconds();
+        let old = sessions_root.join("old.jsonl");
+        append_session_meta_line(&old, old_ms, "/outside/beta");
+        append_total_token_line(&old, old_ms + 1_000, 500, 0, 50);
+
+        let snapshot = compute_snapshot(
+            Harness::Codex,
+            30,
+            &codex_home,
+            None,
+            default_test_limits(false),
+            None,
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.totals.last30_days_tokens, 1_100);
+        let [series] = &snapshot.model_daily[..] else {
+            panic!("one model: {:?}", snapshot.model_daily);
+        };
+        assert_eq!(series.model, "gpt-test");
+        assert_eq!(series.days.len(), 2);
+        let total = series.total_since(None);
+        assert_eq!(total.input, 900);
+        assert_eq!(total.cache_read, 600);
+        assert_eq!(total.output, 150);
+        let projects: Vec<(&str, i64)> = snapshot
+            .project_model_daily
+            .iter()
+            .map(|project| {
+                let tokens: i64 = project
+                    .models
+                    .iter()
+                    .map(|series| series.total_since(None).total())
+                    .sum();
+                (project.project.as_str(), tokens)
+            })
+            .collect();
+        assert_eq!(
+            projects,
+            vec![("/outside/alpha", 1_100), ("/outside/beta", 550)]
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
