@@ -5079,8 +5079,10 @@ fn usage_day_token_columns(day: &UsageDay, harness: Harness) -> TokenColumns {
                 0,
             ]
         }
+        // INPUT includes cache writes and reads, as Codex's does; the uncached
+        // remainder is a few tokens per request.
         Harness::Claude => [
-            day.input_tokens.max(0) as u64,
+            day.prompt_tokens().max(0) as u64,
             day.cache_write_tokens.max(0) as u64,
             day.cache_read_tokens.max(0) as u64,
             day.output_tokens.max(0) as u64,
@@ -10171,7 +10173,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_token_columns_show_input_cache_write_cache_read_and_output() {
+    fn claude_token_columns_show_total_input_cache_write_cache_read_and_output() {
         let system_locale = crate::locale::SystemLocale::default();
         let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
         let day = UsageDay {
@@ -10184,12 +10186,13 @@ mod tests {
             agent_time_ms: 0,
             agent_runs: 0,
         };
+        // INPUT includes the cache writes and reads, as Codex's INPUT does.
         let row = usage_day_token_columns(&day, Harness::Claude);
-        assert_eq!(row, [2_000, 3_000, 8_000, 500]);
+        assert_eq!(row, [13_000, 3_000, 8_000, 500]);
         let columns = horizontal_token_columns_widths(&[row], 4, u16::MAX, formatter);
         assert_eq!(
             format_horizontal_token_columns(row, 4, 40, columns, formatter),
-            "2,000 / 3,000 / 8,000 / 500"
+            "13,000 / 3,000 / 8,000 / 500"
         );
         assert_eq!(
             usage_chart_metric_label(UsageMetric::Tokens, Harness::Claude),

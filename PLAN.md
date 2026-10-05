@@ -105,6 +105,8 @@ do not change. Columns are chosen per view:
 - Codex view: CoMon's 3 columns (INPUT / NON-CACHED / OUTPUT), derived from
   the canonical struct.
 - Every other view: 4 columns (INPUT / CACHE-WRITE / CACHE-READ / OUTPUT).
+  INPUT is all prompt input (uncached + cache writes + cache reads), as in
+  the Codex view; the uncached remainder is not a column of its own.
 
 ## 3. Cost
 

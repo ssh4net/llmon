@@ -172,10 +172,11 @@ that tools touched. See `history_refactoring.md` for why.
   almost every prompt, so it is a few tokens per request.
 - Neither format is documented. Parsers must tolerate changes and ignore
   unknown record types.
-- Token columns differ between the two:
-  - CoMon: INPUT / NON-CACHED / OUTPUT. Input includes cached input.
-  - ClaudeMon: INPUT / CACHE-WRITE / CACHE-READ / OUTPUT. Input excludes
-    cache.
+- Token columns differ between the two; INPUT includes cached input in both:
+  - Codex (as in CoMon): INPUT / NON-CACHED / OUTPUT.
+  - Claude: INPUT / CACHE-WRITE / CACHE-READ / OUTPUT. ClaudeMon's INPUT
+    excluded cache (the raw `input_tokens`); llmon shows total input, so the
+    two harnesses' INPUT columns mean the same thing.
 
 ## Rules inherited from the reference projects
 

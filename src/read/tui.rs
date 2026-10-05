@@ -1461,6 +1461,7 @@ fn render_session_detail(
         if let Some(usage) = detail.usage {
             match session.harness {
                 Harness::Codex => {
+                    // INPUT includes cached input, as on the USAGE screen.
                     lines.push(Line::from(vec![
                         Span::styled("INPUT", Style::default().fg(Color::Gray)),
                         Span::raw("  "),
@@ -1485,7 +1486,12 @@ fn render_session_detail(
                         Span::raw("  "),
                         Span::raw(format!(
                             "{} / {} / {} / {}",
-                            formatter.format_count(usage.input),
+                            formatter.format_count(
+                                usage
+                                    .input
+                                    .saturating_add(usage.cache_write)
+                                    .saturating_add(usage.cache_read),
+                            ),
                             formatter.format_count(usage.cache_write),
                             formatter.format_count(usage.cache_read),
                             formatter.format_count(usage.output)

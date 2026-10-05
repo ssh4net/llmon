@@ -40,6 +40,7 @@ switches them):
   (or press `c`) to recolor it.
 - **Codex** and **Claude Code**: the full single-harness screen. The Claude
   Code view shows input / cache-write / cache-read / output token columns
+  (input includes the cached input, as in the Codex columns)
   and a LIMITS card with gauges for the 5-hour, weekly, and per-model limits.
 
 The other screens still show Codex. The combined view needs about 120
