@@ -24,6 +24,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
     Frame, Terminal,
@@ -2039,7 +2040,7 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: View [h] (combined/codex/claude), Chart [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: View [h] (combined/codex/claude), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
             "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -2213,6 +2214,23 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
     );
     let codex_hover = render_usage_cards(frame, chunks[1], state, &codex);
     let claude_hover = render_usage_cards(frame, chunks[2], state, &claude);
+    // The selected harness's cards share its chart's outline color, and a
+    // click on either card group selects that harness.
+    let selected_cards = match state.usage_focus {
+        Harness::Codex => chunks[1],
+        Harness::Claude => chunks[2],
+    };
+    color_card_outlines(
+        frame,
+        selected_cards,
+        state.harness_colors(state.usage_focus).1,
+    );
+    for (area, harness) in [(chunks[1], Harness::Codex), (chunks[2], Harness::Claude)] {
+        state.ui_hit_targets.push(UiHitTarget {
+            area,
+            action: UiClickAction::SetUsageFocus(harness),
+        });
+    }
 
     let zone = state.usage_zone;
     let (codex_days, claude_days) = aligned_usage_days(
@@ -2320,6 +2338,30 @@ fn panel_card_layout(panel: &UsagePanel, width: u16) -> UsageCardLayout {
         }
     } else {
         usage_card_layout(width)
+    }
+}
+
+/// Recolors the outlines of the cards in `area`: only the plain border
+/// glyphs change, so titles and content keep their colors. Card content never
+/// uses box-drawing glyphs.
+fn color_card_outlines(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    const OUTLINE: [&str; 6] = [
+        symbols::line::HORIZONTAL,
+        symbols::line::VERTICAL,
+        symbols::line::TOP_LEFT,
+        symbols::line::TOP_RIGHT,
+        symbols::line::BOTTOM_LEFT,
+        symbols::line::BOTTOM_RIGHT,
+    ];
+    let area = area.intersection(frame.area());
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            if OUTLINE.contains(&cell.symbol()) {
+                cell.set_fg(color);
+            }
+        }
     }
 }
 
@@ -5566,7 +5608,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
         ActiveScreen::Usage => Text::from(vec![
             Line::from("Keys:"),
             Line::from("  h    - switch view (Combined/Codex/Claude)"),
-            Line::from("  x    - select the Codex/Claude chart (or click it)"),
+            Line::from("  x    - select Codex/Claude (or click its chart or cards)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  g/w  - group by day/ISO week/month"),
             Line::from("  f    - toggle layout (Horz/Vert)"),
@@ -8416,14 +8458,62 @@ mod tests {
     }
 
     #[test]
+    fn selected_harness_cards_share_its_outline_color() {
+        let mut state = AppState::for_tests();
+        state.harness_view = HarnessView::Combined;
+        state.usage_focus = Harness::Claude;
+        state.harness_themes.claude = AccentTheme::Magenta;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+        state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+        let backend = ratatui::backend::TestBackend::new(200, 50);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let row_symbols = |y: u16| -> Vec<String> {
+            (0..200)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect()
+        };
+        // The card's top-left corner and the first letter of its title.
+        let corner_and_title = |title: &str| {
+            let y = (0..50)
+                .find(|y| row_symbols(*y).concat().contains(title))
+                .unwrap_or_else(|| panic!("row with {title}"));
+            let cells = row_symbols(y);
+            let corner = cells
+                .iter()
+                .position(|symbol| symbol == symbols::line::TOP_LEFT)
+                .expect("card corner");
+            let first = title.chars().next().expect("title").to_string();
+            let title_x = (corner..cells.len())
+                .find(|x| cells[*x] == first && cells[*x..].concat().starts_with(title))
+                .expect("title column");
+            let fg = |x: usize| buffer[(u16::try_from(x).expect("column"), y)].fg;
+            (fg(corner), fg(title_x))
+        };
+
+        let (claude_corner, claude_title) = corner_and_title("CLAUDE LIMITS");
+        assert_eq!(claude_corner, Color::LightMagenta);
+        assert_ne!(claude_title, Color::LightMagenta, "titles keep their color");
+        let (codex_corner, _) = corner_and_title("CODEX LIMITS");
+        assert_eq!(codex_corner, Color::Reset);
+
+        let focus_targets = state
+            .ui_hit_targets
+            .iter()
+            .filter(|target| matches!(target.action, UiClickAction::SetUsageFocus(_)))
+            .count();
+        assert_eq!(focus_targets, 4, "both charts and both card groups");
+    }
+
+    #[test]
     fn usage_help_popup_fits_every_line() {
         let mut state = AppState::for_tests();
         state.show_help = true;
         let text = render_screen_text(&mut state, 120, 40);
-        assert!(
-            text.contains("x    - select the Codex/Claude chart"),
-            "{text}"
-        );
+        assert!(text.contains("x    - select Codex/Claude"), "{text}");
         assert!(text.contains("q    - quit (confirm)"), "{text}");
     }
 

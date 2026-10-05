@@ -69,9 +69,9 @@ same layout; differences are noted per module.
   USAGE view (`HarnessView`, key `h`) and one color theme per harness
   (`HarnessThemes`). A harness's chart uses its own theme; the rest of the
   screen uses the theme of `AppState::focused_harness` (the single view's
-  harness, the selected chart of the combined view (`usage_focus`, key `x`
-  or a click), or Codex on the other screens), and the swatches and `c` edit
-  that theme. The usage worker scans every harness
+  harness, the harness selected in the combined view (`usage_focus`, key `x`
+  or a click on its chart or cards; their outlines take its color), or Codex
+  on the other screens), and the swatches and `c` edit that theme. The usage worker scans every harness
   each refresh and sends `UsageUpdated(harness, snapshot)`; a separate worker
   polls the Claude limits (status-line snapshot every 10 s, or OAuth at most
   once a minute).
