@@ -14,6 +14,12 @@ impl Harness {
             Harness::Claude => "claude",
         }
     }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        ALL_HARNESSES
+            .into_iter()
+            .find(|harness| harness.key() == key)
+    }
 }
 
 pub const ALL_HARNESSES: [Harness; 2] = [Harness::Codex, Harness::Claude];

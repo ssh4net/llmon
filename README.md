@@ -35,6 +35,8 @@ switches them):
 - **Combined** (default): the Codex cards, the Claude Code cards below
   them, then the Codex chart on the left and the Claude Code chart on the
   right, with the same days in the same rows. Both charts scroll together.
+  Each harness has its own color: click a chart (or press `x`) to select
+  it, then pick a color swatch (or press `c`) to recolor it.
 - **Codex** and **Claude Code**: the full single-harness screen. The Claude
   Code view shows input / cache-write / cache-read / output token columns
   and a LIMITS card with gauges for the 5-hour, weekly, and per-model limits.
@@ -198,7 +200,8 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 - `f` Toggle layout (Horz/Vert)
 - `z` / `F6` Toggle Usage zone (Local/UTC); APISTAT always uses server UTC
 - `n` Cycle display formatting (Classic/System Compact/System Full)
-- `c` Cycle the temporary color theme
+- `x` Select the Codex or Claude Code chart in the combined USAGE view (or click it)
+- `c` Cycle the color theme of the selected harness. Each harness keeps its own (Claude Code starts orange); the rest of the screen uses the selected harness's color
 - Mouse wheel or arrow keys Scroll chart history (`PgUp`/`PgDn`, `Home`/`End` also work)
 - Mouse: click the top tabs, Usage/Activity controls (including the Usage style selector), `#` bar-fill mode, color swatches, or the bottom-right Quit action
 - Mouse: hover a filled vertical chart bar to see its exact date and full locale-aware value

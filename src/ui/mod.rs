@@ -2039,7 +2039,7 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: View [h] (combined/codex/claude), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: View [h] (combined/codex/claude), Chart [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
             "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -2152,6 +2152,7 @@ fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, 
         UsageChartInput {
             days: &days,
             owns_viewport: true,
+            selected: false,
         },
     );
     render_top_models(frame, chunks[3], state, &panel, true);
@@ -2227,6 +2228,7 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
     let codex_periods = aggregate_usage_days(&codex_days, state.range);
     let claude_periods = aggregate_usage_days(&claude_days, state.range);
     let (codex_area, claude_area) = equal_halves(chunks[3]);
+    let focus = state.usage_focus;
     render_usage_chart(
         frame,
         codex_area,
@@ -2235,6 +2237,7 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         UsageChartInput {
             days: &codex_periods,
             owns_viewport: false,
+            selected: focus == Harness::Codex,
         },
     );
     render_usage_chart(
@@ -2245,10 +2248,18 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         UsageChartInput {
             days: &claude_periods,
             owns_viewport: false,
+            selected: focus == Harness::Claude,
         },
     );
-    // Both charts scroll together; the wheel works over either one.
+    // Both charts scroll together; the wheel works over either one. A click
+    // selects the chart that the color theme control edits.
     state.usage_scroll_area = Some(chunks[3]);
+    for (area, harness) in [(codex_area, Harness::Codex), (claude_area, Harness::Claude)] {
+        state.ui_hit_targets.push(UiHitTarget {
+            area,
+            action: UiClickAction::SetUsageFocus(harness),
+        });
+    }
 
     let (codex_models, claude_models) = equal_halves(chunks[4]);
     render_top_models(frame, codex_models, state, &codex, false);
@@ -4414,13 +4425,15 @@ fn format_usage_period_tooltip(
     }
 }
 
-/// Chart inputs: the (aggregated) periods to draw, and whether this chart
-/// may reset the shared scroll position while its harness is still indexing.
-/// Side-by-side charts get the same periods and equal widths, so they show
-/// the same days in the same rows.
+/// Chart inputs: the (aggregated) periods to draw, whether this chart may
+/// reset the shared scroll position while its harness is still indexing, and
+/// whether it is the selected chart of the combined view (the one the color
+/// theme control edits). Side-by-side charts get the same periods and equal
+/// widths, so they show the same days in the same rows.
 struct UsageChartInput<'a> {
     days: &'a [UsageDay],
     owns_viewport: bool,
+    selected: bool,
 }
 
 fn render_usage_chart(
@@ -4431,7 +4444,12 @@ fn render_usage_chart(
     input: UsageChartInput<'_>,
 ) {
     // Note: We draw bars manually to control label placement and padding.
-    let (accent_color, accent_bright_color) = state.accent_colors();
+    let (accent_color, accent_bright_color) = state.harness_colors(panel.harness);
+    let border_style = if input.selected {
+        Style::default().fg(accent_bright_color)
+    } else {
+        Style::default()
+    };
     let range_label = match state.range {
         ChartRange::Day => "Usage by day",
         ChartRange::Week => "Usage by ISO week",
@@ -4463,6 +4481,7 @@ fn render_usage_chart(
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
+            .border_style(border_style)
             .title_top(
                 Line::from(Span::styled(
                     format!(" {range_label} "),
@@ -4540,6 +4559,7 @@ fn render_usage_chart(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
+        .border_style(border_style)
         .title_top(
             Line::from(Span::styled(
                 format!(" {range_title} "),
@@ -5528,11 +5548,6 @@ fn render_top_models(
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) {
-    let w = area.width.min(60);
-    let h = area.height.min(17);
-    let popup = centered_rect(w, h, area);
-    frame.render_widget(Clear, popup);
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -5551,13 +5566,14 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
         ActiveScreen::Usage => Text::from(vec![
             Line::from("Keys:"),
             Line::from("  h    - switch view (Combined/Codex/Claude)"),
+            Line::from("  x    - select the Codex/Claude chart (or click it)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  g/w  - group by day/ISO week/month"),
             Line::from("  f    - toggle layout (Horz/Vert)"),
             Line::from("  z/F6 - toggle calendar zone (Local/UTC)"),
             Line::from("  Wheel/arrows/PgUp/PgDn/Home/End - scroll periods"),
             Line::from("  n    - cycle display style (Classic/System Compact/Full)"),
-            Line::from("  c    - cycle color theme; click # to toggle chart fill"),
+            Line::from("  c    - cycle its color theme; click # to toggle chart fill"),
             Line::from("  Mouse - click tabs/controls/format/quit"),
             Line::from("  r/F5 - refresh usage + limits"),
             Line::from("  s/F2 - switch screen"),
@@ -5613,6 +5629,25 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
             Line::from("  q    - quit (confirm)"),
         ]),
     };
+    // The popup fits the text: borders and padding take five columns and
+    // three rows. Lines wrap only on a narrow terminal.
+    let line_widths: Vec<usize> = text.lines.iter().map(Line::width).collect();
+    let longest = line_widths.iter().copied().max().unwrap_or(0);
+    let w = area.width.min(
+        u16::try_from(longest.saturating_add(5))
+            .unwrap_or(u16::MAX)
+            .max(60),
+    );
+    let inner_width = usize::from(w.saturating_sub(5).max(1));
+    let rows: usize = line_widths
+        .iter()
+        .map(|width| width.div_ceil(inner_width).max(1))
+        .sum();
+    let h = area
+        .height
+        .min(u16::try_from(rows.saturating_add(3)).unwrap_or(u16::MAX));
+    let popup = centered_rect(w, h, area);
+    frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(text)
             .block(block)
@@ -7381,7 +7416,7 @@ fn claude_limit_lines(state: &AppState, now: i64) -> Vec<ClaudeLimitLine> {
                 text("Set the Claude Code statusLine command to:", gray),
                 text(
                     "llmon statusline",
-                    Style::default().fg(state.accent_text_color()),
+                    Style::default().fg(state.harness_colors(Harness::Claude).1),
                 ),
             ];
         }
@@ -8323,6 +8358,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn combined_charts_use_their_harness_colors_and_mark_the_selected_one() {
+        let mut state = AppState::for_tests();
+        state.harness_view = HarnessView::Combined;
+        state.usage_focus = Harness::Claude;
+        state.harness_themes.claude = AccentTheme::Magenta;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+        state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+        let backend = ratatui::backend::TestBackend::new(200, 50);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| -> String { (0..200).map(|x| buffer[(x, y)].symbol()).collect() };
+        let chart_y = (0..50)
+            .find(|y| row_text(*y).contains("CODEX :: Usage by day"))
+            .expect("chart row");
+        let corners: Vec<u16> = (0..200)
+            .filter(|x| buffer[(*x, chart_y)].symbol() == "\u{250c}")
+            .collect();
+        let [codex_x, claude_x] = corners[..] else {
+            panic!("two chart corners: {corners:?}");
+        };
+        assert_eq!(buffer[(codex_x, chart_y)].fg, Color::Reset);
+        assert_eq!(buffer[(claude_x, chart_y)].fg, Color::LightMagenta);
+
+        let codex_colors = state.harness_themes.codex.colors();
+        let magenta = AccentTheme::Magenta.colors();
+        let mut bar_cells = [0_usize; 2];
+        for y in chart_y + 1..50 {
+            for x in 0..200 {
+                let cell = &buffer[(x, y)];
+                if !matches!(cell.symbol(), "\u{2588}" | "\u{2591}") {
+                    continue;
+                }
+                let (side, (normal, bright)) = if x < claude_x {
+                    (0, codex_colors)
+                } else {
+                    (1, magenta)
+                };
+                assert!(cell.fg == normal || cell.fg == bright, "({x}, {y})");
+                bar_cells[side] += 1;
+            }
+        }
+        assert!(bar_cells[0] > 0 && bar_cells[1] > 0, "{bar_cells:?}");
+
+        for harness in [Harness::Codex, Harness::Claude] {
+            assert!(state
+                .ui_hit_targets
+                .iter()
+                .any(|target| target.action == UiClickAction::SetUsageFocus(harness)));
+        }
+    }
+
+    #[test]
+    fn usage_help_popup_fits_every_line() {
+        let mut state = AppState::for_tests();
+        state.show_help = true;
+        let text = render_screen_text(&mut state, 120, 40);
+        assert!(
+            text.contains("x    - select the Codex/Claude chart"),
+            "{text}"
+        );
+        assert!(text.contains("q    - quit (confirm)"), "{text}");
     }
 
     #[test]

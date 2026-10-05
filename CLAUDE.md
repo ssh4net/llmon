@@ -66,7 +66,12 @@ same layout; differences are noted per module.
   command enums (`UsageCommand`, `ActivityCommand`, ...). Each frame the renderer
   registers `UiHitTarget` rects, and mouse clicks resolve against them to a
   `UiClickAction`. UI preferences persist in `state.json`, including the
-  USAGE view (`HarnessView`, key `h`). The usage worker scans every harness
+  USAGE view (`HarnessView`, key `h`) and one color theme per harness
+  (`HarnessThemes`). A harness's chart uses its own theme; the rest of the
+  screen uses the theme of `AppState::focused_harness` (the single view's
+  harness, the selected chart of the combined view (`usage_focus`, key `x`
+  or a click), or Codex on the other screens), and the swatches and `c` edit
+  that theme. The usage worker scans every harness
   each refresh and sends `UsageUpdated(harness, snapshot)`; a separate worker
   polls the Claude limits (status-line snapshot every 10 s, or OAuth at most
   once a minute).

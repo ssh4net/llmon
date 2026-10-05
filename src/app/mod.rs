@@ -1,3 +1,4 @@
+use crate::harness::Harness;
 use crate::locale::{DisplayFormatter, DisplayStyle, SystemLocale};
 use crate::providers::claude::limits::AccountRateLimits as ClaudeLimits;
 use crate::providers::codex::rpc::{AccountRateLimits, AccountUsage, CodexRpc, ResetCreditOutcome};
@@ -192,6 +193,44 @@ impl AccentTheme {
     }
 }
 
+/// The color theme of each harness. A harness's USAGE chart and cards use its
+/// own theme; the rest of the screen uses the theme of the focused harness
+/// (`AppState::focused_harness`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HarnessThemes {
+    pub(crate) codex: AccentTheme,
+    pub(crate) claude: AccentTheme,
+}
+
+impl Default for HarnessThemes {
+    fn default() -> Self {
+        Self {
+            codex: AccentTheme::Cyan,
+            claude: AccentTheme::Orange,
+        }
+    }
+}
+
+impl HarnessThemes {
+    pub(crate) fn get(self, harness: Harness) -> AccentTheme {
+        match harness {
+            Harness::Codex => self.codex,
+            Harness::Claude => self.claude,
+        }
+    }
+
+    /// Returns whether the theme changed.
+    fn set(&mut self, harness: Harness, theme: AccentTheme) -> bool {
+        let slot = match harness {
+            Harness::Codex => &mut self.codex,
+            Harness::Claude => &mut self.claude,
+        };
+        let changed = *slot != theme;
+        *slot = theme;
+        changed
+    }
+}
+
 /// Source of the Claude Code subscription limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeLimitsMode {
@@ -284,6 +323,7 @@ enum UsageCommand {
     ScrollOldest,
     ScrollNewest,
     CycleHarnessView,
+    SwitchUsageFocus,
     ToggleHelp,
     ConfirmContinue,
 }
@@ -327,6 +367,9 @@ pub(crate) enum UiClickAction {
     SetHarnessView(HarnessView),
     SetDisplayStyle(DisplayStyle),
     SetAccentTheme(AccentTheme),
+    /// Selects the chart of the combined USAGE view that the color theme
+    /// control edits.
+    SetUsageFocus(Harness),
     ToggleBarFillMode,
     SetHistoryProjectMode(crate::read::catalog::ProjectViewMode),
     ConfirmHistoryCatalogScan,
@@ -479,13 +522,15 @@ pub(crate) struct AppState {
     pub(crate) history_catalog_config_path: PathBuf,
     pub(crate) history_catalog_scan_prompt: bool,
     pub(crate) display_style: DisplayStyle,
-    pub(crate) accent_theme: AccentTheme,
+    pub(crate) harness_themes: HarnessThemes,
     pub(crate) bar_fill_mode: BarFillMode,
     pub(crate) system_locale: SystemLocale,
     pub(crate) mouse_position: Option<(u16, u16)>,
     pub(crate) ui_hit_targets: Vec<UiHitTarget>,
 
     pub(crate) harness_view: HarnessView,
+    /// The selected chart of the combined USAGE view.
+    pub(crate) usage_focus: Harness,
 
     pub(crate) codex_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
     pub(crate) codex_usage_updated_at: Option<Instant>,
@@ -549,6 +594,7 @@ pub(crate) enum LimitResetButtonState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedUiState {
     harness_view: HarnessView,
+    usage_focus: Harness,
     metric: UsageMetric,
     range: ChartRange,
     usage_zone: UsageZone,
@@ -560,7 +606,7 @@ struct PersistedUiState {
     workspace_path: Option<PathBuf>,
     no_sessions_confirm_dismissed: bool,
     display_style: DisplayStyle,
-    accent_theme: AccentTheme,
+    harness_themes: HarnessThemes,
     bar_fill_mode: BarFillMode,
     skip_quit_confirmation: bool,
     limit_reset_cooldown_until: Option<i64>,
@@ -575,6 +621,7 @@ impl PersistedUiState {
     fn default_for_workspace(workspace_path: Option<PathBuf>) -> Self {
         Self {
             harness_view: HarnessView::default(),
+            usage_focus: Harness::Codex,
             metric: UsageMetric::Tokens,
             range: ChartRange::Day,
             usage_zone: UsageZone::Local,
@@ -586,7 +633,7 @@ impl PersistedUiState {
             workspace_path,
             no_sessions_confirm_dismissed: false,
             display_style: DisplayStyle::Classic,
-            accent_theme: AccentTheme::default(),
+            harness_themes: HarnessThemes::default(),
             bar_fill_mode: BarFillMode::default(),
             skip_quit_confirmation: false,
             limit_reset_cooldown_until: None,
@@ -601,6 +648,7 @@ impl PersistedUiState {
     fn from_app_state(state: &AppState) -> Self {
         Self {
             harness_view: state.harness_view,
+            usage_focus: state.usage_focus,
             metric: state.metric,
             range: state.range,
             usage_zone: state.usage_zone,
@@ -612,7 +660,7 @@ impl PersistedUiState {
             workspace_path: state.workspace_path.clone(),
             no_sessions_confirm_dismissed: state.no_sessions_confirm_dismissed,
             display_style: state.display_style,
-            accent_theme: state.accent_theme,
+            harness_themes: state.harness_themes,
             bar_fill_mode: state.bar_fill_mode,
             skip_quit_confirmation: state.skip_quit_confirmation,
             limit_reset_cooldown_until: state
@@ -653,6 +701,7 @@ impl Default for StateStore {
 struct StoredGlobalState {
     #[serde(default)]
     harness_view: Option<String>,
+    usage_focus: Option<String>,
     metric: Option<String>,
     range: Option<String>,
     usage_zone: Option<String>,
@@ -662,7 +711,11 @@ struct StoredGlobalState {
     api_stat_orientation: Option<String>,
     activity_project_limit: Option<usize>,
     display_style: Option<String>,
+    /// The single theme of earlier versions; read as the Codex theme.
+    #[serde(default, skip_serializing)]
     accent_theme: Option<String>,
+    codex_accent_theme: Option<String>,
+    claude_accent_theme: Option<String>,
     bar_fill_mode: Option<String>,
     #[serde(default)]
     skip_quit_confirmation: bool,
@@ -1238,12 +1291,13 @@ async fn run_inner(
         history_catalog_config_path: config.llmon_home.join("config.json"),
         history_catalog_scan_prompt: false,
         display_style: restored_ui_state.display_style,
-        accent_theme: restored_ui_state.accent_theme,
+        harness_themes: restored_ui_state.harness_themes,
         bar_fill_mode: restored_ui_state.bar_fill_mode,
         system_locale: config.system_locale.clone(),
         mouse_position: None,
         ui_hit_targets: Vec::new(),
         harness_view: restored_ui_state.harness_view,
+        usage_focus: restored_ui_state.usage_focus,
         codex_usage: None,
         codex_usage_updated_at: None,
         codex_usage_error: None,
@@ -1753,7 +1807,9 @@ fn handle_input_event(
                 return Ok(InputOutcome::Continue(true));
             }
             (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => {
-                state.accent_theme = state.accent_theme.cycled();
+                let harness = state.focused_harness();
+                let theme = state.harness_themes.get(harness).cycled();
+                state.harness_themes.set(harness, theme);
                 return Ok(InputOutcome::Continue(true));
             }
             (KeyCode::Char('r'), _) | (KeyCode::F(5), _)
@@ -1876,8 +1932,12 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
             changed
         }
         UiClickAction::SetAccentTheme(theme) => {
-            let changed = state.accent_theme != theme;
-            state.accent_theme = theme;
+            let harness = state.focused_harness();
+            state.harness_themes.set(harness, theme)
+        }
+        UiClickAction::SetUsageFocus(harness) => {
+            let changed = state.usage_focus != harness;
+            state.usage_focus = harness;
             changed
         }
         UiClickAction::ToggleBarFillMode => {
@@ -2068,6 +2128,9 @@ fn map_event_to_usage_cmd(event: Event) -> Option<UsageCommand> {
                 (KeyCode::Char('h'), _) | (KeyCode::Char('H'), _) => {
                     Some(UsageCommand::CycleHarnessView)
                 }
+                (KeyCode::Char('x'), _) | (KeyCode::Char('X'), _) => {
+                    Some(UsageCommand::SwitchUsageFocus)
+                }
                 (KeyCode::Char('?'), _) => Some(UsageCommand::ToggleHelp),
                 (KeyCode::Enter, _) => Some(UsageCommand::ConfirmContinue),
                 (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
@@ -2222,6 +2285,16 @@ fn handle_usage_command(
         }
         UsageCommand::CycleHarnessView => {
             state.harness_view = state.harness_view.next();
+            true
+        }
+        UsageCommand::SwitchUsageFocus => {
+            if state.harness_view != HarnessView::Combined {
+                return false;
+            }
+            state.usage_focus = match state.usage_focus {
+                Harness::Codex => Harness::Claude,
+                Harness::Claude => Harness::Codex,
+            };
             true
         }
         UsageCommand::RefreshAll => {
@@ -2673,9 +2746,19 @@ fn load_persisted_ui_state_with_history_depth(
             state.display_style = style;
         }
     }
-    if let Some(theme_text) = store.global.accent_theme.as_deref() {
+    if let Some(theme_text) = store
+        .global
+        .codex_accent_theme
+        .as_deref()
+        .or(store.global.accent_theme.as_deref())
+    {
         if let Some(theme) = AccentTheme::from_store(theme_text) {
-            state.accent_theme = theme;
+            state.harness_themes.codex = theme;
+        }
+    }
+    if let Some(theme_text) = store.global.claude_accent_theme.as_deref() {
+        if let Some(theme) = AccentTheme::from_store(theme_text) {
+            state.harness_themes.claude = theme;
         }
     }
     if let Some(mode_text) = store.global.bar_fill_mode.as_deref() {
@@ -2687,6 +2770,14 @@ fn load_persisted_ui_state_with_history_depth(
         if let Some(view) = HarnessView::from_store(view_text) {
             state.harness_view = view;
         }
+    }
+    if let Some(harness) = store
+        .global
+        .usage_focus
+        .as_deref()
+        .and_then(Harness::from_key)
+    {
+        state.usage_focus = harness;
     }
     state.skip_quit_confirmation = store.global.skip_quit_confirmation;
     state.limit_reset_cooldown_until = store
@@ -2753,9 +2844,11 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
             .clamp(MIN_ACTIVITY_PROJECT_LIMIT, MAX_ACTIVITY_PROJECT_LIMIT),
     );
     store.global.display_style = Some(state.display_style.store_value().to_string());
-    store.global.accent_theme = Some(state.accent_theme.store_value().to_string());
+    store.global.codex_accent_theme = Some(state.harness_themes.codex.store_value().to_string());
+    store.global.claude_accent_theme = Some(state.harness_themes.claude.store_value().to_string());
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
     store.global.harness_view = Some(state.harness_view.store_value().to_string());
+    store.global.usage_focus = Some(state.usage_focus.key().to_string());
     store.global.skip_quit_confirmation = state.skip_quit_confirmation;
     store.global.limit_reset_cooldown_until = state
         .limit_reset_cooldown_until
@@ -2976,12 +3069,13 @@ impl AppState {
             history_catalog_config_path: PathBuf::from("/llmon-test/config.json"),
             history_catalog_scan_prompt: false,
             display_style: defaults.display_style,
-            accent_theme: defaults.accent_theme,
+            harness_themes: defaults.harness_themes,
             bar_fill_mode: defaults.bar_fill_mode,
             system_locale: SystemLocale::default(),
             mouse_position: None,
             ui_hit_targets: Vec::new(),
             harness_view: defaults.harness_view,
+            usage_focus: defaults.usage_focus,
             codex_usage: None,
             codex_usage_updated_at: None,
             codex_usage_error: None,
@@ -3019,12 +3113,31 @@ impl AppState {
         DisplayFormatter::new(self.display_style, &self.system_locale)
     }
 
+    /// The harness whose theme colors the screen and which the color theme
+    /// control edits: the harness of a single USAGE view, the selected chart
+    /// of the combined view, and Codex on the other screens, which show only
+    /// Codex so far.
+    pub(crate) fn focused_harness(&self) -> Harness {
+        if self.active_screen != ActiveScreen::Usage {
+            return Harness::Codex;
+        }
+        match self.harness_view {
+            HarnessView::Combined => self.usage_focus,
+            HarnessView::Codex => Harness::Codex,
+            HarnessView::Claude => Harness::Claude,
+        }
+    }
+
     pub(crate) fn accent_colors(&self) -> (Color, Color) {
-        self.accent_theme.colors()
+        self.harness_colors(self.focused_harness())
     }
 
     pub(crate) fn accent_text_color(&self) -> Color {
-        self.accent_theme.text_color()
+        self.harness_themes.get(self.focused_harness()).text_color()
+    }
+
+    pub(crate) fn harness_colors(&self, harness: Harness) -> (Color, Color) {
+        self.harness_themes.get(harness).colors()
     }
 
     pub(crate) fn usage_updated_label(&self, harness: crate::harness::Harness) -> Option<String> {
@@ -3449,12 +3562,17 @@ mod tests {
     fn theme_settings_round_trip_through_state_store() {
         let llmon_home = make_temp_dir("theme-settings");
         let mut state = PersistedUiState::default_for_workspace(None);
-        state.accent_theme = AccentTheme::Magenta;
+        state.harness_themes = HarnessThemes {
+            codex: AccentTheme::Magenta,
+            claude: AccentTheme::Blue,
+        };
+        state.usage_focus = Harness::Claude;
         state.bar_fill_mode = BarFillMode::DualColorBackground;
 
         save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
         let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
-        assert_eq!(loaded.accent_theme, AccentTheme::Magenta);
+        assert_eq!(loaded.harness_themes, state.harness_themes);
+        assert_eq!(loaded.usage_focus, Harness::Claude);
         assert_eq!(loaded.bar_fill_mode, BarFillMode::DualColorBackground);
 
         let _ = std::fs::remove_dir_all(llmon_home);
@@ -3494,10 +3612,63 @@ mod tests {
 
         let loaded = load_persisted_ui_state(&llmon_home, None).expect("load legacy ui state");
         assert_eq!(loaded.display_style, DisplayStyle::SystemFull);
-        assert_eq!(loaded.accent_theme, AccentTheme::Cyan);
+        assert_eq!(loaded.harness_themes, HarnessThemes::default());
+        assert_eq!(loaded.usage_focus, Harness::Codex);
         assert_eq!(loaded.bar_fill_mode, BarFillMode::Semigraphic);
 
         let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn single_accent_theme_of_earlier_state_becomes_the_codex_theme() {
+        let llmon_home = make_temp_dir("legacy-accent-theme");
+        let path = llmon_home.join(STATE_STORE_FILE_NAME);
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "global": {"accent_theme": "violet", "updated_at": 1},
+            "workspaces": {}
+        });
+        crate::storage::write_private_file(
+            &path,
+            &serde_json::to_vec_pretty(&legacy).expect("encode legacy state"),
+        )
+        .expect("write legacy state");
+
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load legacy ui state");
+        assert_eq!(loaded.harness_themes.codex, AccentTheme::Violet);
+        assert_eq!(
+            loaded.harness_themes.claude,
+            HarnessThemes::default().claude
+        );
+
+        let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn color_theme_control_edits_the_focused_harness() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        state.harness_view = HarnessView::Combined;
+        assert_eq!(state.focused_harness(), Harness::Codex);
+
+        assert!(apply_ui_click_action(
+            &mut state,
+            UiClickAction::SetUsageFocus(Harness::Claude)
+        ));
+        assert!(apply_ui_click_action(
+            &mut state,
+            UiClickAction::SetAccentTheme(AccentTheme::Green)
+        ));
+        assert_eq!(state.harness_themes.claude, AccentTheme::Green);
+        assert_eq!(state.harness_themes.codex, HarnessThemes::default().codex);
+        assert_eq!(state.accent_colors(), AccentTheme::Green.colors());
+
+        // A single view focuses its own harness; other screens show Codex.
+        state.harness_view = HarnessView::Codex;
+        assert_eq!(state.focused_harness(), Harness::Codex);
+        state.harness_view = HarnessView::Claude;
+        state.active_screen = ActiveScreen::Activity;
+        assert_eq!(state.focused_harness(), Harness::Codex);
     }
 
     #[test]
