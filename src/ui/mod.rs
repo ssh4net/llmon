@@ -2167,19 +2167,21 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, harness: Harness) {
     let panel = usage_panel(state, harness);
     let cards_height = usage_cards_height(state, &panel, area.width);
-    // Limit reset credits exist only for Codex.
-    let reset_summary = match panel.harness {
-        Harness::Codex => reset_summary_text(state),
-        Harness::Claude => None,
-    };
-    let reset_button = reset_summary
+    // Limit reset credits exist only for Codex, but the Claude view keeps
+    // the same controls height so the two views line up.
+    let codex_reset_summary = reset_summary_text(state);
+    let codex_reset_button = codex_reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
     let controls_height = usage_controls_height(
-        reset_summary.as_deref(),
+        codex_reset_summary.as_deref(),
         area.width,
-        reset_button.as_ref().map(LimitResetButtonView::width),
+        codex_reset_button.as_ref().map(LimitResetButtonView::width),
     );
+    let (reset_summary, reset_button) = match panel.harness {
+        Harness::Codex => (codex_reset_summary, codex_reset_button),
+        Harness::Claude => (None, None),
+    };
     let chunks = usage_layout(area, controls_height, cards_height);
 
     let reset_hover = render_usage_controls(
@@ -2606,12 +2608,12 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let cards_height = panel
         .as_ref()
         .map_or(0, |panel| usage_cards_height(state, panel, area.width));
-    // Limit reset credits exist only for Codex.
-    let reset_summary = view_harnesses(state.harness_view)
-        .contains(&Harness::Codex)
-        .then(|| reset_summary_text(state))
-        .flatten();
-    let controls_height = activity_controls_height(reset_summary.as_deref(), area.width);
+    // Limit reset credits exist only for Codex, but every view keeps the
+    // same controls height so the views line up.
+    let codex_reset_summary = reset_summary_text(state);
+    let controls_height = activity_controls_height(codex_reset_summary.as_deref(), area.width);
+    let reset_summary = codex_reset_summary
+        .filter(|_| view_harnesses(state.harness_view).contains(&Harness::Codex));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -8652,6 +8654,30 @@ mod tests {
             lines(&state).last().map(String::as_str),
             Some("Status line 20m ago")
         );
+    }
+
+    #[test]
+    fn codex_and_claude_views_line_up() {
+        for screen in [ActiveScreen::Usage, ActiveScreen::Activity] {
+            let mut rows = Vec::new();
+            for view in [HarnessView::Codex, HarnessView::Claude] {
+                let mut state = AppState::for_tests();
+                state.active_screen = screen;
+                state.harness_view = view;
+                state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+                state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+                // Codex reset credits add a row under the controls.
+                state.limits = Some(synthetic_codex_limits());
+                state.claude_limits = Some(synthetic_claude_limits());
+                let text = render_screen_text(&mut state, 120, 40);
+                let card_row = text
+                    .lines()
+                    .position(|line| line.contains("\u{250c} LIMITS"))
+                    .expect("limits card");
+                rows.push(card_row);
+            }
+            assert_eq!(rows[0], rows[1], "{screen:?}");
+        }
     }
 
     fn zero_day(day: &str, total: i64) -> UsageDay {
