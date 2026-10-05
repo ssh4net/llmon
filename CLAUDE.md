@@ -86,7 +86,8 @@ same layout; differences are noted per module.
   columns (3 for Codex, 4 for Claude). The combined view stacks two labeled
   panels' card groups (one row each), then draws both charts in equal-width
   halves from `aligned_usage_days`, so the days line up and one scroll offset
-  drives both.
+  drives both. Each card group puts three cards in each of the same halves
+  (`six_card_columns`), so its middle gap lines up with the chart divider.
   To see a layout without a terminal, run
   `LLMON_RENDER_DUMP_DIR=<dir> cargo test render_dump -- --ignored`: it
   renders screens from synthetic data to text files (`AppState::for_tests()`).

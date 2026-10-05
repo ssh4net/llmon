@@ -2312,6 +2312,28 @@ fn panel_card_layout(panel: &UsagePanel, width: u16) -> UsageCardLayout {
     }
 }
 
+/// The six cards of a one-row card group. A labeled (combined view) panel puts
+/// three cards in each half that `equal_halves` gives the charts, so the
+/// middle card gap lines up with the chart divider.
+fn six_card_columns(row: Rect, panel: &UsagePanel) -> [Rect; 6] {
+    if panel.label.is_some() {
+        let (left, right) = equal_halves(row);
+        let thirds = |half: Rect| Layout::horizontal([Constraint::Ratio(1, 3); 3]).split(half);
+        let (left, right) = (thirds(left), thirds(right));
+        return [left[0], left[1], left[2], right[0], right[1], right[2]];
+    }
+    let cards = Layout::horizontal([
+        Constraint::Percentage(17),
+        Constraint::Percentage(17),
+        Constraint::Percentage(17),
+        Constraint::Percentage(17),
+        Constraint::Percentage(16),
+        Constraint::Percentage(16),
+    ])
+    .split(row);
+    [cards[0], cards[1], cards[2], cards[3], cards[4], cards[5]]
+}
+
 /// Pads two day lists to the same consecutive date range, so their charts
 /// show the same days in the same rows.
 fn aligned_usage_days(left: &[UsageDay], right: &[UsageDay]) -> (Vec<UsageDay>, Vec<UsageDay>) {
@@ -3700,17 +3722,7 @@ fn render_usage_cards(
         };
         if let Some(row1) = row1 {
             if row2.is_none() {
-                let cards = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(17),
-                        Constraint::Percentage(17),
-                        Constraint::Percentage(17),
-                        Constraint::Percentage(17),
-                        Constraint::Percentage(16),
-                        Constraint::Percentage(16),
-                    ])
-                    .split(row1);
+                let cards = six_card_columns(row1, panel);
                 if let Some(hover) = render_panel_limits_card(
                     frame,
                     cards[0],
@@ -3859,17 +3871,7 @@ fn render_usage_cards(
 
             if let Some(row1) = row1 {
                 if row2.is_none() {
-                    let cards = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(16),
-                            Constraint::Percentage(16),
-                        ])
-                        .split(row1);
+                    let cards = six_card_columns(row1, panel);
                     if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
@@ -4013,17 +4015,7 @@ fn render_usage_cards(
 
             if let Some(row1) = row1 {
                 if row2.is_none() {
-                    let cards = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(16),
-                            Constraint::Percentage(16),
-                        ])
-                        .split(row1);
+                    let cards = six_card_columns(row1, panel);
                     if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
@@ -4202,17 +4194,7 @@ fn render_usage_cards(
 
             if let Some(row1) = row1 {
                 if row2.is_none() {
-                    let cards = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(17),
-                            Constraint::Percentage(16),
-                            Constraint::Percentage(16),
-                        ])
-                        .split(row1);
+                    let cards = six_card_columns(row1, panel);
                     if let Some(hover) = render_panel_limits_card(
                         frame,
                         cards[0],
@@ -8305,6 +8287,42 @@ mod tests {
             }
         }
         assert!(aligned_rows >= 15, "{aligned_rows} aligned rows");
+    }
+
+    #[test]
+    fn combined_card_groups_split_at_the_chart_divider() {
+        // An odd width leaves a gap column between the halves; the cards and
+        // the charts share it.
+        for width in [200_u16, 161] {
+            let mut state = AppState::for_tests();
+            state.harness_view = HarnessView::Combined;
+            state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+            state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+            let text = render_screen_text(&mut state, width, 50);
+            let row_with = |needle: &str| -> Vec<char> {
+                text.lines()
+                    .find(|line| line.contains(needle))
+                    .unwrap_or_else(|| panic!("row with {needle}"))
+                    .chars()
+                    .collect()
+            };
+            let right_corner = |row: &[char], nth: usize| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(_, symbol)| **symbol == '\u{2510}')
+                    .nth(nth)
+                    .map(|(column, _)| column)
+            };
+            let divider = right_corner(&row_with("CODEX :: Usage by day"), 0);
+            assert!(divider.is_some());
+            for cards in ["CODEX LIMITS", "CLAUDE LIMITS"] {
+                assert_eq!(
+                    right_corner(&row_with(cards), 2),
+                    divider,
+                    "{cards} at width {width}"
+                );
+            }
+        }
     }
 
     #[test]
