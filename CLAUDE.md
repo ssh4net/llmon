@@ -131,7 +131,10 @@ same layout; differences are noted per module.
 - `read/` - the session history screen. `scan.rs` holds the shared catalog
   types and `build_catalog(harness, dir)`, which groups sessions by project and
   nests Claude subagent transcripts under their parent; record parsing is in
-  `providers/<harness>/history.rs`. `--dump-history` (hidden) prints the
+  `providers/<harness>/history.rs`. The app builds one catalog from every
+  harness (`read::build_catalogs` over `Config::history_sources`,
+  `merge_catalogs` regroups the sessions by cwd), and the browser filters it
+  to the selected view (`BrowserState::set_harness_filter`, `filter_catalog`). `--dump-history` (hidden) prints the
   catalog as JSON for regression checks. `catalog.rs` links sessions to
   repositories from structured tool-call arguments only (Codex function calls,
   Claude `tool_use` blocks), never from prose or tool output. `catalog.rs` does

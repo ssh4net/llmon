@@ -530,8 +530,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let claude_dir = providers::claude::resolve_claude_dir(args.claude_dir.clone());
+    let mut history_sources = vec![(harness::Harness::Codex, read_config.sessions_dir)];
+    if let Some(claude_dir) = claude_dir.as_deref() {
+        history_sources.push((
+            harness::Harness::Claude,
+            providers::claude::projects_root(claude_dir),
+        ));
+    }
     let config = app::Config {
-        claude_dir: providers::claude::resolve_claude_dir(args.claude_dir.clone()),
+        claude_dir,
         claude_limits_mode: match args.claude_limits.unwrap_or(user_config.claude_limits) {
             ClaudeLimitsArg::Statusline => app::ClaudeLimitsMode::StatusLine,
             ClaudeLimitsArg::Oauth => app::ClaudeLimitsMode::OAuth,
@@ -542,7 +550,7 @@ async fn main() -> Result<()> {
         live_limits_mode: args.live_limits.into(),
         llmon_home,
         codex_home,
-        read_sessions_dir: read_config.sessions_dir,
+        history_sources,
         start_in_read_screen: args.read_mode,
         cwd,
         workspace_path: project,

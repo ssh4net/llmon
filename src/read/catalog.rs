@@ -76,8 +76,8 @@ impl ProjectViewMode {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogScanConfig {
-    pub(crate) harness: crate::harness::Harness,
-    pub(crate) sessions_dir: PathBuf,
+    /// Log directory of each harness; the strict catalog is built from them.
+    pub(crate) sources: Vec<(Harness, PathBuf)>,
     pub(crate) search_roots: Vec<PathBuf>,
     pub(crate) excluded_roots: Vec<PathBuf>,
     pub(crate) max_depth: u8,
@@ -1687,8 +1687,7 @@ mod tests {
             crate::read::scan::build_catalog(crate::harness::Harness::Codex, &sessions_root)
                 .expect("strict catalog");
         let config = CatalogScanConfig {
-            harness: crate::harness::Harness::Codex,
-            sessions_dir: sessions_root.clone(),
+            sources: vec![(crate::harness::Harness::Codex, sessions_root.clone())],
             search_roots: vec![root.clone()],
             excluded_roots: vec![sessions_root],
             max_depth: 2,
@@ -1755,8 +1754,7 @@ mod tests {
         let strict = crate::read::scan::build_catalog(Harness::Claude, &sessions_root)
             .expect("strict catalog");
         let config = CatalogScanConfig {
-            harness: Harness::Claude,
-            sessions_dir: sessions_root.clone(),
+            sources: vec![(Harness::Claude, sessions_root.clone())],
             search_roots: vec![root.clone()],
             excluded_roots: vec![sessions_root],
             max_depth: 2,

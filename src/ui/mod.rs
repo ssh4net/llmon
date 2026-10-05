@@ -269,6 +269,10 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             }
         }
         ActiveScreen::Read => {
+            // The browser filters its catalog to the selected view.
+            state
+                .read_browser
+                .set_harness_filter(usage_view_harness(state.harness_view));
             let system_locale = state.system_locale.clone();
             let formatter = DisplayFormatter::new(state.display_style, &system_locale);
             let accent_text_color = state.accent_text_color();
@@ -282,6 +286,8 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 accent_text_color,
             );
             render_history_style_controls(frame, inner, state);
+            let (x, y, right) = crate::read::tui::history_title_end(inner);
+            render_harness_pills(frame, state, x, y, right);
         }
     }
 
@@ -405,6 +411,33 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     render_harness_header(frame, area, state, "USAGE_SNAPSHOT :: ");
 }
 
+/// The clickable COMBINED / CODEX / CLAUDE pills from column `x` of row
+/// `y`; pills that would pass `right` get no click target.
+fn render_harness_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: u16, right: u16) {
+    let views = [
+        ("COMBINED", HarnessView::Combined),
+        ("CODEX", HarnessView::Codex),
+        ("CLAUDE", HarnessView::Claude),
+    ];
+    let mut spans = Vec::with_capacity(views.len());
+    let mut next_x = x;
+    for (label, view) in views {
+        let pill_span = pill(label, state.harness_view == view);
+        let width =
+            u16::try_from(UnicodeWidthStr::width(pill_span.content.as_ref())).unwrap_or(u16::MAX);
+        if next_x.saturating_add(width) <= right {
+            state.ui_hit_targets.push(UiHitTarget {
+                area: Rect::new(next_x, y, width, 1),
+                action: UiClickAction::SetHarnessView(view),
+            });
+        }
+        next_x = next_x.saturating_add(width);
+        spans.push(pill_span);
+    }
+    let area = Rect::new(x, y, right.saturating_sub(x), 1);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 /// Screen title, the COMBINED / CODEX / CLAUDE pills, and the scan status.
 fn render_harness_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, title: &str) {
     let line_area = header_line_area(area);
@@ -413,34 +446,23 @@ fn render_harness_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         .constraints([Constraint::Min(20), Constraint::Length(40)])
         .split(line_area);
 
-    let views = [
-        ("COMBINED", HarnessView::Combined),
-        ("CODEX", HarnessView::Codex),
-        ("CLAUDE", HarnessView::Claude),
-    ];
-    let mut spans = vec![Span::styled(
-        title.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    let mut x = row[0]
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        row[0],
+    );
+    let title_end = row[0]
         .x
         .saturating_add(u16::try_from(UnicodeWidthStr::width(title)).unwrap_or(u16::MAX));
-    for (label, view) in views {
-        let pill_span = pill(label, state.harness_view == view);
-        let width =
-            u16::try_from(UnicodeWidthStr::width(pill_span.content.as_ref())).unwrap_or(u16::MAX);
-        let right = row[0].x.saturating_add(row[0].width);
-        if x.saturating_add(width) <= right {
-            state.ui_hit_targets.push(UiHitTarget {
-                area: Rect::new(x, row[0].y, width, 1),
-                action: UiClickAction::SetHarnessView(view),
-            });
-        }
-        x = x.saturating_add(width);
-        spans.push(pill_span);
-    }
-    let left = Paragraph::new(Line::from(spans)).alignment(Alignment::Left);
-    frame.render_widget(left, row[0]);
+    render_harness_pills(
+        frame,
+        state,
+        title_end,
+        row[0].y,
+        row[0].x.saturating_add(row[0].width),
+    );
 
     let updated = match usage_view_harness(state.harness_view) {
         Some(harness) => usage_scan_status_label(state, harness),

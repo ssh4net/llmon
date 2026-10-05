@@ -49,9 +49,17 @@ pub(crate) fn build_config(
     })
 }
 
-pub(crate) fn build_browser(config: &Config) -> Result<tui::BrowserState> {
-    let catalog = scan::build_catalog(config.harness, &config.sessions_dir)?;
-    Ok(tui::BrowserState::new(catalog))
+/// The session catalog of every harness's log directory, merged by project.
+pub(crate) fn build_catalogs(sources: &[(Harness, PathBuf)]) -> Result<scan::Catalog> {
+    let catalogs = sources
+        .iter()
+        .map(|(harness, dir)| scan::build_catalog(*harness, dir))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(scan::merge_catalogs(catalogs))
+}
+
+pub(crate) fn build_browser(sources: &[(Harness, PathBuf)]) -> Result<tui::BrowserState> {
+    Ok(tui::BrowserState::new(build_catalogs(sources)?))
 }
 
 fn validate_dir(path: &Path, label: &str) -> Result<PathBuf> {

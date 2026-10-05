@@ -4,8 +4,8 @@ use crate::read::catalog::{
     CatalogProgress, CatalogScanPhase, CatalogSnapshot, ProjectViewMode, SOURCE_NOISY_TREE,
 };
 use crate::read::scan::{
-    load_session_detail, truncate_single_line, Catalog, ProjectRecord, SessionDetail,
-    SessionSummary,
+    filter_catalog, load_session_detail, truncate_single_line, Catalog, ProjectRecord,
+    SessionDetail, SessionSummary,
 };
 use crate::usage::{
     format_compact_kmb, format_duration, normalize_project_key, LocalUsageSnapshot,
@@ -67,6 +67,9 @@ pub(crate) struct BrowserState {
     error: Option<String>,
     layout: UiLayout,
     last_click: Option<(BrowserClickTarget, Instant)>,
+    /// Show only this harness's sessions; `None` shows every harness, with a
+    /// badge on each session.
+    harness_filter: Option<Harness>,
 }
 
 impl BrowserState {
@@ -113,7 +116,18 @@ impl BrowserState {
             error: None,
             layout: UiLayout::default(),
             last_click: None,
+            harness_filter: None,
         }
+    }
+
+    /// Returns whether the filter changed.
+    pub(crate) fn set_harness_filter(&mut self, filter: Option<Harness>) -> bool {
+        if self.harness_filter == filter {
+            return false;
+        }
+        self.harness_filter = filter;
+        self.rebuild_visible_catalog();
+        true
     }
 
     pub(crate) fn restore_project_state(
@@ -272,10 +286,14 @@ impl BrowserState {
         let selected_id = self
             .selected_project()
             .map(|project| project.stable_id.clone());
+        let strict = match self.harness_filter {
+            Some(harness) => filter_catalog(&self.strict_catalog, harness),
+            None => self.strict_catalog.clone(),
+        };
         self.catalog = match self.project_mode {
-            ProjectViewMode::Strict => self.strict_catalog.clone(),
+            ProjectViewMode::Strict => strict,
             mode => build_discovery_catalog(
-                &self.strict_catalog,
+                &strict,
                 self.discovery.as_ref(),
                 mode,
                 self.deep_depth,
@@ -860,23 +878,25 @@ fn render_header(
         formatter.format_usize(state.catalog.files_skipped)
     );
     let summary_width = u16::try_from(UnicodeWidthStr::width(summary.as_str())).unwrap_or(u16::MAX);
-    let show_summary = content_area.width >= 32u16.saturating_add(summary_width);
+    let title_width = history_title_width();
+    let show_summary = content_area.width >= title_width.saturating_add(summary_width);
     let row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(if show_summary {
-            [Constraint::Min(32), Constraint::Length(summary_width)]
+            [
+                Constraint::Min(title_width),
+                Constraint::Length(summary_width),
+            ]
         } else {
             [Constraint::Min(0), Constraint::Length(0)]
         })
         .split(content_area);
 
-    let scope = format!(
-        "SESSION_HISTORY {}",
-        truncate_single_line(&state.catalog.sessions_dir.display().to_string(), 64)
-    );
+    // The COMBINED / CODEX / CLAUDE pills follow the title; the app draws
+    // them (`history_title_end`).
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            scope,
+            HISTORY_TITLE,
             Style::default().add_modifier(Modifier::BOLD),
         ))),
         row[0],
@@ -891,6 +911,29 @@ fn render_header(
             row[1],
         );
     }
+}
+
+pub(crate) const HISTORY_TITLE: &str = "SESSION_HISTORY :: ";
+/// Room the header keeps after the title for the harness pills.
+pub(crate) const HISTORY_PILLS_WIDTH: u16 = 26;
+
+fn history_title_width() -> u16 {
+    u16::try_from(UnicodeWidthStr::width(HISTORY_TITLE))
+        .unwrap_or(u16::MAX)
+        .saturating_add(HISTORY_PILLS_WIDTH)
+}
+
+/// Where the header title ends, on which row, and how far the pills after
+/// it may reach.
+pub(crate) fn history_title_end(area: Rect) -> (u16, u16, u16) {
+    let line_area = header_line_area(area);
+    let title_end = line_area
+        .x
+        .saturating_add(u16::try_from(UnicodeWidthStr::width(HISTORY_TITLE)).unwrap_or(u16::MAX));
+    let right = title_end
+        .saturating_add(HISTORY_PILLS_WIDTH)
+        .min(line_area.x.saturating_add(line_area.width));
+    (title_end, line_area.y, right)
 }
 
 fn header_line_area(area: Rect) -> Rect {
@@ -1088,8 +1131,13 @@ fn render_sessions_view(
                     } else {
                         format!("  [+{} agents]", session.subagent_files.len())
                     };
+                    // Combined history names each session's harness.
+                    let harness = match state.harness_filter {
+                        Some(_) => String::new(),
+                        None => format!("{:<6}  ", session.harness.key()),
+                    };
                     let label = format!(
-                        "{relation}  {}  {}{agents}",
+                        "{relation}  {harness}{}  {}{agents}",
                         session_started_label(session, formatter),
                         truncate_single_line(&session.title, 64)
                     );
@@ -1563,7 +1611,7 @@ fn render_footer(
 ) {
     let base = match state.view {
         ViewMode::Projects => {
-            "Projects: [p] mode, [+/-] depth, [space] select in FULL, wheel, double-click/enter open, r/F5 discover/refresh"
+            "Projects: [h] view, [p] mode, [+/-] depth, [space] select in FULL, wheel, double-click/enter open, r/F5 discover/refresh"
         }
         ViewMode::Sessions => {
             "Sessions: up/down or wheel, double-click .. / backspace / left / esc back, q quit"
@@ -1808,6 +1856,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["/Volumes/Ext/src/Alpha", "/Volumes/Ext/src/Zeta"]
         );
+    }
+
+    #[test]
+    fn merged_catalog_joins_projects_and_the_harness_filter_splits_them() {
+        let mut codex_app = session("/codex/a.jsonl", "/work/app");
+        codex_app.started_at_sort_key_ms = 2;
+        let mut claude_app = session("/claude/b.jsonl", "/work/app/");
+        claude_app.harness = crate::harness::Harness::Claude;
+        claude_app.started_at_sort_key_ms = 5;
+        let mut claude_only = session("/claude/c.jsonl", "/work/notes");
+        claude_only.harness = crate::harness::Harness::Claude;
+        let catalog = |dir: &str, projects: Vec<ProjectRecord>| Catalog {
+            sessions_dir: PathBuf::from(dir),
+            projects,
+            files_scanned: 1,
+            files_skipped: 0,
+        };
+        let merged = crate::read::scan::merge_catalogs(vec![
+            catalog("/codex", vec![strict_project("/work/app", codex_app)]),
+            catalog(
+                "/claude",
+                vec![
+                    strict_project("/work/app", claude_app),
+                    strict_project("/work/notes", claude_only),
+                ],
+            ),
+        ]);
+        assert_eq!(merged.files_scanned, 2);
+        assert_eq!(merged.projects.len(), 2);
+        let app = &merged.projects[0];
+        assert_eq!(app.owner_session_count, 2);
+        // Newest first, whatever the harness.
+        assert_eq!(app.sessions[0].file_path, PathBuf::from("/claude/b.jsonl"));
+        assert_eq!(app.sessions[1].file_path, PathBuf::from("/codex/a.jsonl"));
+
+        let mut browser = BrowserState::new(merged);
+        assert!(!browser.set_harness_filter(None));
+        assert!(browser.set_harness_filter(Some(crate::harness::Harness::Codex)));
+        let paths: Vec<&str> = browser
+            .catalog
+            .projects
+            .iter()
+            .map(|project| project.display_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["/work/app"]);
+        assert_eq!(browser.catalog.projects[0].sessions.len(), 1);
+        assert!(browser.set_harness_filter(Some(crate::harness::Harness::Claude)));
+        assert_eq!(browser.catalog.projects.len(), 2);
+        assert!(browser.set_harness_filter(None));
+        assert_eq!(browser.catalog.projects[0].sessions.len(), 2);
     }
 
     #[test]

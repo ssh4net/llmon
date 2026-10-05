@@ -149,6 +149,61 @@ pub(crate) fn build_catalog(harness: Harness, sessions_dir: &Path) -> Result<Cat
     })
 }
 
+/// The catalogs of several harnesses as one: every session is grouped by its
+/// own cwd, as `build_catalog` does, so a project used from both harnesses
+/// is one project. `sessions_dir` is the first catalog's.
+pub(crate) fn merge_catalogs(catalogs: Vec<Catalog>) -> Catalog {
+    let mut sessions_dir = None;
+    let mut files_scanned = 0usize;
+    let mut files_skipped = 0usize;
+    let mut grouped: BTreeMap<String, ProjectBuilder> = BTreeMap::new();
+    for catalog in catalogs {
+        sessions_dir.get_or_insert(catalog.sessions_dir);
+        files_scanned += catalog.files_scanned;
+        files_skipped += catalog.files_skipped;
+        for session in catalog
+            .projects
+            .into_iter()
+            .flat_map(|project| project.sessions)
+        {
+            grouped
+                .entry(normalize_project_key(&session.cwd))
+                .or_default()
+                .sessions
+                .push(session);
+        }
+    }
+    Catalog {
+        sessions_dir: sessions_dir.unwrap_or_default(),
+        projects: finish_project_builders(grouped),
+        files_scanned,
+        files_skipped,
+    }
+}
+
+/// The sessions of one harness, grouped by project like `build_catalog`.
+pub(crate) fn filter_catalog(catalog: &Catalog, harness: Harness) -> Catalog {
+    let mut grouped: BTreeMap<String, ProjectBuilder> = BTreeMap::new();
+    for session in catalog
+        .projects
+        .iter()
+        .flat_map(|project| project.sessions.iter())
+        .filter(|session| session.harness == harness)
+    {
+        grouped
+            .entry(normalize_project_key(&session.cwd))
+            .or_default()
+            .sessions
+            .push(session.clone());
+    }
+    Catalog {
+        sessions_dir: catalog.sessions_dir.clone(),
+        projects: finish_project_builders(grouped),
+        files_scanned: catalog.files_scanned,
+        files_skipped: catalog.files_skipped,
+    }
+}
+
 fn scan_session_summary(harness: Harness, path: &Path) -> Result<SessionSummary> {
     match harness {
         Harness::Codex => codex::history::scan_session_summary(path),

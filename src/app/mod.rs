@@ -27,7 +27,8 @@ pub struct Config {
     pub live_limits_mode: LiveLimitsMode,
     pub llmon_home: std::path::PathBuf,
     pub codex_home: std::path::PathBuf,
-    pub read_sessions_dir: std::path::PathBuf,
+    /// Log directory of each harness for the HISTORY screen.
+    pub(crate) history_sources: Vec<(Harness, PathBuf)>,
     pub start_in_read_screen: bool,
     pub cwd: std::path::PathBuf,
     pub workspace_path: Option<std::path::PathBuf>,
@@ -860,11 +861,7 @@ async fn run_inner(
     if config.rebuild_cache_on_start {
         clear_scan_cache_files(&scan_cache_db_path)?;
     }
-    let read_config = read::Config {
-        harness: crate::harness::Harness::Codex,
-        sessions_dir: config.read_sessions_dir.clone(),
-    };
-    let mut read_browser = read::build_browser(&read_config)?;
+    let mut read_browser = read::build_browser(&config.history_sources)?;
     read_browser.restore_project_state(
         restored_ui_state.history_project_view_mode,
         restored_ui_state.history_deep_depth,
@@ -886,12 +883,14 @@ async fn run_inner(
     // an explicit user confirmation so normal startup never crawls project roots.
     {
         let evt_tx = evt_tx.clone();
-        let sessions_dir = config.read_sessions_dir.clone();
+        let sources = config.history_sources.clone();
         let search_roots = config.history_project_roots.clone();
-        let excluded_roots = vec![
+        // Discovery never crawls the harnesses' own log directories.
+        let mut excluded_roots = vec![
             config.codex_home.join("sessions"),
             config.llmon_home.clone(),
         ];
+        excluded_roots.extend(sources.iter().map(|(_, dir)| dir.clone()));
         let max_depth = history_catalog_max_depth;
         let max_candidates = config.history_catalog_max_candidates;
         let progress_interval_ms = config.history_catalog_scan_budget_ms;
@@ -926,8 +925,7 @@ async fn run_inner(
                     .await;
             }
             let scan_config = crate::read::catalog::CatalogScanConfig {
-                harness: crate::harness::Harness::Codex,
-                sessions_dir: sessions_dir.clone(),
+                sources,
                 search_roots,
                 excluded_roots,
                 max_depth,
@@ -953,10 +951,7 @@ async fn run_inner(
                 let scan_cancelled = scan_config.cancelled.clone();
                 let reuse_repositories = reuse_cached_repositories;
                 let result = tokio::task::spawn_blocking(move || {
-                    let strict = crate::read::scan::build_catalog(
-                        scan_config.harness,
-                        &scan_config.sessions_dir,
-                    )?;
+                    let strict = crate::read::build_catalogs(&scan_config.sources)?;
                     let report_progress = |progress| {
                         let _ =
                             progress_tx.blocking_send(AppEvent::HistoryCatalogProgress(progress));
@@ -1906,6 +1901,12 @@ fn handle_input_event(
                 if state.active_screen == ActiveScreen::Read =>
             {
                 return Ok(InputOutcome::Continue(request_history_catalog_scan(state)));
+            }
+            (KeyCode::Char('h'), _) | (KeyCode::Char('H'), _)
+                if state.active_screen == ActiveScreen::Read =>
+            {
+                state.harness_view = state.harness_view.next();
+                return Ok(InputOutcome::Continue(true));
             }
             _ => {}
         }
@@ -3308,6 +3309,7 @@ impl AppState {
                 | ActiveScreen::Models
                 | ActiveScreen::Cost
                 | ActiveScreen::Activity
+                | ActiveScreen::Read
         ) {
             return Harness::Codex;
         }
