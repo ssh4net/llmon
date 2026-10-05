@@ -1,6 +1,7 @@
 mod app;
 mod harness;
 mod locale;
+mod pricing;
 mod providers;
 mod read;
 mod storage;
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
 
-const USER_CONFIG_SCHEMA_VERSION: u32 = 4;
+const USER_CONFIG_SCHEMA_VERSION: u32 = 5;
 const USER_CONFIG_FILE_NAME: &str = "config.json";
 const DEFAULT_USAGE_DAYS: u32 = 30;
 const DEFAULT_REFRESH_USAGE_SECS: u64 = 300;
@@ -47,6 +48,9 @@ struct UserConfig {
     history_catalog_scan_budget_ms: u64,
     /// Claude Code limits source: "statusline" (default), "oauth", or "off".
     claude_limits: ClaudeLimitsArg,
+    /// Prices that add to or override the built-in tables, per harness:
+    /// model id -> USD per million tokens.
+    pricing: pricing::PricingOverrides,
 }
 
 impl Default for UserConfig {
@@ -71,6 +75,7 @@ impl Default for UserConfig {
             history_catalog_max_candidates: DEFAULT_HISTORY_CATALOG_MAX_CANDIDATES,
             history_catalog_scan_budget_ms: DEFAULT_HISTORY_CATALOG_SCAN_BUDGET_MS,
             claude_limits: ClaudeLimitsArg::Statusline,
+            pricing: pricing::PricingOverrides::default(),
         }
     }
 }
@@ -559,6 +564,7 @@ async fn main() -> Result<()> {
             .clamp(1, read::catalog::MAX_DEEP_DEPTH),
         history_catalog_max_candidates: user_config.history_catalog_max_candidates.max(1),
         history_catalog_scan_budget_ms: user_config.history_catalog_scan_budget_ms.max(25),
+        pricing: pricing::Pricing::new(&user_config.pricing),
     };
 
     app::run(config).await

@@ -83,7 +83,10 @@ same layout; differences are noted per module.
   summary/detail parsing (`history.rs`), and (Codex) fork replay baselines. Shared code reaches it through
   `HarnessParserState` / `HarnessParsePlan` in `usage/`.
 - `ui/` - `ui::render(frame, &mut AppState)` and all drawing. Most of it lives
-  in `ui/mod.rs`; ClaudeMon splits out `apistat.rs` and `cost.rs`. The USAGE
+  in `ui/mod.rs`; the MODELS and COST screens are `ui/models.rs` and
+  `ui/cost.rs`. They read every selected harness's snapshot
+  (`view_snapshots`) and the per-model daily series (`model_daily`,
+  `project_model_daily`), over a `DayRange` (`range_days`). The USAGE
   cards, chart, and top models draw a `UsagePanel` (harness + snapshot, kept
   as `Arc` so the chart can borrow the state mutably). Per-harness parts
   dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude
@@ -152,8 +155,14 @@ same layout; differences are noted per module.
 - `storage.rs` - private-file helpers: `0700` dirs, `0600` files, atomic
   writes, and refusal of symlinks and special files. Every file the app writes
   goes through these helpers.
-- `pricing.rs` (ClaudeMon) - per-model price table in `config.json`, used by
-  the COST screen.
+- `pricing.rs` - built-in price tables per harness (USD per million tokens,
+  dated `*_PRICES_UPDATED`; check them against the official pages when you
+  change them), plus `pricing.<harness>` overrides from `config.json`.
+  Claude: Anthropic list prices with TTL-specific cache writes. Codex:
+  OpenAI API prices, which equal the Codex credit rate card at
+  `CODEX_USD_PER_CREDIT`. Lookup: exact id, id without a date, then the
+  longest table id the model continues with a `-` (family pricing, shown on
+  the COST screen).
 
 **Project identity.** A session belongs to the cwd recorded in its own log
 records (`session_cwd_identity`, `resolve_session_owner`). Never derive it

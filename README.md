@@ -43,8 +43,33 @@ switches them):
   (input includes the cached input, as in the Codex columns)
   and a LIMITS card with gauges for the 5-hour, weekly, and per-model limits.
 
-The other screens still show Codex. The combined view needs about 120
-columns; on narrower terminals use the single views.
+The same switch applies to the MODELS and COST screens:
+
+- **MODELS**: tokens per day per model as a line chart, and a card per
+  model with its share, input, output, and cache split.
+- **COST**: the cost of that usage by day, model, and project, with totals
+  per harness in the combined view. Codex is priced at OpenAI API prices,
+  which equal the Codex credit rate card at $0.04 per credit (the Codex
+  view also shows credits); Claude Code at Anthropic API list prices. Both
+  are API-equivalent: subscription usage is not billed per token. Models
+  without their own price use their family's (for example `gpt-5.1` for
+  `gpt-5.1-codex-max`), and the screen says so; models without any price
+  are listed and left out. `d` cycles the dates (all, 7 days, 30 days).
+
+The built-in prices are dated in the COST screen. To add a model or change
+a price, set it under `pricing` in `config.json`, in USD per million
+tokens. Cache prices that are left out follow Anthropic's multipliers of
+`input` (5-minute writes 1.25x, 1-hour writes 2x, reads 0.1x):
+
+```json
+"pricing": {
+  "codex": { "codex-auto-review": { "input": 1.25, "cache_read": 0.125, "output": 10.0 } },
+  "claude": { "claude-opus-5-5": { "input": 4.0, "output": 20.0, "cache_read": 0.2 } }
+}
+```
+
+ACTIVITY, APISTAT, LIMITS, and HISTORY still show Codex. The combined USAGE
+view needs about 120 columns; on narrower terminals use the single views.
 
 ## Claude Code live limits
 
@@ -196,7 +221,8 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 
 ## Key bindings
 
-- `h` Switch the USAGE view: Combined, Codex, or Claude Code (or click the pills in the header)
+- `h` Switch the USAGE, MODELS, and COST view: Combined, Codex, or Claude Code (or click the pills in the header)
+- `d` Cycle the dates on MODELS and COST (all time, 7 days, 30 days)
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)
 - `f` Toggle layout (Horz/Vert)
@@ -207,7 +233,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 - Mouse wheel or arrow keys Scroll chart history (`PgUp`/`PgDn`, `Home`/`End` also work)
 - Mouse: click the top tabs, Usage/Activity controls (including the Usage style selector), `#` bar-fill mode, color swatches, or the bottom-right Quit action
 - Mouse: hover a filled vertical chart bar to see its exact date and full locale-aware value
-- `s` / `F2` Switch between Usage and Session history
+- `s` / `F2` Switch to the next screen (USAGE, MODELS, COST, APISTAT, ACTIVITY, LIMITS, HISTORY)
 - `r` / `F5` Refresh current screen
 - `?` Help overlay
 - `q` Quit (with confirmation)

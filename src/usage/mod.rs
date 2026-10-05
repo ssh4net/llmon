@@ -384,6 +384,20 @@ pub struct ProjectModelDaily {
 }
 
 impl LocalUsageSnapshot {
+    pub fn model_daily_for_zone(&self, zone: UsageZone) -> &[ModelDailyUsage] {
+        match zone {
+            UsageZone::Local => &self.model_daily,
+            UsageZone::Utc => &self.utc_model_daily,
+        }
+    }
+
+    pub fn project_model_daily_for_zone(&self, zone: UsageZone) -> &[ProjectModelDaily] {
+        match zone {
+            UsageZone::Local => &self.project_model_daily,
+            UsageZone::Utc => &self.utc_project_model_daily,
+        }
+    }
+
     pub fn project_usage_for_path(&self, path: &str) -> Option<&ProjectUsageSummary> {
         let key = normalize_project_key(path);
         self.project_usage

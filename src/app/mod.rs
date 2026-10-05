@@ -42,6 +42,7 @@ pub struct Config {
     pub(crate) history_deep_max_depth: u8,
     pub(crate) history_catalog_max_candidates: usize,
     pub(crate) history_catalog_scan_budget_ms: u64,
+    pub(crate) pricing: crate::pricing::Pricing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +242,65 @@ pub enum ClaudeLimitsMode {
     Off,
 }
 
+/// Days the MODELS and COST screens cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DayRange {
+    AllTime,
+    Last7Days,
+    Last30Days,
+}
+
+impl DayRange {
+    pub(crate) const ALL: [Self; 3] = [Self::AllTime, Self::Last7Days, Self::Last30Days];
+
+    fn cycled(self) -> Self {
+        match self {
+            Self::AllTime => Self::Last7Days,
+            Self::Last7Days => Self::Last30Days,
+            Self::Last30Days => Self::AllTime,
+        }
+    }
+
+    /// Number of trailing days, or `None` for all indexed history.
+    pub(crate) fn days(self) -> Option<usize> {
+        match self {
+            Self::AllTime => None,
+            Self::Last7Days => Some(7),
+            Self::Last30Days => Some(30),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AllTime => "All time",
+            Self::Last7Days => "Last 7 days",
+            Self::Last30Days => "Last 30 days",
+        }
+    }
+
+    pub(crate) fn short_label(self) -> &'static str {
+        match self {
+            Self::AllTime => "ALL",
+            Self::Last7Days => "7D",
+            Self::Last30Days => "30D",
+        }
+    }
+
+    fn store_value(self) -> &'static str {
+        match self {
+            Self::AllTime => "all",
+            Self::Last7Days => "7d",
+            Self::Last30Days => "30d",
+        }
+    }
+
+    fn from_store(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|range| range.store_value() == value)
+    }
+}
+
 /// Which harness the USAGE screen shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum HarnessView {
@@ -328,6 +388,15 @@ enum UsageCommand {
     ConfirmContinue,
 }
 
+/// Keys of the MODELS and COST screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeScreenCommand {
+    Refresh,
+    CycleRange,
+    CycleHarnessView,
+    ToggleHelp,
+}
+
 #[derive(Debug)]
 enum AppEvent {
     UsageUpdated(crate::harness::Harness, Result<LocalUsageSnapshot>),
@@ -355,6 +424,8 @@ enum AppEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActiveScreen {
     Usage,
+    Models,
+    Cost,
     Activity,
     ApiStat,
     LimitResets,
@@ -370,6 +441,8 @@ pub(crate) enum UiClickAction {
     /// Selects the chart of the combined USAGE view that the color theme
     /// control edits.
     SetUsageFocus(Harness),
+    SetModelsRange(DayRange),
+    SetCostRange(DayRange),
     ToggleBarFillMode,
     SetHistoryProjectMode(crate::read::catalog::ProjectViewMode),
     ConfirmHistoryCatalogScan,
@@ -476,7 +549,9 @@ enum ApiStatCommand {
 
 fn next_active_screen(screen: ActiveScreen) -> ActiveScreen {
     match screen {
-        ActiveScreen::Usage => ActiveScreen::ApiStat,
+        ActiveScreen::Usage => ActiveScreen::Models,
+        ActiveScreen::Models => ActiveScreen::Cost,
+        ActiveScreen::Cost => ActiveScreen::ApiStat,
         ActiveScreen::ApiStat => ActiveScreen::Activity,
         ActiveScreen::Activity => ActiveScreen::LimitResets,
         ActiveScreen::LimitResets => ActiveScreen::Read,
@@ -531,6 +606,9 @@ pub(crate) struct AppState {
     pub(crate) harness_view: HarnessView,
     /// The selected chart of the combined USAGE view.
     pub(crate) usage_focus: Harness,
+    pub(crate) models_range: DayRange,
+    pub(crate) cost_range: DayRange,
+    pub(crate) pricing: crate::pricing::Pricing,
 
     pub(crate) codex_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
     pub(crate) codex_usage_updated_at: Option<Instant>,
@@ -595,6 +673,8 @@ pub(crate) enum LimitResetButtonState {
 struct PersistedUiState {
     harness_view: HarnessView,
     usage_focus: Harness,
+    models_range: DayRange,
+    cost_range: DayRange,
     metric: UsageMetric,
     range: ChartRange,
     usage_zone: UsageZone,
@@ -622,6 +702,8 @@ impl PersistedUiState {
         Self {
             harness_view: HarnessView::default(),
             usage_focus: Harness::Codex,
+            models_range: DayRange::Last30Days,
+            cost_range: DayRange::Last30Days,
             metric: UsageMetric::Tokens,
             range: ChartRange::Day,
             usage_zone: UsageZone::Local,
@@ -649,6 +731,8 @@ impl PersistedUiState {
         Self {
             harness_view: state.harness_view,
             usage_focus: state.usage_focus,
+            models_range: state.models_range,
+            cost_range: state.cost_range,
             metric: state.metric,
             range: state.range,
             usage_zone: state.usage_zone,
@@ -702,6 +786,8 @@ struct StoredGlobalState {
     #[serde(default)]
     harness_view: Option<String>,
     usage_focus: Option<String>,
+    models_range: Option<String>,
+    cost_range: Option<String>,
     metric: Option<String>,
     range: Option<String>,
     usage_zone: Option<String>,
@@ -1298,6 +1384,9 @@ async fn run_inner(
         ui_hit_targets: Vec::new(),
         harness_view: restored_ui_state.harness_view,
         usage_focus: restored_ui_state.usage_focus,
+        models_range: restored_ui_state.models_range,
+        cost_range: restored_ui_state.cost_range,
+        pricing: config.pricing.clone(),
         codex_usage: None,
         codex_usage_updated_at: None,
         codex_usage_error: None,
@@ -1834,6 +1923,14 @@ fn handle_input_event(
             let dirty = handle_usage_command(state, command, usage_refresh_tx, limits_refresh_tx);
             Ok(InputOutcome::Continue(dirty))
         }
+        ActiveScreen::Models | ActiveScreen::Cost => {
+            let Some(command) = map_event_to_range_screen_cmd(event) else {
+                return Ok(InputOutcome::Continue(false));
+            };
+            let dirty =
+                handle_range_screen_command(state, command, usage_refresh_tx, limits_refresh_tx);
+            Ok(InputOutcome::Continue(dirty))
+        }
         ActiveScreen::Activity => {
             let Some(command) = map_event_to_activity_cmd(event) else {
                 return Ok(InputOutcome::Continue(false));
@@ -1938,6 +2035,16 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
         UiClickAction::SetUsageFocus(harness) => {
             let changed = state.usage_focus != harness;
             state.usage_focus = harness;
+            changed
+        }
+        UiClickAction::SetModelsRange(range) => {
+            let changed = state.models_range != range;
+            state.models_range = range;
+            changed
+        }
+        UiClickAction::SetCostRange(range) => {
+            let changed = state.cost_range != range;
+            state.cost_range = range;
             changed
         }
         UiClickAction::ToggleBarFillMode => {
@@ -2330,6 +2437,53 @@ fn scrolled_period_offset(
         current.saturating_add(amount).min(max_offset)
     } else {
         current.saturating_sub(amount)
+    }
+}
+
+fn map_event_to_range_screen_cmd(event: Event) -> Option<RangeScreenCommand> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('r') | KeyCode::F(5) => Some(RangeScreenCommand::Refresh),
+        KeyCode::Char('d') | KeyCode::Char('D') => Some(RangeScreenCommand::CycleRange),
+        KeyCode::Char('h') | KeyCode::Char('H') => Some(RangeScreenCommand::CycleHarnessView),
+        KeyCode::Char('?') => Some(RangeScreenCommand::ToggleHelp),
+        _ => None,
+    }
+}
+
+fn handle_range_screen_command(
+    state: &mut AppState,
+    cmd: RangeScreenCommand,
+    usage_refresh_tx: &mpsc::Sender<()>,
+    limits_refresh_tx: &mpsc::Sender<()>,
+) -> bool {
+    match cmd {
+        RangeScreenCommand::Refresh => {
+            let _ = usage_refresh_tx.try_send(());
+            let _ = limits_refresh_tx.try_send(());
+            true
+        }
+        RangeScreenCommand::CycleRange => {
+            let range = match state.active_screen {
+                ActiveScreen::Models => &mut state.models_range,
+                _ => &mut state.cost_range,
+            };
+            *range = range.cycled();
+            true
+        }
+        RangeScreenCommand::CycleHarnessView => {
+            state.harness_view = state.harness_view.next();
+            true
+        }
+        RangeScreenCommand::ToggleHelp => {
+            state.show_help = !state.show_help;
+            true
+        }
     }
 }
 
@@ -2779,6 +2933,22 @@ fn load_persisted_ui_state_with_history_depth(
     {
         state.usage_focus = harness;
     }
+    if let Some(range) = store
+        .global
+        .models_range
+        .as_deref()
+        .and_then(DayRange::from_store)
+    {
+        state.models_range = range;
+    }
+    if let Some(range) = store
+        .global
+        .cost_range
+        .as_deref()
+        .and_then(DayRange::from_store)
+    {
+        state.cost_range = range;
+    }
     state.skip_quit_confirmation = store.global.skip_quit_confirmation;
     state.limit_reset_cooldown_until = store
         .global
@@ -2849,6 +3019,8 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
     store.global.harness_view = Some(state.harness_view.store_value().to_string());
     store.global.usage_focus = Some(state.usage_focus.key().to_string());
+    store.global.models_range = Some(state.models_range.store_value().to_string());
+    store.global.cost_range = Some(state.cost_range.store_value().to_string());
     store.global.skip_quit_confirmation = state.skip_quit_confirmation;
     store.global.limit_reset_cooldown_until = state
         .limit_reset_cooldown_until
@@ -3076,6 +3248,9 @@ impl AppState {
             ui_hit_targets: Vec::new(),
             harness_view: defaults.harness_view,
             usage_focus: defaults.usage_focus,
+            models_range: defaults.models_range,
+            cost_range: defaults.cost_range,
+            pricing: crate::pricing::Pricing::default(),
             codex_usage: None,
             codex_usage_updated_at: None,
             codex_usage_error: None,
@@ -3118,7 +3293,10 @@ impl AppState {
     /// of the combined view, and Codex on the other screens, which show only
     /// Codex so far.
     pub(crate) fn focused_harness(&self) -> Harness {
-        if self.active_screen != ActiveScreen::Usage {
+        if !matches!(
+            self.active_screen,
+            ActiveScreen::Usage | ActiveScreen::Models | ActiveScreen::Cost
+        ) {
             return Harness::Codex;
         }
         match self.harness_view {
@@ -3461,9 +3639,14 @@ mod tests {
     }
 
     #[test]
-    fn screen_cycle_places_api_stats_after_usage() {
+    fn screen_cycle_follows_the_tab_order() {
         assert_eq!(
             next_active_screen(ActiveScreen::Usage),
+            ActiveScreen::Models
+        );
+        assert_eq!(next_active_screen(ActiveScreen::Models), ActiveScreen::Cost);
+        assert_eq!(
+            next_active_screen(ActiveScreen::Cost),
             ActiveScreen::ApiStat
         );
         assert_eq!(

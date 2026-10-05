@@ -1,7 +1,10 @@
+mod cost;
+mod models;
+
 use crate::app::HarnessView;
 use crate::app::{
     AccentTheme, ActiveScreen, ApiStatGraph, ApiStatGrouping, AppState, BarFillMode,
-    ChartOrientation, LimitResetButtonState, UiClickAction, UiHitTarget,
+    ChartOrientation, DayRange, LimitResetButtonState, UiClickAction, UiHitTarget,
 };
 use crate::harness::Harness;
 use crate::locale::{DisplayFormatter, DisplayStyle};
@@ -195,6 +198,26 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 render_no_sessions_overlay(frame, area, state);
             }
         }
+        ActiveScreen::Models | ActiveScreen::Cost => {
+            let footer_height = footer_height(inner.width, state);
+            let chunks = usage_screen_layout(inner, footer_height);
+
+            let screen = state.active_screen;
+            let title = match screen {
+                ActiveScreen::Models => "MODELS :: ",
+                _ => "COST :: ",
+            };
+            render_harness_header(frame, chunks[0], state, title);
+            match screen {
+                ActiveScreen::Models => models::render(frame, chunks[1], state),
+                _ => cost::render(frame, chunks[1], state),
+            }
+            render_footer(frame, chunks[2], state);
+
+            if state.show_help {
+                render_help_overlay(frame, area, screen);
+            }
+        }
         ActiveScreen::Activity => {
             let footer_height = footer_height(inner.width, state);
             let chunks = Layout::default()
@@ -303,6 +326,11 @@ fn navigation_title(area: Rect, active_screen: ActiveScreen) -> (Line<'static>, 
             Some(UiClickAction::SetScreen(ActiveScreen::Usage)),
         ),
         (
+            " MODELS ",
+            Some(UiClickAction::SetScreen(ActiveScreen::Models)),
+        ),
+        (" COST ", Some(UiClickAction::SetScreen(ActiveScreen::Cost))),
+        (
             " APISTAT ",
             Some(UiClickAction::SetScreen(ActiveScreen::ApiStat)),
         ),
@@ -335,6 +363,8 @@ fn navigation_title(area: Rect, active_screen: ActiveScreen) -> (Line<'static>, 
     let line = Line::from(vec![
         Span::raw(" "),
         pill("USAGE", active_screen == ActiveScreen::Usage),
+        pill("MODELS", active_screen == ActiveScreen::Models),
+        pill("COST", active_screen == ActiveScreen::Cost),
         pill("APISTAT", active_screen == ActiveScreen::ApiStat),
         pill("ACTIVITY", active_screen == ActiveScreen::Activity),
         pill("LIMITS", active_screen == ActiveScreen::LimitResets),
@@ -372,20 +402,24 @@ fn quit_title(
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+    render_harness_header(frame, area, state, "USAGE_SNAPSHOT :: ");
+}
+
+/// Screen title, the COMBINED / CODEX / CLAUDE pills, and the scan status.
+fn render_harness_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, title: &str) {
     let line_area = header_line_area(area);
     let row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(40)])
         .split(line_area);
 
-    let title = "USAGE_SNAPSHOT :: ";
     let views = [
         ("COMBINED", HarnessView::Combined),
         ("CODEX", HarnessView::Codex),
         ("CLAUDE", HarnessView::Claude),
     ];
     let mut spans = vec![Span::styled(
-        title,
+        title.to_string(),
         Style::default().add_modifier(Modifier::BOLD),
     )];
     let mut x = row[0]
@@ -2042,6 +2076,12 @@ fn footer_hint(screen: ActiveScreen) -> &'static str {
         ActiveScreen::Usage => {
             "Usage: View [h] (combined/codex/claude), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
+        ActiveScreen::Models => {
+            "Models: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+        }
+        ActiveScreen::Cost => {
+            "Cost: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+        }
         ActiveScreen::Activity => {
             "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
@@ -2062,6 +2102,10 @@ fn footer_error(state: &AppState) -> String {
             .as_deref()
             .or(state.limits_error.as_deref())
             .or(state.limit_reset_error.as_deref()),
+        ActiveScreen::Models | ActiveScreen::Cost => state
+            .codex_usage_error
+            .as_deref()
+            .or(state.claude_usage_error.as_deref()),
         ActiveScreen::Activity => state.codex_usage_error.as_deref(),
         ActiveScreen::ApiStat => state.account_usage_error.as_deref(),
         ActiveScreen::LimitResets => state.limits_error.as_deref(),
@@ -2315,6 +2359,105 @@ fn labeled_usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
         }),
         ..usage_panel(state, harness)
     }
+}
+
+/// The harnesses a view covers, in display order.
+fn view_harnesses(view: HarnessView) -> &'static [Harness] {
+    match view {
+        HarnessView::Combined => &[Harness::Codex, Harness::Claude],
+        HarnessView::Codex => &[Harness::Codex],
+        HarnessView::Claude => &[Harness::Claude],
+    }
+}
+
+/// The usage snapshots of the selected view's harnesses that have one.
+fn view_snapshots(state: &AppState) -> Vec<(Harness, Arc<crate::usage::LocalUsageSnapshot>)> {
+    view_harnesses(state.harness_view)
+        .iter()
+        .filter_map(|harness| {
+            let snapshot = match harness {
+                Harness::Codex => state.codex_usage.clone(),
+                Harness::Claude => state.claude_usage.clone(),
+            };
+            snapshot.map(|snapshot| (*harness, snapshot))
+        })
+        .collect()
+}
+
+/// Consecutive day keys of `range`, ending today; for all time they start
+/// at the first day any of the snapshots has model usage.
+fn range_days(
+    snapshots: &[(Harness, &crate::usage::LocalUsageSnapshot)],
+    zone: UsageZone,
+    range: DayRange,
+) -> Vec<String> {
+    let last = match zone {
+        UsageZone::Local => Local::now().date_naive(),
+        UsageZone::Utc => Utc::now().date_naive(),
+    };
+    let first = match range.days() {
+        Some(count) => last - ChronoDuration::days(count.saturating_sub(1) as i64),
+        None => snapshots
+            .iter()
+            .flat_map(|(_, snapshot)| snapshot.model_daily_for_zone(zone))
+            .filter_map(|series| series.days.keys().next())
+            .filter_map(|day| NaiveDate::parse_from_str(day, "%Y-%m-%d").ok())
+            .min()
+            .unwrap_or(last)
+            .min(last),
+    };
+    first
+        .iter_days()
+        .take_while(|day| *day <= last)
+        .map(|day| day.format("%Y-%m-%d").to_string())
+        .collect()
+}
+
+/// The DATES and STYLE controls of the MODELS and COST screens.
+fn render_range_controls(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    selected: DayRange,
+    action: fn(DayRange) -> UiClickAction,
+) {
+    let accent = state.accent_text_color();
+    let labels: Vec<String> = DayRange::ALL
+        .iter()
+        .map(|range| format!(" {} ", range.short_label()))
+        .collect();
+    let mut segments: Vec<(&str, Option<UiClickAction>)> = vec![(" DATES ", None)];
+    let mut spans = vec![control_group_label("DATES", accent)];
+    for (label, range) in labels.iter().zip(DayRange::ALL) {
+        segments.push((label.as_str(), Some(action(range))));
+        spans.push(pill(range.short_label(), range == selected));
+    }
+    segments.extend([
+        (" STYLE ", None),
+        (
+            " CLASS ",
+            Some(UiClickAction::SetDisplayStyle(DisplayStyle::Classic)),
+        ),
+        (
+            " SCOMP ",
+            Some(UiClickAction::SetDisplayStyle(DisplayStyle::SystemCompact)),
+        ),
+        (
+            " SFULL ",
+            Some(UiClickAction::SetDisplayStyle(DisplayStyle::SystemFull)),
+        ),
+    ]);
+    spans.push(control_group_label("STYLE", accent));
+    spans.extend([
+        pill("CLASS", state.display_style == DisplayStyle::Classic),
+        pill("SCOMP", state.display_style == DisplayStyle::SystemCompact),
+        pill("SFULL", state.display_style == DisplayStyle::SystemFull),
+    ]);
+    register_right_aligned_targets(state, area, &segments);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        area,
+    );
 }
 
 /// The harness of a single-harness USAGE view, or `None` for the combined
@@ -5884,6 +6027,18 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
             Line::from("  ?    - toggle help"),
             Line::from("  q    - quit (confirm)"),
         ]),
+        ActiveScreen::Models | ActiveScreen::Cost => Text::from(vec![
+            Line::from("Keys:"),
+            Line::from("  h    - switch view (Combined/Codex/Claude)"),
+            Line::from("  d    - cycle dates (All time/7 days/30 days)"),
+            Line::from("  n    - cycle display style (Classic/System Compact/Full)"),
+            Line::from("  c    - cycle the color theme"),
+            Line::from("  Mouse - click tabs/controls/quit"),
+            Line::from("  r/F5 - refresh usage + limits"),
+            Line::from("  s/F2 - switch screen"),
+            Line::from("  ?    - toggle help"),
+            Line::from("  q    - quit (confirm)"),
+        ]),
         ActiveScreen::Read => Text::from(vec![
             Line::from("Keys:"),
             Line::from("  n    - cycle display style (Classic/System Compact/Full)"),
@@ -8270,6 +8425,38 @@ mod tests {
 
     /// Usage snapshot from synthetic Codex logs: one session per day for the
     /// last `days` days, with token counts that vary by day.
+    /// A snapshot without usage, for tests that fill in single fields.
+    pub(crate) fn empty_usage_snapshot() -> crate::usage::LocalUsageSnapshot {
+        let totals = crate::usage::UsageTotalsTokens {
+            last7_days_tokens: 0,
+            last30_days_tokens: 0,
+            average_daily_tokens: 0,
+            cache_hit_rate_percent: 0.0,
+            peak_day: None,
+            peak_day_tokens: 0,
+        };
+        crate::usage::LocalUsageSnapshot {
+            days: Vec::new(),
+            totals: totals.clone(),
+            top_models: Vec::new(),
+            utc_days: Vec::new(),
+            utc_totals: totals,
+            utc_top_models: Vec::new(),
+            activity_first_weekday: Weekday::Mon,
+            project_activity: Vec::new(),
+            project_usage: Vec::new(),
+            model_daily: Vec::new(),
+            utc_model_daily: Vec::new(),
+            project_model_daily: Vec::new(),
+            utc_project_model_daily: Vec::new(),
+            matched_session_files: 0,
+            scan_total_files: 0,
+            scan_indexed_files: 0,
+            scan_pending_files: 0,
+            scan_processed_bytes: 0,
+        }
+    }
+
     fn synthetic_codex_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
         let root = std::env::temp_dir().join(format!(
             "llmon-ui-codex-{}-{}",
@@ -8444,6 +8631,31 @@ mod tests {
                     let text = render_screen_text(&mut state, width, height);
                     let name = format!("usage-{view:?}-{width}x{height}-{orientation:?}.txt")
                         .to_lowercase();
+                    std::fs::write(dir.join(name), text).expect("write dump");
+                }
+                // The synthetic Codex models get prices from overrides.
+                let mut overrides = crate::pricing::PricingOverrides::default();
+                for (model, input) in [("gpt-test", 2.0), ("gpt-test-mini", 0.5)] {
+                    overrides.codex.insert(
+                        model.to_string(),
+                        crate::pricing::PriceOverride {
+                            input,
+                            output: input * 6.0,
+                            cache_read: None,
+                            cache_write_5m: None,
+                            cache_write_1h: None,
+                        },
+                    );
+                }
+                for screen in [ActiveScreen::Models, ActiveScreen::Cost] {
+                    let mut state = AppState::for_tests();
+                    state.active_screen = screen;
+                    state.harness_view = view;
+                    state.codex_usage = Some(codex.clone());
+                    state.claude_usage = Some(claude.clone());
+                    state.pricing = crate::pricing::Pricing::new(&overrides);
+                    let text = render_screen_text(&mut state, width, height);
+                    let name = format!("{screen:?}-{view:?}-{width}x{height}.txt").to_lowercase();
                     std::fs::write(dir.join(name), text).expect("write dump");
                 }
             }
@@ -8883,25 +9095,21 @@ mod tests {
     fn navigation_tabs_are_clickable_on_the_outer_border() {
         let (title, targets) = navigation_title(Rect::new(4, 2, 80, 20), ActiveScreen::Activity);
 
-        assert_eq!(title.width(), 44);
-        assert_eq!(targets.len(), 5);
-        assert_eq!(targets[0].area, Rect::new(40, 2, 7, 1));
-        assert_eq!(
-            targets[0].action,
-            UiClickAction::SetScreen(ActiveScreen::Usage)
-        );
-        assert_eq!(targets[1].area, Rect::new(47, 2, 9, 1));
-        assert_eq!(
-            targets[1].action,
-            UiClickAction::SetScreen(ActiveScreen::ApiStat)
-        );
-        assert_eq!(targets[2].area, Rect::new(56, 2, 10, 1));
-        assert_eq!(
-            targets[2].action,
-            UiClickAction::SetScreen(ActiveScreen::Activity)
-        );
-        assert_eq!(targets[3].area, Rect::new(66, 2, 8, 1));
-        assert_eq!(targets[4].area, Rect::new(74, 2, 9, 1));
+        assert_eq!(title.width(), 58);
+        let expected = [
+            (26, 7, ActiveScreen::Usage),
+            (33, 8, ActiveScreen::Models),
+            (41, 6, ActiveScreen::Cost),
+            (47, 9, ActiveScreen::ApiStat),
+            (56, 10, ActiveScreen::Activity),
+            (66, 8, ActiveScreen::LimitResets),
+            (74, 9, ActiveScreen::Read),
+        ];
+        assert_eq!(targets.len(), expected.len());
+        for (target, (x, width, screen)) in targets.iter().zip(expected) {
+            assert_eq!(target.area, Rect::new(x, 2, width, 1));
+            assert_eq!(target.action, UiClickAction::SetScreen(screen));
+        }
     }
 
     #[test]
@@ -8912,8 +9120,8 @@ mod tests {
         );
         let (navigation, targets) =
             navigation_title(Rect::new(0, 0, 80, 24), ActiveScreen::ApiStat);
-        assert_eq!(navigation.width(), 44);
-        assert_eq!(targets.len(), 5);
+        assert_eq!(navigation.width(), 58);
+        assert_eq!(targets.len(), 7);
     }
 
     #[test]
