@@ -43,7 +43,7 @@ switches them):
   (input includes the cached input, as in the Codex columns)
   and a LIMITS card with gauges for the 5-hour, weekly, and per-model limits.
 
-The same switch applies to the MODELS and COST screens:
+The same switch applies to the MODELS, COST, and ACTIVITY screens:
 
 - **MODELS**: tokens per day per model as a line chart, and a card per
   model with its share, input, output, and cache split.
@@ -68,8 +68,12 @@ tokens. Cache prices that are left out follow Anthropic's multipliers of
 }
 ```
 
-ACTIVITY, APISTAT, LIMITS, and HISTORY still show Codex. The combined USAGE
-view needs about 120 columns; on narrower terminals use the single views.
+- **ACTIVITY**: the project heatmaps of one harness with its cards, or in
+  the combined view each project summed over both harnesses, without the
+  cards (they are on USAGE) so more projects fit.
+
+APISTAT, LIMITS, and HISTORY still show Codex. The combined USAGE view
+needs about 120 columns; on narrower terminals use the single views.
 
 ## Claude Code live limits
 
@@ -221,7 +225,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 
 ## Key bindings
 
-- `h` Switch the USAGE, MODELS, and COST view: Combined, Codex, or Claude Code (or click the pills in the header)
+- `h` Switch the USAGE, MODELS, COST, and ACTIVITY view: Combined, Codex, or Claude Code (or click the pills in the header)
 - `d` Cycle the dates on MODELS and COST (all time, 7 days, 30 days)
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)

@@ -229,7 +229,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 ])
                 .split(inner);
 
-            render_activity_header(frame, chunks[0], state);
+            render_harness_header(frame, chunks[0], state, "PROJECT_ACTIVITY :: ");
             render_activity(frame, chunks[1], state);
             render_footer(frame, chunks[2], state);
 
@@ -467,26 +467,6 @@ fn inset_header_area(area: Rect) -> Rect {
         width: area.width.saturating_sub(2),
         ..area
     }
-}
-
-fn render_activity_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let line_area = header_line_area(area);
-    let row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(40)])
-        .split(line_area);
-
-    let left = Paragraph::new(Line::from(Span::styled(
-        "PROJECT_ACTIVITY",
-        Style::default().add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Left);
-    frame.render_widget(left, row[0]);
-
-    let updated =
-        usage_scan_status_label(state, Harness::Codex).unwrap_or_else(|| "Updated --".to_string());
-    let right = Paragraph::new(updated).alignment(Alignment::Right);
-    frame.render_widget(right, row[1]);
 }
 
 /// Header status of the combined view: the latest refresh, and indexing
@@ -2083,7 +2063,7 @@ fn footer_hint(screen: ActiveScreen) -> &'static str {
             "Cost: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
-            "Activity: Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Activity: View [h] (combined/codex/claude), Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::ApiStat => {
             "Codex API stats: View [b] (bars/heat), Group [g] (day/week/month), Layout [f] (vertical/horizontal), Zone: UTC (server), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -2102,11 +2082,10 @@ fn footer_error(state: &AppState) -> String {
             .as_deref()
             .or(state.limits_error.as_deref())
             .or(state.limit_reset_error.as_deref()),
-        ActiveScreen::Models | ActiveScreen::Cost => state
+        ActiveScreen::Models | ActiveScreen::Cost | ActiveScreen::Activity => state
             .codex_usage_error
             .as_deref()
             .or(state.claude_usage_error.as_deref()),
-        ActiveScreen::Activity => state.codex_usage_error.as_deref(),
         ActiveScreen::ApiStat => state.account_usage_error.as_deref(),
         ActiveScreen::LimitResets => state.limits_error.as_deref(),
         ActiveScreen::Read => None,
@@ -2592,10 +2571,19 @@ fn usage_layout(area: Rect, controls_height: u16, cards_height: u16) -> [Rect; 4
     [chunks[0], chunks[1], chunks[2], chunks[3]]
 }
 
+/// ACTIVITY: the cards of a single-harness view, then one heatmap per
+/// project. The combined view leaves out the cards (they are on USAGE) so
+/// more project heatmaps fit, and sums each project over both harnesses.
 fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let panel = usage_panel(state, Harness::Codex);
-    let cards_height = usage_cards_height(state, &panel, area.width);
-    let reset_summary = reset_summary_text(state);
+    let panel = usage_view_harness(state.harness_view).map(|harness| usage_panel(state, harness));
+    let cards_height = panel
+        .as_ref()
+        .map_or(0, |panel| usage_cards_height(state, panel, area.width));
+    // Limit reset credits exist only for Codex.
+    let reset_summary = view_harnesses(state.harness_view)
+        .contains(&Harness::Codex)
+        .then(|| reset_summary_text(state))
+        .flatten();
     let controls_height = activity_controls_height(reset_summary.as_deref(), area.width);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2607,7 +2595,9 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .split(area);
 
     render_activity_controls(frame, chunks[0], state, reset_summary.as_deref());
-    let weekly_hover = render_usage_cards(frame, chunks[1], state, &panel);
+    let weekly_hover = panel
+        .as_ref()
+        .and_then(|panel| render_usage_cards(frame, chunks[1], state, panel));
     render_activity_heatmaps(frame, chunks[2], state);
     if let Some(hover) = weekly_hover {
         render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
@@ -2718,11 +2708,20 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
             bottom: 0,
         },
     );
-    if let Some((indexed, total)) = state
-        .codex_usage
-        .as_deref()
-        .filter(|snapshot| snapshot.scan_pending_files > 0)
-        .map(|snapshot| (snapshot.scan_indexed_files, snapshot.scan_total_files))
+    let snapshots = view_snapshots(state);
+    if let Some((indexed, total)) = snapshots
+        .iter()
+        .any(|(_, snapshot)| snapshot.scan_pending_files > 0)
+        .then(|| {
+            snapshots
+                .iter()
+                .fold((0, 0), |(indexed, total), (_, snapshot)| {
+                    (
+                        indexed + snapshot.scan_indexed_files,
+                        total + snapshot.scan_total_files,
+                    )
+                })
+        })
     {
         state.activity_scroll_area = Some(area);
         state.activity_total_weeks = 0;
@@ -2820,11 +2819,23 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
     }
     let inner = chart_inner;
 
-    let Some(snapshot) = state.codex_usage.as_deref() else {
+    let Some(first_weekday) = snapshots
+        .first()
+        .map(|(_, snapshot)| snapshot.activity_first_weekday)
+    else {
         render_activity_message(frame, inner, "Loading activity...");
         return;
     };
-    if snapshot.project_activity.is_empty() {
+    let projects: std::borrow::Cow<'_, [ProjectActivity]> = match &snapshots[..] {
+        [(_, snapshot)] => std::borrow::Cow::Borrowed(&snapshot.project_activity),
+        _ => std::borrow::Cow::Owned(crate::usage::merge_project_activity(
+            &snapshots
+                .iter()
+                .map(|(_, snapshot)| snapshot.project_activity.as_slice())
+                .collect::<Vec<_>>(),
+        )),
+    };
+    if projects.is_empty() {
         render_activity_message(frame, inner, "No project activity found.");
         return;
     }
@@ -2836,12 +2847,12 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
     let fit_by_height = ((inner.height.saturating_add(1)) / ACTIVITY_PROJECT_STRIDE).max(1);
     let visible_projects = state
         .activity_project_limit
-        .min(snapshot.project_activity.len())
+        .min(projects.len())
         .min(fit_by_height as usize);
 
     let accent_color = state.accent_colors().0;
     let mut y = inner.y;
-    for project in snapshot.project_activity.iter().take(visible_projects) {
+    for project in projects.iter().take(visible_projects) {
         let slot = Rect {
             x: inner.x,
             y,
@@ -2854,7 +2865,7 @@ fn render_activity_heatmaps(frame: &mut Frame<'_>, area: Rect, state: &mut AppSt
             slot,
             project,
             state.metric,
-            snapshot.activity_first_weekday,
+            first_weekday,
             state.formatter(),
             state.activity_week_offset,
             accent_color,
@@ -5989,6 +6000,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
         ]),
         ActiveScreen::Activity => Text::from(vec![
             Line::from("Keys:"),
+            Line::from("  h    - switch view (Combined/Codex/Claude)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  +/=  - show more projects"),
             Line::from("  -    - show fewer projects"),
@@ -8940,6 +8952,31 @@ mod tests {
             .filter(|target| matches!(target.action, UiClickAction::SetUsageFocus(_)))
             .count();
         assert_eq!(focus_targets, 4, "both charts and both card groups");
+    }
+
+    #[test]
+    fn activity_follows_the_harness_view() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Activity;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(20)));
+        state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+
+        // Combined: both harnesses' projects, without the card rows.
+        state.harness_view = HarnessView::Combined;
+        let text = render_screen_text(&mut state, 160, 60);
+        assert!(
+            text.contains("[app]") && text.contains("[project-0]"),
+            "{text}"
+        );
+        assert!(!text.contains("TODAY_"), "{text}");
+
+        state.harness_view = HarnessView::Claude;
+        let text = render_screen_text(&mut state, 160, 60);
+        assert!(
+            text.contains("[app]") && !text.contains("[project-0]"),
+            "{text}"
+        );
+        assert!(text.contains("TODAY_"), "{text}");
     }
 
     #[test]

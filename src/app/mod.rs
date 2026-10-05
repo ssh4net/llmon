@@ -523,6 +523,7 @@ enum ActivityCommand {
     PageNewer,
     ScrollOldest,
     ScrollNewest,
+    CycleHarnessView,
     ToggleHelp,
 }
 
@@ -2271,6 +2272,9 @@ fn map_event_to_activity_cmd(event: Event) -> Option<ActivityCommand> {
                 (KeyCode::PageDown, _) => Some(ActivityCommand::PageNewer),
                 (KeyCode::Home, _) => Some(ActivityCommand::ScrollOldest),
                 (KeyCode::End, _) => Some(ActivityCommand::ScrollNewest),
+                (KeyCode::Char('h'), _) | (KeyCode::Char('H'), _) => {
+                    Some(ActivityCommand::CycleHarnessView)
+                }
                 (KeyCode::Char('?'), _) => Some(ActivityCommand::ToggleHelp),
                 _ => None,
             }
@@ -2496,6 +2500,11 @@ fn handle_activity_command(
     match cmd {
         ActivityCommand::ToggleHelp => {
             state.show_help = !state.show_help;
+            true
+        }
+        ActivityCommand::CycleHarnessView => {
+            state.harness_view = state.harness_view.next();
+            state.activity_week_offset = 0;
             true
         }
         ActivityCommand::ToggleMetric => {
@@ -3295,7 +3304,10 @@ impl AppState {
     pub(crate) fn focused_harness(&self) -> Harness {
         if !matches!(
             self.active_screen,
-            ActiveScreen::Usage | ActiveScreen::Models | ActiveScreen::Cost
+            ActiveScreen::Usage
+                | ActiveScreen::Models
+                | ActiveScreen::Cost
+                | ActiveScreen::Activity
         ) {
             return Harness::Codex;
         }
@@ -3851,6 +3863,8 @@ mod tests {
         assert_eq!(state.focused_harness(), Harness::Codex);
         state.harness_view = HarnessView::Claude;
         state.active_screen = ActiveScreen::Activity;
+        assert_eq!(state.focused_harness(), Harness::Claude);
+        state.active_screen = ActiveScreen::ApiStat;
         assert_eq!(state.focused_harness(), Harness::Codex);
     }
 

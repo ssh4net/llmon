@@ -86,7 +86,9 @@ same layout; differences are noted per module.
   in `ui/mod.rs`; the MODELS and COST screens are `ui/models.rs` and
   `ui/cost.rs`. They read every selected harness's snapshot
   (`view_snapshots`) and the per-model daily series (`model_daily`,
-  `project_model_daily`), over a `DayRange` (`range_days`). The USAGE
+  `project_model_daily`), over a `DayRange` (`range_days`). ACTIVITY follows
+  the same switch; its combined view merges the harnesses' project rows
+  (`usage::merge_project_activity`) and leaves out the cards. The USAGE
   cards, chart, and top models draw a `UsagePanel` (harness + snapshot, kept
   as `Arc` so the chart can borrow the state mutably). Per-harness parts
   dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude

@@ -1777,6 +1777,78 @@ fn build_project_activity(
     out
 }
 
+/// The project activity of several harnesses as one list. Projects with the
+/// same `normalize_project_key` are summed day by day over the first list's
+/// timeline (the shortest display path wins) and sorted like
+/// `build_project_activity`.
+pub fn merge_project_activity(lists: &[&[ProjectActivity]]) -> Vec<ProjectActivity> {
+    let Some(timeline) = lists
+        .iter()
+        .flat_map(|list| list.iter())
+        .map(|project| {
+            project
+                .days
+                .iter()
+                .map(|day| day.day.clone())
+                .collect::<Vec<_>>()
+        })
+        .next()
+    else {
+        return Vec::new();
+    };
+    let slot: HashMap<&str, usize> = timeline
+        .iter()
+        .enumerate()
+        .map(|(index, day)| (day.as_str(), index))
+        .collect();
+    let mut merged: HashMap<String, ProjectActivity> = HashMap::new();
+    for project in lists.iter().flat_map(|list| list.iter()) {
+        let entry = merged
+            .entry(normalize_project_key(&project.display_path))
+            .or_insert_with(|| ProjectActivity {
+                display_path: project.display_path.clone(),
+                days: timeline
+                    .iter()
+                    .map(|day| UsageDay::from_totals(day.clone(), DailyTotals::default()))
+                    .collect(),
+                last_activity_day: None,
+                total_tokens: 0,
+                cache_read_tokens: 0,
+                agent_time_ms: 0,
+                agent_runs: 0,
+            });
+        prefer_project_display_path(&mut entry.display_path, &project.display_path);
+        for day in &project.days {
+            let Some(index) = slot.get(day.day.as_str()) else {
+                continue;
+            };
+            let target = &mut entry.days[*index];
+            target.input_tokens += day.input_tokens;
+            target.cache_write_tokens += day.cache_write_tokens;
+            target.cache_read_tokens += day.cache_read_tokens;
+            target.output_tokens += day.output_tokens;
+            target.total_tokens += day.total_tokens;
+            target.agent_time_ms += day.agent_time_ms;
+            target.agent_runs += day.agent_runs;
+            entry.total_tokens += day.total_tokens;
+            entry.cache_read_tokens += day.cache_read_tokens;
+            entry.agent_time_ms += day.agent_time_ms;
+            entry.agent_runs += day.agent_runs;
+        }
+        if project.last_activity_day > entry.last_activity_day {
+            entry.last_activity_day = project.last_activity_day.clone();
+        }
+    }
+    let mut out: Vec<ProjectActivity> = merged.into_values().collect();
+    out.sort_by(|left, right| {
+        right
+            .last_activity_day
+            .cmp(&left.last_activity_day)
+            .then_with(|| left.display_path.cmp(&right.display_path))
+    });
+    out
+}
+
 fn daily_has_activity(totals: DailyTotals) -> bool {
     totals.tokens.total() > 0 || totals.agent_ms > 0 || totals.agent_runs > 0
 }
@@ -4317,6 +4389,62 @@ mod tests {
         assert_eq!(archived_row_count(&cache_db_path), 0);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merged_project_activity_sums_days_of_the_same_project() {
+        let day = |key: &str, tokens: i64, runs: i64| UsageDay {
+            day: key.to_string(),
+            input_tokens: tokens,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            total_tokens: tokens,
+            agent_time_ms: 0,
+            agent_runs: runs,
+        };
+        let project = |path: &str, days: Vec<UsageDay>, last: &str| ProjectActivity {
+            display_path: path.to_string(),
+            total_tokens: days.iter().map(|day| day.total_tokens).sum(),
+            cache_read_tokens: 0,
+            agent_time_ms: 0,
+            agent_runs: days.iter().map(|day| day.agent_runs).sum(),
+            days,
+            last_activity_day: Some(last.to_string()),
+        };
+        let codex = vec![
+            project(
+                "/work/app/",
+                vec![day("2026-09-01", 10, 1), day("2026-09-02", 0, 0)],
+                "2026-09-01",
+            ),
+            project(
+                "/work/old",
+                vec![day("2026-09-01", 5, 1), day("2026-09-02", 0, 0)],
+                "2026-09-01",
+            ),
+        ];
+        let claude = vec![project(
+            "/work/app",
+            vec![day("2026-09-01", 1, 0), day("2026-09-02", 7, 2)],
+            "2026-09-02",
+        )];
+
+        let merged = merge_project_activity(&[&codex, &claude]);
+        let paths: Vec<&str> = merged.iter().map(|p| p.display_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/work/app", "/work/old"],
+            "latest activity first"
+        );
+        let app = &merged[0];
+        assert_eq!(app.days.len(), 2);
+        assert_eq!(app.days[0].total_tokens, 11);
+        assert_eq!(app.days[1].total_tokens, 7);
+        assert_eq!(app.total_tokens, 18);
+        assert_eq!(app.agent_runs, 3);
+        assert_eq!(app.last_activity_day.as_deref(), Some("2026-09-02"));
+        assert!(merge_project_activity(&[]).is_empty());
     }
 
     #[test]
