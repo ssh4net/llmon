@@ -305,7 +305,7 @@ version, because that clears its saved history of deleted transcripts.
 | 4 | Done: per-model daily series in the snapshot; price tables for Codex (OpenAI API prices = credit rate card x $0.04) and Claude (Anthropic list prices), checked against the official pages, with `config.json` overrides; MODELS and COST screens per harness and combined; ACTIVITY per harness and combined (projects summed over both harnesses); HISTORY per harness and combined (one catalog from both harnesses, grouped by cwd, sessions marked with their harness). APISTAT and LIMITS stay Codex only (App Server data) | M |
 | 5 | `llmon migrate`, `archived_usage`, optional `stats-cache.json` import | S |
 | 6 | Gemini and Grok providers (fixtures from local logs), then Copilot (D10) | M each |
-| 7 | Polish backlog, packaging scripts, README with synthetic screenshots, release | S |
+| 7 | In progress (Codex and Claude only for now, as the maintainer asked). Done: the Claude LIMITS card in the Codex card layout. Then: the rest of the polish backlog, packaging scripts, README with synthetic screenshots, release | S |
 
 While phases 1-2 are in progress, CoMon and ClaudeMon take bug fixes only.
 This file records the last ported commit of each:

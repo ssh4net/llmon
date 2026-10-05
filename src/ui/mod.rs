@@ -901,9 +901,14 @@ fn render_api_stat_card_row(
     let mut hover = None;
     for (index, (title, spec)) in cards.iter().enumerate() {
         if *title == "LIMITS" {
-            if let Some(next) =
-                render_limits_card(frame, areas[index], state, "LIMITS", compact_limits)
-            {
+            if let Some(next) = render_limits_card(
+                frame,
+                areas[index],
+                state,
+                &codex_limits_card_input(state),
+                "LIMITS",
+                compact_limits,
+            ) {
                 hover = Some(next);
             }
             continue;
@@ -3599,25 +3604,32 @@ fn uses_compact_limit_lines(card_width: u16) -> bool {
 }
 
 fn limits_card_content(state: &AppState, compact: bool) -> (String, Vec<String>) {
-    let formatter = state.formatter();
-    let (value, caption1, caption2, caption3) = if !state.limits_enabled {
-        let msg = state
-            .limits_error
-            .as_deref()
-            .or(state.limits_notice.as_deref())
-            .unwrap_or("Limits unavailable.");
-        ("Unavailable".to_string(), Some(msg.to_string()), None, None)
-    } else if let Some(limits) = state.limits.as_ref() {
-        format_limits_compact_card_lines(limits, compact, formatter)
-    } else {
-        ("Loading...".to_string(), None, None, None)
-    };
+    limits_card_lines(&codex_limits_card_input(state), compact, state.formatter())
+}
 
-    let captions = [caption1, caption2, caption3]
-        .into_iter()
-        .flatten()
-        .collect();
-    (value, captions)
+/// The value line and captions of a LIMITS card.
+fn limits_card_lines(
+    input: &LimitsCardInput,
+    compact: bool,
+    formatter: DisplayFormatter<'_>,
+) -> (String, Vec<String>) {
+    match input {
+        LimitsCardInput::Message { head, detail } => (head.clone(), detail.clone()),
+        LimitsCardInput::Loading => ("Loading...".to_string(), Vec::new()),
+        LimitsCardInput::Limits {
+            limits,
+            credits_line,
+            note,
+        } => {
+            let (value, caption1, caption2, caption3) =
+                format_limits_compact_card_lines(limits, compact, formatter, credits_line.clone());
+            let captions = [caption1, caption2, caption3, note.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            (value, captions)
+        }
+    }
 }
 
 fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Vec<CardSpec> {
@@ -3632,7 +3644,12 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
                 limits_card_content(state, uses_compact_limit_lines(card_width));
             CardSpec::limits(value, captions)
         }
-        Harness::Claude => claude_limits_card_spec(state, card_width),
+        Harness::Claude => {
+            let input = claude_limits_card_input(state, now_unix_secs());
+            let (value, captions) =
+                limits_card_lines(&input, uses_compact_limit_lines(card_width), formatter);
+            CardSpec::limits(value, captions)
+        }
     };
 
     if let Some(pending) = snapshot.filter(|snapshot| snapshot.scan_pending_files > 0) {
@@ -7190,10 +7207,12 @@ fn format_rolling_limit_lines(
     (short, weekly)
 }
 
+/// `credits_line` replaces the credits line built from `l.credits`.
 fn format_limits_compact_card_lines(
     l: &crate::providers::codex::rpc::AccountRateLimits,
     compact: bool,
     formatter: DisplayFormatter<'_>,
+    credits_line: Option<String>,
 ) -> (String, Option<String>, Option<String>, Option<String>) {
     let (short_window, weekly_window) = rolling_windows_for_limits(l);
     let (rolling_first, rolling_second) =
@@ -7208,8 +7227,9 @@ fn format_limits_compact_card_lines(
     }
 
     if let Some(extra) = format_extra_bucket_compact_line(l, compact, formatter) {
-        let credits =
-            format_credits_compact_line(l, formatter).unwrap_or_else(|| "Credits:  --".to_string());
+        let credits = credits_line.clone().unwrap_or_else(|| {
+            format_credits_compact_line(l, formatter).unwrap_or_else(|| "Credits:  --".to_string())
+        });
         (
             rolling_first,
             Some(rolling_second),
@@ -7217,8 +7237,9 @@ fn format_limits_compact_card_lines(
             Some(credits),
         )
     } else {
-        let credits =
-            format_credits_compact_line(l, formatter).unwrap_or_else(|| "Credits:  --".to_string());
+        let credits = credits_line.clone().unwrap_or_else(|| {
+            format_credits_compact_line(l, formatter).unwrap_or_else(|| "Credits:  --".to_string())
+        });
         (rolling_first, Some(rolling_second), Some(credits), None)
     }
 }
@@ -7702,11 +7723,202 @@ fn format_weekly_pace_tooltip(
     ))
 }
 
+/// What a LIMITS card shows. Claude Code limits are converted to the Codex
+/// App Server shape (`claude_limits_as_codex`), so both harnesses share the
+/// card's lines, weekly pacing colors, and gauge.
+enum LimitsCardInput {
+    Limits {
+        limits: Box<crate::providers::codex::rpc::AccountRateLimits>,
+        /// Replaces the credits line (Claude: extra usage).
+        credits_line: Option<String>,
+        /// A note under the limits (Claude: an old snapshot or a failed
+        /// refresh).
+        note: Option<String>,
+    },
+    Message {
+        head: String,
+        detail: Vec<String>,
+    },
+    Loading,
+}
+
+impl LimitsCardInput {
+    fn limits(&self) -> Option<&crate::providers::codex::rpc::AccountRateLimits> {
+        match self {
+            Self::Limits { limits, .. } => Some(limits.as_ref()),
+            Self::Message { .. } | Self::Loading => None,
+        }
+    }
+}
+
+fn codex_limits_card_input(state: &AppState) -> LimitsCardInput {
+    if !state.limits_enabled {
+        let msg = state
+            .limits_error
+            .as_deref()
+            .or(state.limits_notice.as_deref())
+            .unwrap_or("Limits unavailable.");
+        return LimitsCardInput::Message {
+            head: "Unavailable".to_string(),
+            detail: vec![msg.to_string()],
+        };
+    }
+    match state.limits.as_ref() {
+        Some(limits) => LimitsCardInput::Limits {
+            limits: Box::new(limits.clone()),
+            credits_line: None,
+            note: None,
+        },
+        None => LimitsCardInput::Loading,
+    }
+}
+
+/// Status-line snapshots older than this are flagged as stale.
+const CLAUDE_STALE_SNAPSHOT_SECS: i64 = 15 * 60;
+
+fn claude_limits_card_input(state: &AppState, now: i64) -> LimitsCardInput {
+    let message = |head: &str, detail: &[&str]| LimitsCardInput::Message {
+        head: head.to_string(),
+        detail: detail.iter().map(|line| line.to_string()).collect(),
+    };
+    if state.claude_limits_mode == crate::app::ClaudeLimitsMode::Off {
+        return message("Disabled", &["--claude-limits off"]);
+    }
+    let Some(limits) = state.claude_limits.as_ref() else {
+        if let Some(error) = state.claude_limits_error.as_deref() {
+            return message("Unavailable", &[error]);
+        }
+        if state.claude_limits_notice.is_some() {
+            return message(
+                "Not set up",
+                &[
+                    "Set the Claude Code statusLine command to:",
+                    "llmon statusline",
+                ],
+            );
+        }
+        return LimitsCardInput::Loading;
+    };
+    let age = now.saturating_sub(limits.captured_at).max(0);
+    let note = state.claude_limits_error.clone().or_else(|| {
+        (limits.source == crate::providers::claude::limits::LimitsSourceKind::StatusLine
+            && age > CLAUDE_STALE_SNAPSHOT_SECS)
+            .then(|| format!("Status line {} ago", format_reset_countdown(age)))
+    });
+    LimitsCardInput::Limits {
+        limits: Box::new(claude_limits_as_codex(limits)),
+        credits_line: Some(claude_extra_usage_line(
+            limits.extra_usage.as_ref(),
+            state.formatter(),
+        )),
+        note,
+    }
+}
+
+/// The weekly pacing helpers take the Codex window type; Claude windows carry
+/// the same fields (percent, window minutes, reset in Unix seconds).
+fn pacing_window(
+    window: &crate::providers::claude::limits::RateLimitWindow,
+) -> crate::providers::codex::rpc::RateLimitWindow {
+    crate::providers::codex::rpc::RateLimitWindow {
+        used_percent: window.used_percent,
+        window_duration_mins: window.window_duration_mins,
+        resets_at: window.resets_at,
+    }
+}
+
+/// Claude Code limits in the Codex App Server shape: the 5-hour window as
+/// `primary`, the 7-day window as `secondary`, and the per-model and spend
+/// windows as named buckets.
+fn claude_limits_as_codex(
+    limits: &crate::providers::claude::limits::AccountRateLimits,
+) -> crate::providers::codex::rpc::AccountRateLimits {
+    let bucket = |name: &str, window: &crate::providers::claude::limits::RateLimitWindow| {
+        crate::providers::codex::rpc::RateLimitSnapshot {
+            limit_id: Some(name.to_string()),
+            limit_name: Some(name.to_string()),
+            individual_limit: None,
+            primary: Some(pacing_window(window)),
+            secondary: None,
+            credits: None,
+        }
+    };
+    let buckets = limits
+        .buckets
+        .iter()
+        .filter_map(|snapshot| {
+            let window = snapshot.primary.as_ref()?;
+            Some(bucket(
+                snapshot.limit_name.as_deref().unwrap_or("Model"),
+                window,
+            ))
+        })
+        .chain(
+            limits
+                .spend_limit
+                .as_ref()
+                .map(|window| bucket("Spend", window)),
+        )
+        .collect();
+    crate::providers::codex::rpc::AccountRateLimits {
+        limit_id: Some("claude".to_string()),
+        limit_name: None,
+        individual_limit: None,
+        primary: limits.primary.as_ref().map(pacing_window),
+        secondary: limits.secondary.as_ref().map(pacing_window),
+        credits: None,
+        buckets,
+        reset_credits_available: None,
+        reset_credits: None,
+    }
+}
+
+/// The extra usage line in the place of the Codex credits line.
+fn claude_extra_usage_line(
+    extra: Option<&crate::providers::claude::limits::ExtraUsage>,
+    formatter: DisplayFormatter<'_>,
+) -> String {
+    const LABEL_W: usize = 10;
+    let value = match extra {
+        None => "--".to_string(),
+        Some(extra) if !extra.enabled => "off".to_string(),
+        Some(extra) => {
+            let amount = |value: Option<f64>| {
+                value
+                    .map(|value| formatter.format_two_decimals(value))
+                    .unwrap_or_else(|| "--".to_string())
+            };
+            let mut text = amount(extra.used_amount);
+            if extra.limit_amount.is_some() {
+                text.push_str(&format!(" / {}", amount(extra.limit_amount)));
+            }
+            if let Some(currency) = extra.currency.as_deref() {
+                text.push_str(&format!(" {currency}"));
+            }
+            text
+        }
+    };
+    format!("{:<LABEL_W$}{value}", "Extra:")
+}
+
+/// Compact time until a reset or since a capture: `45m`, `2h05m`, `6d23h`.
+fn format_reset_countdown(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h{:02}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3_600)
+    }
+}
+
 fn limits_card_paragraph(
-    state: &AppState,
+    input: &LimitsCardInput,
     title: &str,
     compact: bool,
     content_width: u16,
+    formatter: DisplayFormatter<'_>,
 ) -> (Paragraph<'static>, Option<usize>, usize, Option<String>) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -7727,63 +7939,62 @@ fn limits_card_paragraph(
     let mut content_line_index = 0_usize;
     let mut tooltip: Option<String> = None;
 
-    if !state.limits_enabled {
-        let msg = state
-            .limits_error
-            .as_deref()
-            .or(state.limits_notice.as_deref())
-            .unwrap_or("Limits unavailable.");
-        lines.push(Line::from(Span::styled(
-            "Unavailable".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            msg.to_string(),
-            Style::default().fg(Color::Gray),
-        )));
-    } else if let Some(limits) = state.limits.as_ref() {
-        let formatter = state.formatter();
-        let now = now_unix_secs();
-        let (value, caption1, caption2, caption3) =
-            format_limits_compact_card_lines(limits, compact, formatter);
-        let (_, weekly_window) = rolling_windows_for_limits(limits);
-        let weekly_label = if compact { "7d:" } else { "Weekly:" };
-        let weekly_plain = weekly_window.map(|window| {
-            format_limit_compact_line(weekly_label, Some(window), compact, formatter, true)
-        });
-        let band = weekly_window
-            .map(|window| weekly_pace_band(window, now))
-            .unwrap_or(WeeklyPaceBand::Normal);
-        if let Some(window) = weekly_window {
-            tooltip = format_weekly_pace_tooltip(window, band, now);
-        }
-
-        let mut push_line = |text: &str, is_value: bool| {
-            if weekly_plain.as_deref() == Some(text) {
-                weekly_line_index = Some(content_line_index);
+    match input {
+        LimitsCardInput::Message { head, detail } => {
+            lines.push(Line::from(Span::styled(
+                head.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            for text in detail {
+                lines.push(Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().fg(Color::Gray),
+                )));
             }
-            lines.push(limits_line_for_slot(
-                text,
-                weekly_plain.as_deref(),
-                band,
-                is_value,
-            ));
-            content_line_index = content_line_index
-                .saturating_add(usize::from(wrapped_line_count(text, content_width)));
-        };
-
-        push_line(&value, true);
-        for caption in [caption1, caption2, caption3].into_iter().flatten() {
-            if caption.trim().is_empty() {
-                continue;
-            }
-            push_line(&caption, false);
         }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Loading...".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+        LimitsCardInput::Limits { limits, .. } => {
+            let now = now_unix_secs();
+            let (value, captions) = limits_card_lines(input, compact, formatter);
+            let (_, weekly_window) = rolling_windows_for_limits(limits);
+            let weekly_label = if compact { "7d:" } else { "Weekly:" };
+            let weekly_plain = weekly_window.map(|window| {
+                format_limit_compact_line(weekly_label, Some(window), compact, formatter, true)
+            });
+            let band = weekly_window
+                .map(|window| weekly_pace_band(window, now))
+                .unwrap_or(WeeklyPaceBand::Normal);
+            if let Some(window) = weekly_window {
+                tooltip = format_weekly_pace_tooltip(window, band, now);
+            }
+
+            let mut push_line = |text: &str, is_value: bool| {
+                if weekly_plain.as_deref() == Some(text) {
+                    weekly_line_index = Some(content_line_index);
+                }
+                lines.push(limits_line_for_slot(
+                    text,
+                    weekly_plain.as_deref(),
+                    band,
+                    is_value,
+                ));
+                content_line_index = content_line_index
+                    .saturating_add(usize::from(wrapped_line_count(text, content_width)));
+            };
+
+            push_line(&value, true);
+            for caption in &captions {
+                if caption.trim().is_empty() {
+                    continue;
+                }
+                push_line(caption, false);
+            }
+        }
+        LimitsCardInput::Loading => {
+            lines.push(Line::from(Span::styled(
+                "Loading...".to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        }
     }
     let gauge_line_index = content_line_index;
     lines.push(Line::from(""));
@@ -7806,374 +8017,27 @@ fn render_panel_limits_card(
         Some(label) => format!("{label} LIMITS"),
         None => "LIMITS".to_string(),
     };
-    match panel.harness {
-        Harness::Codex => render_limits_card(frame, area, state, &title, compact),
-        Harness::Claude => render_claude_limits_card(frame, area, state, &title),
-    }
-}
-
-/// Status-line snapshots older than this are flagged as stale.
-const CLAUDE_STALE_SNAPSHOT_SECS: i64 = 15 * 60;
-
-/// Segments of a limit gauge: one per hour of the 5-hour window, one per day
-/// of a weekly window, or one for any other window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GaugeSegments {
-    Hours,
-    Days,
-    Single,
-}
-
-/// One line of the Claude Code LIMITS card.
-enum ClaudeLimitLine {
-    Gauge {
-        label: String,
-        window: crate::providers::codex::rpc::RateLimitWindow,
-        segments: GaugeSegments,
-    },
-    Text {
-        text: String,
-        style: Style,
-    },
-}
-
-/// The weekly pacing helpers take the Codex window type; Claude windows carry
-/// the same fields (percent, window minutes, reset in Unix seconds).
-fn pacing_window(
-    window: &crate::providers::claude::limits::RateLimitWindow,
-) -> crate::providers::codex::rpc::RateLimitWindow {
-    crate::providers::codex::rpc::RateLimitWindow {
-        used_percent: window.used_percent,
-        window_duration_mins: window.window_duration_mins,
-        resets_at: window.resets_at,
-    }
-}
-
-fn claude_limit_lines(state: &AppState, now: i64) -> Vec<ClaudeLimitLine> {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    let gray = Style::default().fg(Color::Gray);
-    let text = |text: &str, style: Style| ClaudeLimitLine::Text {
-        text: text.to_string(),
-        style,
+    let input = match panel.harness {
+        Harness::Codex => codex_limits_card_input(state),
+        Harness::Claude => claude_limits_card_input(state, now_unix_secs()),
     };
-    if state.claude_limits_mode == crate::app::ClaudeLimitsMode::Off {
-        return vec![text("Disabled", bold), text("--claude-limits off", gray)];
-    }
-    let Some(limits) = state.claude_limits.as_ref() else {
-        if let Some(error) = state.claude_limits_error.as_deref() {
-            return vec![text("Unavailable", bold), text(error, gray)];
-        }
-        if state.claude_limits_notice.is_some() {
-            return vec![
-                text("Not set up", bold),
-                text("Set the Claude Code statusLine command to:", gray),
-                text(
-                    "llmon statusline",
-                    Style::default().fg(state.harness_colors(Harness::Claude).1),
-                ),
-            ];
-        }
-        return vec![text("Loading...", bold)];
-    };
-
-    let mut lines = Vec::new();
-    let weekly_mins = crate::providers::claude::limits::SEVEN_DAY_WINDOW_MINS - 1.0;
-    let segments_for = |window: &crate::providers::claude::limits::RateLimitWindow| match window
-        .window_duration_mins
-    {
-        Some(minutes) if minutes >= weekly_mins => GaugeSegments::Days,
-        Some(minutes)
-            if (minutes - crate::providers::claude::limits::FIVE_HOUR_WINDOW_MINS).abs() < 1.0 =>
-        {
-            GaugeSegments::Hours
-        }
-        _ => GaugeSegments::Single,
-    };
-    let mut gauge = |label: String, window: &crate::providers::claude::limits::RateLimitWindow| {
-        lines.push(ClaudeLimitLine::Gauge {
-            label,
-            window: pacing_window(window),
-            segments: segments_for(window),
-        });
-    };
-    if let Some(window) = limits.primary.as_ref() {
-        gauge("5h".to_string(), window);
-    }
-    if let Some(window) = limits.secondary.as_ref() {
-        gauge("7d".to_string(), window);
-    }
-    for bucket in &limits.buckets {
-        if let Some(window) = bucket.primary.as_ref() {
-            // Per-model weekly limits: the first word of the model name.
-            let name = bucket.limit_name.as_deref().unwrap_or("Model");
-            let label = name.split_whitespace().next().unwrap_or(name);
-            gauge(truncate_middle(label, 6), window);
-        }
-    }
-    if let Some(window) = limits.spend_limit.as_ref() {
-        gauge("Spend".to_string(), window);
-    }
-    if lines.is_empty() {
-        lines.push(text("No limit windows reported", gray));
-    }
-    if let Some(extra) = limits.extra_usage.as_ref().filter(|extra| extra.enabled) {
-        let formatter = state.formatter();
-        let amount = |value: Option<f64>| {
-            value
-                .map(|value| formatter.format_two_decimals(value))
-                .unwrap_or_else(|| "--".to_string())
-        };
-        let mut extra_text = format!("Extra {}", amount(extra.used_amount));
-        if extra.limit_amount.is_some() {
-            extra_text.push_str(&format!(" / {}", amount(extra.limit_amount)));
-        }
-        if let Some(currency) = extra.currency.as_deref() {
-            extra_text.push_str(&format!(" {currency}"));
-        }
-        lines.push(text(&extra_text, gray));
-    }
-    let age = now.saturating_sub(limits.captured_at).max(0);
-    let stale = limits.source == crate::providers::claude::limits::LimitsSourceKind::StatusLine
-        && age > CLAUDE_STALE_SNAPSHOT_SECS;
-    let source = match limits.source {
-        crate::providers::claude::limits::LimitsSourceKind::StatusLine => "statusline",
-        crate::providers::claude::limits::LimitsSourceKind::OAuth => "OAuth",
-    };
-    let mut source_text = format!("{source} {} ago", format_reset_countdown(age));
-    if stale {
-        source_text.push_str(" (stale)");
-    }
-    lines.push(text(
-        &source_text,
-        if stale {
-            Style::default().fg(Color::Yellow)
-        } else {
-            gray
-        },
-    ));
-    if let Some(error) = state.claude_limits_error.as_deref() {
-        lines.push(text(error, Style::default().fg(Color::Yellow)));
-    }
-    lines
-}
-
-/// Compact time until a reset or since a capture: `45m`, `2h05m`, `6d23h`.
-fn format_reset_countdown(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs < 3_600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h{:02}m", secs / 3_600, (secs % 3_600) / 60)
-    } else {
-        format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3_600)
-    }
-}
-
-/// Column layout of the gauge rows: label width, gauge width (0 when no
-/// gauge fits, so rows show only the label and percent), and whether the
-/// reset countdown fits.
-fn claude_gauge_columns(lines: &[ClaudeLimitLine], content_width: u16) -> (usize, u16, bool) {
-    const PERCENT_WIDTH: u16 = 4;
-    const RESET_WIDTH: u16 = 6;
-    const MIN_GAUGE_WIDTH: u16 = 5;
-    const MIN_PLAIN_GAUGE_WIDTH: u16 = 3;
-    let mut label_width = 2_usize;
-    for line in lines {
-        if let ClaudeLimitLine::Gauge { label, .. } = line {
-            label_width = label_width.max(UnicodeWidthStr::width(label.as_str()));
-        }
-    }
-    let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
-    let without_reset = content_width
-        .saturating_sub(label_cells)
-        .saturating_sub(1)
-        .saturating_sub(1)
-        .saturating_sub(PERCENT_WIDTH);
-    let with_reset = without_reset.saturating_sub(1).saturating_sub(RESET_WIDTH);
-    if with_reset >= MIN_GAUGE_WIDTH {
-        (label_width, with_reset, true)
-    } else if without_reset >= MIN_PLAIN_GAUGE_WIDTH {
-        (label_width, without_reset, false)
-    } else {
-        (label_width, 0, false)
-    }
-}
-
-/// Text of each card line; gauge rows leave blank space where the gauge is
-/// painted.
-fn claude_limit_line_texts(lines: &[ClaudeLimitLine], content_width: u16, now: i64) -> Vec<String> {
-    let (label_width, gauge_width, show_reset) = claude_gauge_columns(lines, content_width);
-    lines
-        .iter()
-        .map(|line| match line {
-            ClaudeLimitLine::Gauge { label, window, .. } => {
-                let percent = window
-                    .used_percent
-                    .map(|used| format!("{:>3}%", used.round() as i64))
-                    .unwrap_or_else(|| " --%".to_string());
-                let reset = if show_reset {
-                    let countdown = window
-                        .resets_at
-                        .map(|reset| format_reset_countdown(reset.saturating_sub(now)))
-                        .unwrap_or_default();
-                    format!(" {countdown:>6}")
-                } else {
-                    String::new()
-                };
-                if gauge_width == 0 {
-                    format!("{label:<label_width$} {percent}")
-                } else {
-                    format!(
-                        "{label:<label_width$} {} {percent}{reset}",
-                        " ".repeat(usize::from(gauge_width))
-                    )
-                }
-            }
-            ClaudeLimitLine::Text { text, .. } => text.clone(),
-        })
-        .collect()
-}
-
-fn claude_limits_card_spec(state: &AppState, card_width: u16) -> CardSpec {
-    let content_width = card_width.saturating_sub(5).max(1);
-    let now = now_unix_secs();
-    let mut texts =
-        claude_limit_line_texts(&claude_limit_lines(state, now), content_width, now).into_iter();
-    let value = texts.next().unwrap_or_default();
-    CardSpec::new(value, texts.collect())
-}
-
-fn render_claude_limits_card(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    title: &str,
-) -> Option<WeeklyPaceHover> {
-    let now = now_unix_secs();
-    let content_width = area.width.saturating_sub(5).max(1);
-    let lines = claude_limit_lines(state, now);
-    let texts = claude_limit_line_texts(&lines, content_width, now);
-    let (label_width, gauge_width, _) = claude_gauge_columns(&lines, content_width);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .padding(Padding {
-            left: 2,
-            right: 1,
-            top: 1,
-            bottom: 0,
-        })
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().fg(Color::Gray),
-        ));
-    let mut rendered: Vec<Line<'static>> = Vec::with_capacity(lines.len() + 1);
-    for (line, text) in lines.iter().zip(&texts) {
-        let style = match line {
-            ClaudeLimitLine::Gauge { .. } => Style::default(),
-            ClaudeLimitLine::Text { style, .. } => *style,
-        };
-        rendered.push(Line::from(Span::styled(text.clone(), style)));
-    }
-    rendered.push(Line::from(""));
-    frame.render_widget(
-        Paragraph::new(Text::from(rendered))
-            .block(block)
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-
-    // Paint the gauges into the blank space of their rows. Gauge rows come
-    // first and never wrap, so the line index is the row index.
-    let mut hover = None;
-    let label_cells = u16::try_from(label_width).unwrap_or(u16::MAX);
-    for (index, line) in lines.iter().enumerate() {
-        if gauge_width == 0 {
-            break;
-        }
-        let ClaudeLimitLine::Gauge {
-            window, segments, ..
-        } = line
-        else {
-            continue;
-        };
-        let Some(row) = card_content_line_rect(area, index) else {
-            continue;
-        };
-        let gauge_x = row.x.saturating_add(label_cells).saturating_add(1);
-        let available = row.x.saturating_add(row.width).saturating_sub(gauge_x);
-        let gauge_area = Rect::new(gauge_x, row.y, gauge_width.min(available), 1);
-        let (band, marker) = match segments {
-            GaugeSegments::Days => weekly_gauge_pacing(window, now),
-            GaugeSegments::Hours | GaugeSegments::Single => (None, None),
-        };
-        // A segment needs two cells to read as one; narrower gauges are plain.
-        let segment_count = match segments {
-            GaugeSegments::Days => WEEKLY_GAUGE_DAYS,
-            GaugeSegments::Hours => 5,
-            GaugeSegments::Single => 1,
-        };
-        let drawn = if usize::from(gauge_area.width) >= segment_count * 2 {
-            *segments
-        } else {
-            GaugeSegments::Single
-        };
-        let buffer = frame.buffer_mut();
-        match drawn {
-            GaugeSegments::Days => render_segmented_usage_gauge::<WEEKLY_GAUGE_DAYS>(
-                buffer,
-                gauge_area,
-                window.used_percent,
-                band,
-                marker,
-            ),
-            GaugeSegments::Hours => render_segmented_usage_gauge::<5>(
-                buffer,
-                gauge_area,
-                window.used_percent,
-                None,
-                None,
-            ),
-            GaugeSegments::Single => render_segmented_usage_gauge::<1>(
-                buffer,
-                gauge_area,
-                window.used_percent,
-                band,
-                marker,
-            ),
-        }
-        if *segments == GaugeSegments::Days && hover.is_none() {
-            if let Some(mouse) = state
-                .mouse_position
-                .filter(|mouse| rect_contains(row, *mouse))
-            {
-                let band = weekly_pace_band(window, now);
-                hover = format_weekly_pace_tooltip(window, band, now)
-                    .map(|text| WeeklyPaceHover { mouse, text });
-            }
-        }
-    }
-    hover
+    render_limits_card(frame, area, state, &input, &title, compact)
 }
 
 fn render_limits_card(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
+    input: &LimitsCardInput,
     title: &str,
     compact: bool,
 ) -> Option<WeeklyPaceHover> {
     let content_width = area.width.saturating_sub(5).max(1);
     let (paragraph, weekly_line_index, gauge_line_index, tooltip) =
-        limits_card_paragraph(state, title, compact, content_width);
+        limits_card_paragraph(input, title, compact, content_width, state.formatter());
     frame.render_widget(paragraph, area);
 
-    let limits = state
-        .limits_enabled
-        .then_some(state.limits.as_ref())
-        .flatten();
-    let gauge = limit_usage_gauge(limits, now_unix_secs());
+    let gauge = limit_usage_gauge(input.limits(), now_unix_secs());
     if let Some(gauge_area) = limit_gauge_line_rect(area, gauge_line_index) {
         render_limit_usage_gauge(frame.buffer_mut(), gauge_area, gauge);
     }
@@ -8602,6 +8466,49 @@ mod tests {
 
     /// Claude limits as the OAuth source reports them, with a per-model weekly
     /// limit and extra usage.
+    /// Codex limits like the App Server reports them: a 5-hour and a weekly
+    /// window, a named model bucket, credits, and reset credits.
+    fn synthetic_codex_limits() -> crate::providers::codex::rpc::AccountRateLimits {
+        use crate::providers::codex::rpc::{
+            AccountRateLimits, CreditsSnapshot, RateLimitSnapshot, RateLimitWindow,
+        };
+        let now = now_unix_secs();
+        AccountRateLimits {
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            individual_limit: None,
+            primary: Some(RateLimitWindow {
+                used_percent: Some(30.0),
+                window_duration_mins: Some(300.0),
+                resets_at: Some(now + 3 * 3_600),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: Some(55.0),
+                window_duration_mins: Some(10_080.0),
+                resets_at: Some(now + 3 * 86_400),
+            }),
+            credits: Some(CreditsSnapshot {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("1000".to_string()),
+            }),
+            buckets: vec![RateLimitSnapshot {
+                limit_id: Some("codex_spark".to_string()),
+                limit_name: Some("GPT-5.3-Codex-Spark".to_string()),
+                individual_limit: None,
+                primary: None,
+                secondary: Some(RateLimitWindow {
+                    used_percent: Some(12.0),
+                    window_duration_mins: Some(10_080.0),
+                    resets_at: Some(now + 3 * 86_400),
+                }),
+                credits: None,
+            }],
+            reset_credits_available: Some(1),
+            reset_credits: None,
+        }
+    }
+
     fn synthetic_claude_limits() -> crate::providers::claude::limits::AccountRateLimits {
         use crate::providers::claude::limits::{
             AccountRateLimits, ExtraUsage, LimitsSourceKind, RateLimitSnapshot, RateLimitWindow,
@@ -8661,6 +8568,7 @@ mod tests {
                     state.codex_usage = Some(codex.clone());
                     state.claude_usage = Some(claude.clone());
                     state.claude_limits = Some(synthetic_claude_limits());
+                    state.limits = Some(synthetic_codex_limits());
                     state.orientation = orientation;
                     let text = render_screen_text(&mut state, width, height);
                     let name = format!("usage-{view:?}-{width}x{height}-{orientation:?}.txt")
@@ -8681,12 +8589,18 @@ mod tests {
                         },
                     );
                 }
-                for screen in [ActiveScreen::Models, ActiveScreen::Cost] {
+                for screen in [
+                    ActiveScreen::Models,
+                    ActiveScreen::Cost,
+                    ActiveScreen::Activity,
+                ] {
                     let mut state = AppState::for_tests();
                     state.active_screen = screen;
                     state.harness_view = view;
                     state.codex_usage = Some(codex.clone());
                     state.claude_usage = Some(claude.clone());
+                    state.limits = Some(synthetic_codex_limits());
+                    state.claude_limits = Some(synthetic_claude_limits());
                     state.pricing = crate::pricing::Pricing::new(&overrides);
                     let text = render_screen_text(&mut state, width, height);
                     let name = format!("{screen:?}-{view:?}-{width}x{height}.txt").to_lowercase();
@@ -8696,72 +8610,48 @@ mod tests {
         }
     }
 
-    fn claude_card_texts(state: &AppState) -> Vec<String> {
-        let now = now_unix_secs();
-        claude_limit_line_texts(&claude_limit_lines(state, now), 40, now)
-    }
-
     #[test]
-    fn claude_limits_card_shows_setup_disabled_and_gauge_rows() {
+    fn claude_limits_card_uses_the_codex_card_lines() {
+        let system_locale = crate::locale::SystemLocale::default();
+        let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
+        let now = now_unix_secs();
+        let lines = |state: &AppState| {
+            let (value, captions) =
+                limits_card_lines(&claude_limits_card_input(state, now), false, formatter);
+            std::iter::once(value).chain(captions).collect::<Vec<_>>()
+        };
+
         let mut state = AppState::for_tests();
-        assert_eq!(claude_card_texts(&state), vec!["Loading...".to_string()]);
-
+        assert_eq!(lines(&state), vec!["Loading...".to_string()]);
         state.claude_limits_notice = Some("Not set up".to_string());
-        let setup = claude_card_texts(&state);
-        assert_eq!(setup[0], "Not set up");
-        assert_eq!(setup.last().map(String::as_str), Some("llmon statusline"));
-
+        assert_eq!(lines(&state)[0], "Not set up");
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("llmon statusline")
+        );
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::Off;
-        assert_eq!(claude_card_texts(&state)[0], "Disabled");
+        assert_eq!(lines(&state)[0], "Disabled");
 
+        // Like the Codex card: 5h remaining, weekly used / remaining, the
+        // model bucket, and extra usage in place of credits.
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::OAuth;
         state.claude_limits = Some(synthetic_claude_limits());
-        let lines = claude_limit_lines(&state, now_unix_secs());
-        let gauges = lines
-            .iter()
-            .filter_map(|line| match line {
-                ClaudeLimitLine::Gauge {
-                    label, segments, ..
-                } => Some((label.as_str(), *segments)),
-                ClaudeLimitLine::Text { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            gauges,
-            vec![
-                ("5h", GaugeSegments::Hours),
-                ("7d", GaugeSegments::Days),
-                ("Opus", GaugeSegments::Days),
-            ]
-        );
-        let texts = claude_card_texts(&state);
-        assert!(texts[0].starts_with("5h  "), "{:?}", texts[0]);
-        assert!(texts[0].ends_with(" 42%  2h10m") || texts[0].ends_with(" 42%  2h09m"));
-        assert!(texts
-            .iter()
-            .all(|text| UnicodeWidthStr::width(text.as_str()) <= 40));
-        assert!(texts.iter().any(|text| text == "Extra 3.20 / 50.00 USD"));
-        assert!(texts.iter().any(|text| text.starts_with("OAuth 1m ago")));
-    }
+        let texts = lines(&state);
+        assert!(texts[0].starts_with("5h limit: 58% "), "{texts:?}");
+        assert!(texts[1].starts_with("Weekly:   55% / 45% "), "{texts:?}");
+        assert!(texts[2].starts_with("Opus 5.5:"), "{texts:?}");
+        assert_eq!(texts[3], "Extra:    3.20 / 50.00 USD");
+        assert_eq!(texts.len(), 4, "a fresh snapshot has no note");
 
-    #[test]
-    fn narrow_claude_limits_card_keeps_one_line_per_limit() {
-        let mut state = AppState::for_tests();
-        state.claude_limits = Some(synthetic_claude_limits());
-        let now = now_unix_secs();
-        let lines = claude_limit_lines(&state, now);
-        for width in [9_u16, 13, 18, 26] {
-            let texts = claude_limit_line_texts(&lines, width, now);
-            for (line, text) in lines.iter().zip(&texts) {
-                if matches!(line, ClaudeLimitLine::Gauge { .. }) {
-                    assert!(
-                        UnicodeWidthStr::width(text.as_str()) <= usize::from(width),
-                        "{width}: {text:?}"
-                    );
-                }
-            }
-        }
-        assert_eq!(claude_limit_line_texts(&lines, 9, now)[0], "5h    42%");
+        // An old status-line snapshot is noted under the limits.
+        let mut stale = synthetic_claude_limits();
+        stale.source = crate::providers::claude::limits::LimitsSourceKind::StatusLine;
+        stale.captured_at = now - 20 * 60;
+        state.claude_limits = Some(stale);
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("Status line 20m ago")
+        );
     }
 
     fn zero_day(day: &str, total: i64) -> UsageDay {
@@ -9735,14 +9625,14 @@ mod tests {
         };
 
         let (value, caption1, caption2, caption3) =
-            format_limits_compact_card_lines(&limits, false, formatter);
+            format_limits_compact_card_lines(&limits, false, formatter, None);
         assert_eq!(value, "Monthly:  99%");
         assert_eq!(caption1.as_deref(), Some("Credits:  564/60,000 used"));
         assert_eq!(caption2.as_deref(), Some("5h limit: 100%"));
         assert_eq!(caption3.as_deref(), Some("Weekly:   0% / 100%"));
 
         let (_, _, compact_primary, compact_secondary) =
-            format_limits_compact_card_lines(&limits, true, formatter);
+            format_limits_compact_card_lines(&limits, true, formatter, None);
         assert_eq!(compact_primary.as_deref(), Some("5h: 100%"));
         assert_eq!(compact_secondary.as_deref(), Some("7d: 0% / 100%"));
     }
@@ -9774,12 +9664,13 @@ mod tests {
             Some(10080.0)
         );
 
-        let (value, caption1, _, _) = format_limits_compact_card_lines(&limits, false, formatter);
+        let (value, caption1, _, _) =
+            format_limits_compact_card_lines(&limits, false, formatter, None);
         assert_eq!(value, "Weekly:   4% / 96%");
         assert_eq!(caption1.as_deref(), Some("5h limit: --"));
 
         let (compact_value, compact_caption1, _, _) =
-            format_limits_compact_card_lines(&limits, true, formatter);
+            format_limits_compact_card_lines(&limits, true, formatter, None);
         assert_eq!(compact_value, "7d: 4% / 96%");
         assert_eq!(compact_caption1.as_deref(), Some("5h limit: --"));
     }

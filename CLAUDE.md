@@ -91,8 +91,10 @@ same layout; differences are noted per module.
   (`usage::merge_project_activity`) and leaves out the cards. The USAGE
   cards, chart, and top models draw a `UsagePanel` (harness + snapshot, kept
   as `Arc` so the chart can borrow the state mutably). Per-harness parts
-  dispatch on `panel.harness`: the LIMITS card (Codex text card, or Claude
-  gauge rows reusing CoMon's segmented gauges and weekly pacing) and the token
+  dispatch on `panel.harness`: the LIMITS card (one card for both: Claude
+  limits are converted to the Codex App Server shape by
+  `claude_limits_as_codex` and drawn through `LimitsCardInput`, with extra
+  usage in place of credits) and the token
   columns (3 for Codex, 4 for Claude). In the horizontal chart the token
   heading is drawn in the top border with each label over its column
   (`horizontal_chart_layout` computes the geometry before the frame is
