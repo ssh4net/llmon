@@ -7146,17 +7146,18 @@ fn format_limit_compact_line(
     window: Option<&crate::providers::codex::rpc::RateLimitWindow>,
     compact: bool,
     formatter: DisplayFormatter<'_>,
-    weekly: bool,
+    used_and_left: bool,
 ) -> String {
     // Match requested alignment:
-    // 5h limit: 100% (resets 20:43)
     // Weekly:   1% / 99% (resets 09:47, 10 Feb)
+    // 5h limit: 30% / 70% (resets 20:43)
+    // Model:    88% (resets 09:47, 10 Feb)
     const LABEL_W: usize = 10;
     let label = format!("{label_with_colon:<LABEL_W$}");
     let Some(w) = window else {
         return format!("{label}--");
     };
-    let pct = if weekly {
+    let pct = if used_and_left {
         match w.used_percent.filter(|value| value.is_finite()) {
             Some(value) => {
                 let used = value.clamp(0.0, 100.0).round();
@@ -7200,7 +7201,7 @@ fn format_rolling_limit_lines(
     // window under it, for Codex and Claude alike. Newer Codex responses
     // often have no short window at all.
     let weekly = format_limit_compact_line(weekly_label, weekly_window, compact, formatter, true);
-    let short = format_limit_compact_line(&short_label, short_window, compact, formatter, false);
+    let short = format_limit_compact_line(&short_label, short_window, compact, formatter, true);
     (weekly, short)
 }
 
@@ -8629,13 +8630,13 @@ mod tests {
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::Off;
         assert_eq!(lines(&state)[0], "Disabled");
 
-        // Like the Codex card: weekly used / remaining, 5h remaining, the
-        // model bucket, and extra usage in place of credits.
+        // Like the Codex card: weekly and 5h used / remaining, the model
+        // bucket, and extra usage in place of credits.
         state.claude_limits_mode = crate::app::ClaudeLimitsMode::OAuth;
         state.claude_limits = Some(synthetic_claude_limits());
         let texts = lines(&state);
         assert!(texts[0].starts_with("Weekly:   55% / 45% "), "{texts:?}");
-        assert!(texts[1].starts_with("5h limit: 58% "), "{texts:?}");
+        assert!(texts[1].starts_with("5h limit: 42% / 58% "), "{texts:?}");
         assert!(texts[2].starts_with("Opus 5.5:"), "{texts:?}");
         assert_eq!(texts[3], "Extra:    3.20 / 50.00 USD");
         assert_eq!(texts.len(), 4, "a fresh snapshot has no note");
@@ -9712,12 +9713,12 @@ mod tests {
         assert_eq!(value, "Monthly:  99%");
         assert_eq!(caption1.as_deref(), Some("Credits:  564/60,000 used"));
         assert_eq!(caption2.as_deref(), Some("Weekly:   0% / 100%"));
-        assert_eq!(caption3.as_deref(), Some("5h limit: 100%"));
+        assert_eq!(caption3.as_deref(), Some("5h limit: 0% / 100%"));
 
         let (_, _, compact_primary, compact_secondary) =
             format_limits_compact_card_lines(&limits, true, formatter, None);
         assert_eq!(compact_primary.as_deref(), Some("7d: 0% / 100%"));
-        assert_eq!(compact_secondary.as_deref(), Some("5h: 100%"));
+        assert_eq!(compact_secondary.as_deref(), Some("5h: 0% / 100%"));
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.2
+
+- LIMITS cards: the 5-hour line shows used / remaining, like the weekly
+  line.
+
 ## 0.5.1
 
 - COST: the BY PROJECT list has a selected row (Up/Down, the wheel, or a
