@@ -166,6 +166,10 @@ so the turn and tool-call counts are only shown for this machine's sessions.
 A project's detail lists its machines and the other machines' sessions and
 tokens. `m` and the pills apply to HISTORY as well.
 
+COST gets a BY MACHINE panel with each machine's tokens, cost, share, OS, and
+how old its data is (older than a day is shown in yellow, which usually means
+that PC is off).
+
 ## Run
 
 By default, `llmon` shows usage for **All workspaces** (regardless of current directory).

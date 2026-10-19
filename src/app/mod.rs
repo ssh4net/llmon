@@ -723,7 +723,7 @@ pub(crate) fn refresh_merged_usage(state: &mut AppState) {
     if sync.peers.is_empty() {
         return;
     }
-    let local_offset = chrono::Local::now().offset().local_minus_utc() / 60;
+    let local_offset = crate::sync::local_utc_offset_minutes();
     for harness in crate::harness::ALL_HARNESSES {
         let local = match harness {
             Harness::Codex => state.codex_usage.as_ref(),

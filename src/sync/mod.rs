@@ -113,6 +113,11 @@ pub(crate) struct MachineInfo {
     pub(crate) utc_offset_minutes: i32,
 }
 
+/// Offset of this machine's local calendar from UTC, in minutes.
+pub(crate) fn local_utc_offset_minutes() -> i32 {
+    chrono::Local::now().offset().local_minus_utc() / 60
+}
+
 impl MachineInfo {
     pub(crate) fn local(llmon_home: &Path, name_override: Option<&str>) -> Result<Self> {
         let name = name_override
@@ -125,7 +130,7 @@ impl MachineInfo {
             name,
             os: os_label(),
             llmon: env!("CARGO_PKG_VERSION").to_string(),
-            utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+            utc_offset_minutes: local_utc_offset_minutes(),
         })
     }
 }

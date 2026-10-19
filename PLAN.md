@@ -22,6 +22,7 @@ Reference sources: `_handoff/sources/CoMon` (HEAD `c24855d`, comon 0.5.8) and
 | D9 | APISTAT tab | Keep CoMon's APISTAT as the Codex server-history screen, or fold it into cards | open |
 | D10 | Copilot | Needs a machine with Copilot CLI to capture fixtures | open |
 | D11 | Retention | How long to keep usage history; until decided, forever (each archived row records when its log disappeared) | open |
+| D12 | Several machines | Distributed mode: llmon instances exchange usage, projects, and sessions through a shared folder; opt-in (off unless `sync.dir` or `--sync-dir`); see section 10 | decided |
 
 Why D1: ClaudeMon is CoMon 0.5.5 renamed. CoMon added only 2 commits since
 the fork, both UI work. The history browser (`read/catalog.rs`,
@@ -332,6 +333,33 @@ This file records the last ported commit of each:
   - cost against recorded values (Claude `cost-state`, Grok `costUsdTicks`)
 - **Migration tests.** Synthetic comon and claudemon databases at their
   current schema versions; repeated runs; read-only access to the sources.
+
+## 10. Distributed mode
+
+For people who run llmon on several PCs (D12). It is opt-in: with no sync
+folder set nothing is read, written, or computed.
+
+- **Channel.** A shared folder (SMB share, NAS, Syncthing). No server and no
+  listening port: WSL2's default NAT networking makes inbound LAN
+  connections awkward, an HTTP endpoint would need authentication, and a
+  machine that is off could not be read at all. Multicast was rejected too:
+  the data (about 1 MB per machine) does not fit a datagram, a machine that
+  is off misses every announcement, and it never reaches a NAT-mode WSL.
+- **Exchange.** Each instance writes `llmon-sync-<machine id>.json` (machine,
+  usage per harness and project, sessions) and reads the others'. The usage
+  part is the per-project sum of the maps the scan cache already keeps per
+  log, so merging reuses the normal aggregation. Prompt text is not shared:
+  session titles only with `sync.share_titles`.
+- **Screens.** ALL PCS / THIS PC (`m`) applies to USAGE, MODELS, COST
+  (with a BY MACHINE panel), ACTIVITY, and HISTORY. APISTAT and LIMITS are
+  account data, so they stay as they are.
+- **Rules.** The export comes from local data only (no echo between
+  machines). Peers' files are untrusted: size-limited, validated, cleaned.
+  Machines in another time zone are counted by UTC days. Two llmon
+  instances that read the same logs (Windows and WSL on one PC) are told
+  apart with `sync.ignore`.
+- **Not done.** Per-machine views other than ALL / THIS, a machine-id
+  migration, and compressing the file.
 
 ## 9. Risks
 

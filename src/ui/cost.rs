@@ -3,10 +3,11 @@
 //! of them.
 
 use super::{range_days, truncate_middle, view_snapshots};
-use crate::app::{AppState, DayRange, UiClickAction, UiHitTarget};
+use crate::app::{AppState, DayRange, MachineScope, UiClickAction, UiHitTarget};
 use crate::harness::Harness;
 use crate::locale::DisplayFormatter;
 use crate::pricing::{CostBreakdown, PriceTable, Pricing, CODEX_USD_PER_CREDIT};
+use crate::sync::{MachineInfo, SyncFile};
 use crate::usage::{model_display_name, normalize_project_key, LocalUsageSnapshot, UsageZone};
 use chrono::NaiveDate;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -14,7 +15,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap};
 use ratatui::Frame;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 const MIDDLE_DOT: &str = "\u{00b7}";
@@ -154,6 +156,108 @@ pub(crate) fn cost_view(
     view
 }
 
+/// One machine's tokens and cost over the range (distributed mode).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MachineCost {
+    pub(crate) name: String,
+    pub(crate) os: String,
+    pub(crate) this_pc: bool,
+    /// Unix seconds of the machine's last file; `None` for this machine.
+    pub(crate) updated_at: Option<i64>,
+    /// The machine's local calendar is in another time zone, so its UTC days
+    /// stand in for its local days.
+    pub(crate) utc_days: bool,
+    pub(crate) tokens: i64,
+    pub(crate) cost: f64,
+}
+
+/// The cost and tokens of this machine and of each other machine over `days`
+/// (consecutive day keys of the range), largest cost first. `local` are this
+/// machine's own snapshots, not the merged ones.
+pub(crate) fn machine_costs(
+    local: &[(Harness, &LocalUsageSnapshot)],
+    this: &MachineInfo,
+    peers: &[Arc<SyncFile>],
+    zone: UsageZone,
+    days: &[String],
+    pricing: &Pricing,
+) -> Vec<MachineCost> {
+    let in_range: HashSet<&str> = days.iter().map(String::as_str).collect();
+    let mut this_cost = MachineCost {
+        name: this.name.clone(),
+        os: this.os.clone(),
+        this_pc: true,
+        updated_at: None,
+        utc_days: false,
+        tokens: 0,
+        cost: 0.0,
+    };
+    for (harness, snapshot) in local {
+        let table = pricing.table(*harness);
+        for series in snapshot.model_daily_for_zone(zone) {
+            for (day, tokens) in &series.days {
+                if !in_range.contains(day.as_str()) {
+                    continue;
+                }
+                this_cost.tokens = this_cost.tokens.saturating_add(tokens.total());
+                if let Some(cost) = table.cost(&series.model, *tokens) {
+                    this_cost.cost += cost.total();
+                }
+            }
+        }
+    }
+    let local_offset = crate::sync::local_utc_offset_minutes();
+    let mut machines = vec![this_cost];
+    for peer in peers {
+        let same_calendar = peer.machine.utc_offset_minutes == local_offset;
+        // A peer in another time zone is counted by its UTC days.
+        let prefix = if zone == UsageZone::Local && same_calendar {
+            "L:"
+        } else {
+            "U:"
+        };
+        let mut machine = MachineCost {
+            name: peer.machine.name.clone(),
+            os: peer.machine.os.clone(),
+            this_pc: false,
+            updated_at: Some(peer.generated_at),
+            utc_days: zone == UsageZone::Local && !same_calendar,
+            tokens: 0,
+            cost: 0.0,
+        };
+        for harness in crate::harness::ALL_HARNESSES {
+            let Some(groups) = peer.usage.get(harness.key()) else {
+                continue;
+            };
+            let table = pricing.table(harness);
+            for group in groups {
+                for (key, models) in &group.models {
+                    let Some(day) = key.strip_prefix(prefix) else {
+                        continue;
+                    };
+                    if !in_range.contains(day) {
+                        continue;
+                    }
+                    for (model, tokens) in models {
+                        machine.tokens = machine.tokens.saturating_add(tokens.total());
+                        if let Some(cost) = table.cost(model, *tokens) {
+                            machine.cost += cost.total();
+                        }
+                    }
+                }
+            }
+        }
+        machines.push(machine);
+    }
+    machines.sort_by(|left, right| {
+        right
+            .cost
+            .total_cmp(&left.cost)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    machines
+}
+
 pub(crate) fn format_usd(value: f64, formatter: DisplayFormatter<'_>) -> String {
     if value.abs() >= 1000.0 {
         format!("${}", formatter.format_count(value.round() as i64))
@@ -232,6 +336,35 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .map(|(harness, snapshot)| (*harness, snapshot.as_ref()))
         .collect();
     let view = cost_view(&pairs, state.usage_zone, range, &state.pricing);
+    // In distributed mode, with other machines shown: each machine's share.
+    let machines = match state.sync.as_ref() {
+        Some(sync) if state.machine_scope == MachineScope::All && !sync.peers.is_empty() => {
+            let local: Vec<(Harness, Arc<LocalUsageSnapshot>)> =
+                super::view_harnesses(state.harness_view)
+                    .iter()
+                    .filter_map(|harness| {
+                        let snapshot = match harness {
+                            Harness::Codex => state.codex_usage.clone(),
+                            Harness::Claude => state.claude_usage.clone(),
+                        };
+                        snapshot.map(|snapshot| (*harness, snapshot))
+                    })
+                    .collect();
+            let local: Vec<(Harness, &LocalUsageSnapshot)> = local
+                .iter()
+                .map(|(harness, snapshot)| (*harness, snapshot.as_ref()))
+                .collect();
+            machine_costs(
+                &local,
+                &sync.settings.machine,
+                &sync.peers,
+                state.usage_zone,
+                &view.days,
+                &state.pricing,
+            )
+        }
+        _ => Vec::new(),
+    };
     let colors: BTreeMap<Harness, Color> = snapshots
         .iter()
         .map(|(harness, _)| (*harness, state.harness_colors(*harness).1))
@@ -246,13 +379,25 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let model_rows = (view.models.len() as u16)
         .saturating_add(3)
         .min(columns[1].height.saturating_sub(4).max(4));
+    let machine_rows = if machines.is_empty() {
+        0
+    } else {
+        (machines.len() as u16).saturating_add(3)
+    };
     let tables = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(model_rows), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(model_rows),
+            Constraint::Length(machine_rows),
+            Constraint::Min(3),
+        ])
         .split(columns[1]);
     render_models(frame, tables[0], &view, &colors, formatter);
-    render_projects(frame, tables[1], state, &view, formatter);
-    render_notes(frame, chunks[3], &view, formatter);
+    if !machines.is_empty() {
+        render_machines(frame, tables[1], &machines, formatter);
+    }
+    render_projects(frame, tables[2], state, &view, formatter);
+    render_notes(frame, chunks[3], &view, &machines, formatter);
 }
 
 fn render_summary(
@@ -499,6 +644,76 @@ fn render_models(
 /// Cost per project with a selected row, so a path and its cost read as one
 /// line. Up/Down, the wheel, or a click move the selection; the list scrolls
 /// to keep it in view.
+/// Tokens and cost per machine, with how old each machine's data is.
+fn render_machines(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    machines: &[MachineCost],
+    formatter: DisplayFormatter<'_>,
+) {
+    let total: f64 = machines.iter().map(|machine| machine.cost).sum();
+    let now = unix_now();
+    let header = format!(
+        "{:<20} {:<12} {:>10} {:>9} {:>11} {:>6}",
+        "MACHINE", "OS", "UPDATED", "TOKENS", "COST", "SHARE"
+    );
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default().fg(Color::Gray),
+    ))];
+    for machine in machines {
+        let name = if machine.this_pc {
+            format!("{} (this PC)", machine.name)
+        } else {
+            machine.name.clone()
+        };
+        let (updated, stale) = match machine.updated_at {
+            None => ("now".to_string(), false),
+            Some(at) => {
+                let age = now.saturating_sub(at).max(0);
+                (
+                    format!("{} ago", super::format_reset_countdown(age)),
+                    age > STALE_MACHINE_SECS,
+                )
+            }
+        };
+        let share = if total > 0.0 {
+            machine.cost / total * 100.0
+        } else {
+            0.0
+        };
+        let text = format!(
+            "{:<20} {:<12} {:>10} {:>9} {:>11} {:>5}%",
+            truncate_middle(&name, 20),
+            truncate_middle(&machine.os, 12),
+            updated,
+            crate::usage::format_tokens_compact(machine.tokens, formatter),
+            format_usd(machine.cost, formatter),
+            formatter.format_one_decimal(share),
+        );
+        let style = if stale {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(boxed("BY MACHINE")),
+        area,
+    );
+}
+
+/// A machine whose file is older than this is flagged as stale.
+const STALE_MACHINE_SECS: i64 = 24 * 60 * 60;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn render_projects(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -566,9 +781,24 @@ fn render_notes(
     frame: &mut Frame<'_>,
     area: Rect,
     view: &CostView,
+    machines: &[MachineCost],
     formatter: DisplayFormatter<'_>,
 ) {
     let mut lines = Vec::new();
+    let other_zone: Vec<&str> = machines
+        .iter()
+        .filter(|machine| machine.utc_days)
+        .map(|machine| machine.name.as_str())
+        .collect();
+    if !other_zone.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "In another time zone, counted by UTC days: {}.",
+                other_zone.join(", ")
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     if !view.by_family.is_empty() {
         let names: Vec<String> = view
             .by_family
@@ -626,6 +856,116 @@ mod tests {
             model: model.to_string(),
             days: days.iter().cloned().collect(),
         }
+    }
+
+    fn peer(name: &str, utc_offset_minutes: i32, models: &[(&str, &str, i64)]) -> Arc<SyncFile> {
+        // (day key, model, output tokens), for the Codex harness.
+        let mut group_models: BTreeMap<String, BTreeMap<String, TokenBreakdown>> = BTreeMap::new();
+        for (key, model, output) in models {
+            group_models.entry(key.to_string()).or_default().insert(
+                model.to_string(),
+                TokenBreakdown {
+                    output: *output,
+                    ..TokenBreakdown::default()
+                },
+            );
+        }
+        Arc::new(SyncFile {
+            format: crate::sync::SYNC_FORMAT.to_string(),
+            version: crate::sync::SYNC_VERSION,
+            machine: MachineInfo {
+                id: "b".repeat(32),
+                name: name.to_string(),
+                os: "Windows".to_string(),
+                llmon: "0.5.6".to_string(),
+                utc_offset_minutes,
+            },
+            generated_at: 77,
+            usage: BTreeMap::from([(
+                "codex".to_string(),
+                vec![crate::usage::ExportGroup {
+                    cwd: None,
+                    daily: BTreeMap::new(),
+                    models: group_models,
+                }],
+            )]),
+            sessions: BTreeMap::new(),
+        })
+    }
+
+    #[test]
+    fn machine_costs_split_the_range_by_machine() {
+        let today = chrono::Local::now().date_naive();
+        let day = |days_ago: i64| {
+            (today - chrono::Duration::days(days_ago))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        let million = TokenBreakdown {
+            output: 1_000_000,
+            ..TokenBreakdown::default()
+        };
+        let mut local = crate::ui::tests::empty_usage_snapshot();
+        local.model_daily = vec![ModelDailyUsage {
+            model: "gpt-5.1".to_string(),
+            days: [(day(0), million), (day(40), million)]
+                .into_iter()
+                .collect(),
+        }];
+        let this = MachineInfo {
+            id: "a".repeat(32),
+            name: "this-pc".to_string(),
+            os: "Linux".to_string(),
+            llmon: "0.5.6".to_string(),
+            utc_offset_minutes: crate::sync::local_utc_offset_minutes(),
+        };
+        let same_zone = crate::sync::local_utc_offset_minutes();
+        let l = |days_ago: i64| format!("L:{}", day(days_ago));
+        let u = |days_ago: i64| format!("U:{}", day(days_ago));
+        // Same calendar: its local days count. gpt-5.1 is $10 per million output.
+        let near = peer(
+            "pc-near",
+            same_zone,
+            &[
+                (&l(1), "gpt-5.1", 3_000_000),
+                (&u(1), "gpt-5.1", 999_000_000),
+            ],
+        );
+        // Another time zone: only its UTC days count.
+        let far = peer(
+            "pc-far",
+            same_zone + 60,
+            &[
+                (&l(2), "gpt-5.1", 999_000_000),
+                (&u(2), "gpt-5.1", 2_000_000),
+                (&u(30), "unpriced-model", 5),
+            ],
+        );
+        let days: Vec<String> = (0..7).rev().map(day).collect();
+
+        let machines = machine_costs(
+            &[(Harness::Codex, &local)],
+            &this,
+            &[near, far],
+            UsageZone::Local,
+            &days,
+            &Pricing::default(),
+        );
+        let summary: Vec<(&str, bool, i64, f64, bool)> = machines
+            .iter()
+            .map(|m| (m.name.as_str(), m.this_pc, m.tokens, m.cost, m.utc_days))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("pc-near", false, 3_000_000, 30.0, false),
+                ("pc-far", false, 2_000_000, 20.0, true),
+                ("this-pc", true, 1_000_000, 10.0, false),
+            ],
+            "largest cost first; the 40-day-old day is outside the range"
+        );
+        assert_eq!(machines[0].updated_at, Some(77));
+        assert_eq!(machines[2].updated_at, None);
     }
 
     #[test]

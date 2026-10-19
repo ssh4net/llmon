@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.6
+
+- Distributed mode: COST gets a BY MACHINE panel (tokens, cost, share, OS, and
+  the age of each machine's data, in yellow when older than a day). A machine
+  in another time zone is counted by its UTC days, and the screen says so.
+
 ## 0.5.5
 
 - Distributed mode, third part (opt-in): HISTORY lists the other machines'

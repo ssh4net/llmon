@@ -9246,9 +9246,19 @@ mod tests {
         };
         let all = render_screen_text(&mut state, 160, 45);
         assert!(all.contains("/peer/only-project"), "{all}");
+        // Each machine's share, with how old its data is.
+        assert!(all.contains("BY MACHINE"), "{all}");
+        assert!(all.contains("this-pc (this PC)"), "{all}");
+        assert!(
+            all.lines().any(|line| line.contains("pc-b")
+                && line.contains("ago")
+                && line.contains("Linux")),
+            "{all}"
+        );
         state.machine_scope = MachineScope::ThisPc;
         let this = render_screen_text(&mut state, 160, 45);
         assert!(!this.contains("/peer/only-project"), "{this}");
+        assert!(!this.contains("BY MACHINE"), "{this}");
 
         // Without distributed mode there are no pills and no hint.
         let mut plain = AppState::for_tests();
