@@ -156,12 +156,26 @@ same layout; differences are noted per module.
   - The Claude types (`providers::claude::limits::AccountRateLimits`) are
     separate from the Codex App Server types until the UI unifies them.
     `--dump-limits --claude-limits <statusline|oauth>` (hidden) prints them.
+- `sync/` - distributed mode (opt-in, off unless `sync.dir` or `--sync-dir`
+  is set): llmon instances exchange usage, projects, and sessions through a
+  shared folder, one `llmon-sync-<machine id>.json` per machine. No server and
+  no listening port; the folder is the only channel. The usage part is the
+  per-project sum of the two maps the scan cache keeps per log file
+  (`usage::ExportGroup`, built by `compute_snapshot_with` when
+  `SyncOptions::export` is set), so it needs no new aggregation. The export
+  must come from local data only, never from merged peer data, or machines
+  echo each other's totals. Prompt text stays local: session titles are
+  exported only with `sync.share_titles`, and repository URLs lose their
+  credentials (`strip_url_credentials`). The publisher is a task fed by a
+  `watch` channel (`SyncState`, `queue_sync_publish`); a missing folder is an
+  error, never created. Files from peers are untrusted input.
 - `locale.rs` - Classic, System Compact, and System Full number/date
   formatting (`DisplayFormatter`). It reads the OS locale through `libc` or
   `windows-sys`.
 - `storage.rs` - private-file helpers: `0700` dirs, `0600` files, atomic
   writes, and refusal of symlinks and special files. Every file the app writes
-  goes through these helpers.
+  goes through these helpers; the sync file is the one exception, because a
+  shared folder has permissions of its own (`write_shared_file_atomic`).
 - `pricing.rs` - built-in price tables per harness (USD per million tokens,
   dated `*_PRICES_UPDATED`; check them against the official pages when you
   change them), plus `pricing.<harness>` overrides from `config.json`.

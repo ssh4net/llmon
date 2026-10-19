@@ -2119,10 +2119,12 @@ fn footer_error(state: &AppState) -> String {
         ActiveScreen::Read => None,
     }
     .unwrap_or("");
-    if err.is_empty() {
-        String::new()
-    } else {
-        truncate_middle(err, 80)
+    if !err.is_empty() {
+        return truncate_middle(err, 80);
+    }
+    match state.sync.as_ref().and_then(|sync| sync.error.as_deref()) {
+        Some(error) => truncate_middle(&format!("Sync: {error}"), 100),
+        None => String::new(),
     }
 }
 
@@ -8341,6 +8343,7 @@ mod tests {
             activity_first_weekday: Weekday::Mon,
             project_activity: Vec::new(),
             project_usage: Vec::new(),
+            export: None,
             model_daily: Vec::new(),
             utc_model_daily: Vec::new(),
             project_model_daily: Vec::new(),

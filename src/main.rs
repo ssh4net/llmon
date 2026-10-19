@@ -5,6 +5,7 @@ mod pricing;
 mod providers;
 mod read;
 mod storage;
+mod sync;
 mod ui;
 mod usage;
 
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
 
-const USER_CONFIG_SCHEMA_VERSION: u32 = 5;
+const USER_CONFIG_SCHEMA_VERSION: u32 = 6;
 const USER_CONFIG_FILE_NAME: &str = "config.json";
 const DEFAULT_USAGE_DAYS: u32 = 30;
 const DEFAULT_REFRESH_USAGE_SECS: u64 = 300;
@@ -51,6 +52,9 @@ struct UserConfig {
     /// Prices that add to or override the built-in tables, per harness:
     /// model id -> USD per million tokens.
     pricing: pricing::PricingOverrides,
+    /// Distributed mode (opt-in): llmon instances on several machines share
+    /// their usage through a folder. Off until `sync.dir` is set.
+    sync: sync::SyncConfig,
 }
 
 impl Default for UserConfig {
@@ -76,6 +80,7 @@ impl Default for UserConfig {
             history_catalog_scan_budget_ms: DEFAULT_HISTORY_CATALOG_SCAN_BUDGET_MS,
             claude_limits: ClaudeLimitsArg::Statusline,
             pricing: pricing::PricingOverrides::default(),
+            sync: sync::SyncConfig::default(),
         }
     }
 }
@@ -247,6 +252,11 @@ struct Args {
     /// Override LLMON_HOME for llmon-owned state/cache files (default: $LLMON_HOME or ~/.llmon).
     #[arg(long)]
     llmon_home: Option<PathBuf>,
+
+    /// Distributed mode: share usage with llmon on other machines through this existing
+    /// folder (default: the `sync.dir` of config.json; off when neither is set).
+    #[arg(long)]
+    sync_dir: Option<PathBuf>,
 
     /// Print effective llmon config path and exit.
     #[arg(long)]
@@ -530,6 +540,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let sync = sync::SyncSettings::resolve(&user_config.sync, args.sync_dir.clone(), &llmon_home)?;
     let claude_dir = providers::claude::resolve_claude_dir(args.claude_dir.clone());
     let mut history_sources = vec![(harness::Harness::Codex, read_config.sessions_dir)];
     if let Some(claude_dir) = claude_dir.as_deref() {
@@ -551,6 +562,7 @@ async fn main() -> Result<()> {
         llmon_home,
         codex_home,
         history_sources,
+        sync,
         start_in_read_screen: args.read_mode,
         cwd,
         workspace_path: project,
@@ -679,6 +691,53 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).expect("read migrated config"))
                 .expect("parse migrated config");
         assert_eq!(persisted["schema_version"], USER_CONFIG_SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn older_config_gets_a_disabled_sync_section() {
+        let llmon_home = make_temp_dir("config-sync-migration");
+        let path = llmon_home.join(USER_CONFIG_FILE_NAME);
+        let older = serde_json::json!({"schema_version": 5, "usage_days": 30});
+        crate::storage::write_private_file(
+            &path,
+            &serde_json::to_vec_pretty(&older).expect("encode config"),
+        )
+        .expect("write config");
+
+        let migrated = load_or_bootstrap_user_config(&llmon_home).expect("migrate config");
+        assert_eq!(migrated.sync, sync::SyncConfig::default());
+        assert!(
+            sync::SyncSettings::resolve(&migrated.sync, None, &llmon_home)
+                .expect("resolve")
+                .is_none(),
+            "distributed mode stays off until a sync folder is set"
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read config"))
+                .expect("parse config");
+        assert_eq!(persisted["schema_version"], USER_CONFIG_SCHEMA_VERSION);
+        assert!(persisted["sync"]["dir"].is_null(), "{persisted}");
+        assert_eq!(persisted["sync"]["share_titles"], false);
+
+        // A folder in the config turns it on.
+        let explicit = serde_json::json!({
+            "schema_version": 6,
+            "sync": {"dir": "/share/llmon", "machine_name": "pc-a", "ignore": ["old-pc"]}
+        });
+        crate::storage::write_private_file(
+            &path,
+            &serde_json::to_vec_pretty(&explicit).expect("encode config"),
+        )
+        .expect("write config");
+        let config = load_or_bootstrap_user_config(&llmon_home).expect("load config");
+        let settings = sync::SyncSettings::resolve(&config.sync, None, &llmon_home)
+            .expect("resolve")
+            .expect("enabled");
+        assert_eq!(settings.dir, PathBuf::from("/share/llmon"));
+        assert_eq!(settings.machine.name, "pc-a");
+        assert_eq!(settings.ignore, vec!["old-pc".to_string()]);
+        assert!(!settings.share_titles);
         let _ = std::fs::remove_dir_all(llmon_home);
     }
 

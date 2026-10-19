@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 
 pub(crate) const MAX_ACTIVITY_GAP_MS: i64 = 2 * 60 * 1000;
@@ -328,6 +329,9 @@ pub struct LocalUsageSnapshot {
     pub activity_first_weekday: Weekday,
     pub project_activity: Vec<ProjectActivity>,
     pub project_usage: Vec<ProjectUsageSummary>,
+    /// This machine's usage for distributed mode; `None` unless asked for
+    /// through `SyncOptions::export`.
+    pub(crate) export: Option<Arc<UsageExport>>,
     /// Tokens per model per day, over every cached day (not only the chart
     /// window), largest model first.
     pub model_daily: Vec<ModelDailyUsage>,
@@ -561,7 +565,7 @@ impl LocalUsageSnapshot {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DailyTotals {
     #[serde(default)]
     pub(crate) tokens: TokenBreakdown,
@@ -692,7 +696,7 @@ impl FileScanSummary {
 type ModelDays = HashMap<String, BTreeMap<String, TokenBreakdown>>;
 
 /// Collects per-model daily usage, overall and per project, in both zones.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct ModelDailyBuilder {
     local: ModelDays,
     utc: ModelDays,
@@ -929,6 +933,34 @@ pub fn compute_snapshot(
     limits: ScanLimits,
     scan_cache_db_path: Option<&Path>,
 ) -> Result<LocalUsageSnapshot> {
+    compute_snapshot_with(
+        harness,
+        days,
+        harness_home,
+        workspace_path,
+        limits,
+        scan_cache_db_path,
+        &SyncOptions::default(),
+    )
+}
+
+/// What distributed mode asks of a snapshot. All off by default, so a
+/// snapshot costs nothing extra unless the user opted in.
+#[derive(Debug, Clone, Default)]
+pub struct SyncOptions {
+    /// Also collect this machine's usage for the exchange (`export`).
+    pub export: bool,
+}
+
+pub fn compute_snapshot_with(
+    harness: Harness,
+    days: u32,
+    harness_home: &Path,
+    workspace_path: Option<&Path>,
+    limits: ScanLimits,
+    scan_cache_db_path: Option<&Path>,
+    sync: &SyncOptions,
+) -> Result<LocalUsageSnapshot> {
     let days = days.clamp(1, 90);
 
     let sessions_root = match harness {
@@ -939,8 +971,6 @@ pub fn compute_snapshot(
     // expanded to the complete indexed history after cached rows are applied.
     let summary_day_keys = make_day_keys_for_zone(days, UsageZone::Local);
     let utc_summary_day_keys = make_day_keys_for_zone(days, UsageZone::Utc);
-    let summary_day_filter: HashSet<String> = summary_day_keys.iter().cloned().collect();
-    let utc_summary_day_filter: HashSet<String> = utc_summary_day_keys.iter().cloned().collect();
     let activity_first_weekday = system_first_weekday();
     let activity_day_keys = make_activity_day_keys(activity_first_weekday);
     let mut scan_day_keys = activity_day_keys.clone();
@@ -949,33 +979,41 @@ pub fn compute_snapshot(
             scan_day_keys.push(day_key.clone());
         }
     }
-    let mut daily: HashMap<String, DailyTotals> = scan_day_keys
-        .iter()
-        .map(|key| (key.clone(), DailyTotals::default()))
-        .collect();
-    let mut utc_daily: HashMap<String, DailyTotals> = utc_summary_day_keys
-        .iter()
-        .map(|key| (key.clone(), DailyTotals::default()))
-        .collect();
-    let mut model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
-    let mut utc_model_totals: HashMap<String, TokenBreakdown> = HashMap::new();
-    let mut project_activity: HashMap<String, ProjectActivityBuilder> = HashMap::new();
-    let mut model_daily = ModelDailyBuilder::default();
+    let mut sink = UsageSink::new(
+        UsageFilters {
+            workspace_path,
+            summary_days: summary_day_keys.iter().cloned().collect(),
+            utc_summary_days: utc_summary_day_keys.iter().cloned().collect(),
+        },
+        UsageAccumulator {
+            daily: scan_day_keys
+                .iter()
+                .map(|key| (key.clone(), DailyTotals::default()))
+                .collect(),
+            utc_daily: utc_summary_day_keys
+                .iter()
+                .map(|key| (key.clone(), DailyTotals::default()))
+                .collect(),
+            ..UsageAccumulator::default()
+        },
+        sync.export,
+    );
 
     if !sessions_root.exists() {
+        let acc = sink.acc;
         return Ok(build_snapshot(
             summary_day_keys,
-            daily,
-            model_totals,
+            acc.daily,
+            acc.model_totals,
             utc_summary_day_keys,
-            utc_daily,
-            utc_model_totals,
+            acc.utc_daily,
+            acc.utc_model_totals,
             0,
             activity_first_weekday,
             activity_day_keys,
-            project_activity,
+            acc.project_activity,
             Vec::new(),
-            model_daily,
+            acc.model_daily,
             0,
             0,
             0,
@@ -992,7 +1030,6 @@ pub fn compute_snapshot(
             .then_with(|| a.len.cmp(&b.len))
     });
 
-    let mut matched_session_files: u32 = 0;
     let mut scan_cache_db = scan_cache_db_path
         .map(open_or_init_scan_cache_db)
         .transpose()?;
@@ -1157,19 +1194,7 @@ pub fn compute_snapshot(
                     if let Some(deadline) = scan_deadline {
                         if Instant::now() >= deadline {
                             if let Some(stale) = cached_entry {
-                                apply_file_usage(
-                                    stale.usage(),
-                                    workspace_path,
-                                    &mut daily,
-                                    &mut model_totals,
-                                    &summary_day_filter,
-                                    &mut utc_daily,
-                                    &mut utc_model_totals,
-                                    &utc_summary_day_filter,
-                                    &mut project_activity,
-                                    &mut matched_session_files,
-                                    &mut model_daily,
-                                );
+                                sink.add(stale.usage());
                             }
                             continue;
                         }
@@ -1186,19 +1211,7 @@ pub fn compute_snapshot(
                         Ok(parsed) => parsed,
                         Err(_) => {
                             if let Some(stale) = cached_entry {
-                                apply_file_usage(
-                                    stale.usage(),
-                                    workspace_path,
-                                    &mut daily,
-                                    &mut model_totals,
-                                    &summary_day_filter,
-                                    &mut utc_daily,
-                                    &mut utc_model_totals,
-                                    &utc_summary_day_filter,
-                                    &mut project_activity,
-                                    &mut matched_session_files,
-                                    &mut model_daily,
-                                );
+                                sink.add(stale.usage());
                             }
                             continue;
                         }
@@ -1224,53 +1237,17 @@ pub fn compute_snapshot(
                     dirty_cache_paths.insert(candidate_key.clone());
                     entry
                 };
-                apply_file_usage(
-                    entry.usage(),
-                    workspace_path,
-                    &mut daily,
-                    &mut model_totals,
-                    &summary_day_filter,
-                    &mut utc_daily,
-                    &mut utc_model_totals,
-                    &utc_summary_day_filter,
-                    &mut project_activity,
-                    &mut matched_session_files,
-                    &mut model_daily,
-                );
+                sink.add(entry.usage());
                 continue;
             }
 
             if let Some(entry) = cached_entry_matches {
-                apply_file_usage(
-                    entry.usage(),
-                    workspace_path,
-                    &mut daily,
-                    &mut model_totals,
-                    &summary_day_filter,
-                    &mut utc_daily,
-                    &mut utc_model_totals,
-                    &utc_summary_day_filter,
-                    &mut project_activity,
-                    &mut matched_session_files,
-                    &mut model_daily,
-                );
+                sink.add(entry.usage());
                 continue;
             }
 
             if let Some(stale) = cached_entry {
-                apply_file_usage(
-                    stale.usage(),
-                    workspace_path,
-                    &mut daily,
-                    &mut model_totals,
-                    &summary_day_filter,
-                    &mut utc_daily,
-                    &mut utc_model_totals,
-                    &utc_summary_day_filter,
-                    &mut project_activity,
-                    &mut matched_session_files,
-                    &mut model_daily,
-                );
+                sink.add(stale.usage());
             }
         }
     } else {
@@ -1302,19 +1279,7 @@ pub fn compute_snapshot(
             if cache_entry_matches_candidate(&entry, candidate) {
                 uncached_indexed_files = uncached_indexed_files.saturating_add(1);
             }
-            apply_file_usage(
-                entry.usage(),
-                workspace_path,
-                &mut daily,
-                &mut model_totals,
-                &summary_day_filter,
-                &mut utc_daily,
-                &mut utc_model_totals,
-                &utc_summary_day_filter,
-                &mut project_activity,
-                &mut matched_session_files,
-                &mut model_daily,
-            );
+            sink.add(entry.usage());
             scan_cache_store
                 .entries
                 .insert(candidate_paths[idx].clone(), entry);
@@ -1364,49 +1329,43 @@ pub fn compute_snapshot(
         .fold(0_u64, u64::saturating_add);
 
     for archived in &archived_usage {
-        apply_file_usage(
-            archived.usage(),
-            workspace_path,
-            &mut daily,
-            &mut model_totals,
-            &summary_day_filter,
-            &mut utc_daily,
-            &mut utc_model_totals,
-            &utc_summary_day_filter,
-            &mut project_activity,
-            &mut matched_session_files,
-            &mut model_daily,
-        );
+        sink.add(archived.usage());
     }
 
-    let chart_day_keys = make_complete_chart_day_keys(&daily, UsageZone::Local, &summary_day_keys);
+    let UsageSink { acc, export, .. } = sink;
+    let chart_day_keys =
+        make_complete_chart_day_keys(&acc.daily, UsageZone::Local, &summary_day_keys);
     let utc_chart_day_keys =
-        make_complete_chart_day_keys(&utc_daily, UsageZone::Utc, &utc_summary_day_keys);
+        make_complete_chart_day_keys(&acc.utc_daily, UsageZone::Utc, &utc_summary_day_keys);
     let project_usage = build_project_usage_summaries(
         &candidates,
         &candidate_paths,
         &archived_usage,
         &scan_cache_store,
     );
+    let export =
+        export.map(|builder| Arc::new(builder.finish(local_file_tokens(&scan_cache_store))));
 
-    Ok(build_snapshot(
+    let mut snapshot = build_snapshot(
         chart_day_keys,
-        daily,
-        model_totals,
+        acc.daily,
+        acc.model_totals,
         utc_chart_day_keys,
-        utc_daily,
-        utc_model_totals,
-        matched_session_files,
+        acc.utc_daily,
+        acc.utc_model_totals,
+        acc.matched_session_files,
         activity_first_weekday,
         activity_day_keys,
-        project_activity,
+        acc.project_activity,
         project_usage,
-        model_daily,
+        acc.model_daily,
         scan_total_files,
         scan_indexed_files,
         scan_pending_files,
         scan_processed_bytes,
-    ))
+    );
+    snapshot.export = export;
+    Ok(snapshot)
 }
 
 /// Moves cache rows of deleted logs into the archive, drops archive rows of
@@ -1575,6 +1534,7 @@ fn build_snapshot(
         activity_first_weekday,
         project_activity: build_project_activity(activity_day_keys, project_activity),
         project_usage,
+        export: None,
         model_daily: model_daily.local,
         utc_model_daily: model_daily.utc,
         project_model_daily: model_daily.local_projects,
@@ -1875,64 +1835,196 @@ pub(crate) fn add_model_tokens_limited(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_file_usage(
-    usage: FileUsageRef<'_>,
-    workspace_path: Option<&Path>,
-    daily: &mut HashMap<String, DailyTotals>,
-    model_totals: &mut HashMap<String, TokenBreakdown>,
-    chart_day_filter: &HashSet<String>,
-    utc_daily: &mut HashMap<String, DailyTotals>,
-    utc_model_totals: &mut HashMap<String, TokenBreakdown>,
-    utc_chart_day_filter: &HashSet<String>,
-    project_activity: &mut HashMap<String, ProjectActivityBuilder>,
-    matched_session_files: &mut u32,
-    model_daily: &mut ModelDailyBuilder,
-) {
-    let matches_workspace = match workspace_path {
-        None => true,
-        Some(filter) => entry_project_paths(usage)
-            .iter()
-            .any(|project| path_matches_workspace(project, filter)),
-    };
-    if !matches_workspace {
-        return;
-    }
+/// Feeds each log file's usage to the snapshot accumulator and, when
+/// distributed mode asks for it, to the export. The export ignores the
+/// `--project` filter: it describes the whole machine.
+struct UsageSink<'a> {
+    filters: UsageFilters<'a>,
+    acc: UsageAccumulator,
+    export: Option<ExportBuilder>,
+}
 
-    if workspace_path.is_some() {
-        *matched_session_files = matched_session_files.saturating_add(1);
-    }
-    model_daily.add(usage);
-
-    for (cache_key, totals) in usage.daily {
-        let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
-            continue;
-        };
-        let target = match zone {
-            UsageZone::Local => &mut *daily,
-            UsageZone::Utc => &mut *utc_daily,
-        };
-        target.entry(day_key.to_string()).or_default().add(*totals);
-    }
-
-    for (cache_key, per_day_models) in usage.model_totals_by_day {
-        let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
-            continue;
-        };
-        let (filter, target) = match zone {
-            UsageZone::Local => (chart_day_filter, &mut *model_totals),
-            UsageZone::Utc => (utc_chart_day_filter, &mut *utc_model_totals),
-        };
-        if !filter.contains(day_key) {
-            continue;
-        }
-        for (model, tokens) in per_day_models {
-            add_model_tokens_limited(target, model.clone(), *tokens);
+impl<'a> UsageSink<'a> {
+    fn new(filters: UsageFilters<'a>, acc: UsageAccumulator, export: bool) -> Self {
+        Self {
+            filters,
+            acc,
+            export: export.then(ExportBuilder::default),
         }
     }
 
-    for project in entry_project_paths(usage) {
-        apply_project_activity(&project, usage.daily, daily, project_activity);
+    fn add(&mut self, usage: FileUsageRef<'_>) {
+        if let Some(export) = self.export.as_mut() {
+            export.add(usage);
+        }
+        self.acc.apply(usage, &self.filters);
+    }
+}
+
+/// One project's usage for the exchange between machines: the two maps the
+/// scan cache keeps per log file, summed per session owner. It carries no
+/// file paths and no session ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExportGroup {
+    /// The session owner's cwd (as `session_cwd_identity` normalizes it).
+    pub(crate) cwd: Option<String>,
+    /// `L:`/`U:` day key -> totals.
+    #[serde(default)]
+    pub(crate) daily: BTreeMap<String, DailyTotals>,
+    /// `L:`/`U:` day key -> model -> tokens.
+    #[serde(default)]
+    pub(crate) models: BTreeMap<String, BTreeMap<String, TokenBreakdown>>,
+}
+
+/// This machine's usage as distributed mode shares it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UsageExport {
+    pub(crate) groups: Vec<ExportGroup>,
+    /// Tokens per log file (local calendar), to size sessions in HISTORY.
+    pub(crate) file_tokens: BTreeMap<String, i64>,
+}
+
+#[derive(Default)]
+struct ExportBuilder {
+    /// Keyed by `normalize_project_key`; the empty key is "no cwd".
+    groups: BTreeMap<String, ExportGroup>,
+}
+
+impl ExportBuilder {
+    fn add(&mut self, usage: FileUsageRef<'_>) {
+        let cwd = entry_project_paths(usage).into_iter().next();
+        let key = cwd
+            .as_deref()
+            .map(normalize_project_key)
+            .unwrap_or_default();
+        let group = self.groups.entry(key).or_insert_with(|| ExportGroup {
+            cwd: None,
+            daily: BTreeMap::new(),
+            models: BTreeMap::new(),
+        });
+        if let Some(cwd) = cwd {
+            match group.cwd.as_mut() {
+                Some(current) => prefer_project_display_path(current, &cwd),
+                None => group.cwd = Some(cwd),
+            }
+        }
+        for (key, totals) in usage.daily {
+            group.daily.entry(key.clone()).or_default().add(*totals);
+        }
+        for (key, models) in usage.model_totals_by_day {
+            let slot = group.models.entry(key.clone()).or_default();
+            for (model, tokens) in models {
+                slot.entry(model.clone()).or_default().add(*tokens);
+            }
+        }
+    }
+
+    fn finish(self, file_tokens: BTreeMap<String, i64>) -> UsageExport {
+        UsageExport {
+            groups: self.groups.into_values().collect(),
+            file_tokens,
+        }
+    }
+}
+
+/// Tokens of each cached log file over the local calendar.
+fn local_file_tokens(cache: &ScanCacheStore) -> BTreeMap<String, i64> {
+    cache
+        .entries
+        .iter()
+        .map(|(path, entry)| {
+            let tokens = entry
+                .daily
+                .iter()
+                .filter(|(key, _)| key.starts_with("L:"))
+                .map(|(_, totals)| totals.tokens.total())
+                .fold(0_i64, i64::saturating_add);
+            (path.clone(), tokens)
+        })
+        .collect()
+}
+
+/// What a snapshot is built from. Cloneable, so a copy can take usage from
+/// other machines without touching the local totals.
+#[derive(Clone, Default)]
+struct UsageAccumulator {
+    daily: HashMap<String, DailyTotals>,
+    utc_daily: HashMap<String, DailyTotals>,
+    model_totals: HashMap<String, TokenBreakdown>,
+    utc_model_totals: HashMap<String, TokenBreakdown>,
+    project_activity: HashMap<String, ProjectActivityBuilder>,
+    model_daily: ModelDailyBuilder,
+    matched_session_files: u32,
+}
+
+/// The filters usage is applied through.
+struct UsageFilters<'a> {
+    /// `--project`: only sessions under this path count.
+    workspace_path: Option<&'a Path>,
+    /// Days model shares are counted over (local and UTC calendar).
+    summary_days: HashSet<String>,
+    utc_summary_days: HashSet<String>,
+}
+
+impl UsageAccumulator {
+    fn apply(&mut self, usage: FileUsageRef<'_>, filters: &UsageFilters<'_>) {
+        let UsageAccumulator {
+            daily,
+            utc_daily,
+            model_totals,
+            utc_model_totals,
+            project_activity,
+            model_daily,
+            matched_session_files,
+        } = self;
+        let workspace_path = filters.workspace_path;
+        let chart_day_filter = &filters.summary_days;
+        let utc_chart_day_filter = &filters.utc_summary_days;
+        let matches_workspace = match workspace_path {
+            None => true,
+            Some(filter) => entry_project_paths(usage)
+                .iter()
+                .any(|project| path_matches_workspace(project, filter)),
+        };
+        if !matches_workspace {
+            return;
+        }
+
+        if workspace_path.is_some() {
+            *matched_session_files = matched_session_files.saturating_add(1);
+        }
+        model_daily.add(usage);
+
+        for (cache_key, totals) in usage.daily {
+            let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
+                continue;
+            };
+            let target = match zone {
+                UsageZone::Local => &mut *daily,
+                UsageZone::Utc => &mut *utc_daily,
+            };
+            target.entry(day_key.to_string()).or_default().add(*totals);
+        }
+
+        for (cache_key, per_day_models) in usage.model_totals_by_day {
+            let Some((zone, day_key)) = split_cache_day_key(cache_key) else {
+                continue;
+            };
+            let (filter, target) = match zone {
+                UsageZone::Local => (chart_day_filter, &mut *model_totals),
+                UsageZone::Utc => (utc_chart_day_filter, &mut *utc_model_totals),
+            };
+            if !filter.contains(day_key) {
+                continue;
+            }
+            for (model, tokens) in per_day_models {
+                add_model_tokens_limited(target, model.clone(), *tokens);
+            }
+        }
+
+        for project in entry_project_paths(usage) {
+            apply_project_activity(&project, usage.daily, daily, project_activity);
+        }
     }
 }
 

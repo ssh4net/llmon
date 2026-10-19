@@ -55,6 +55,37 @@ pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Writes `bytes` to a file in a folder shared with other machines, through a
+/// temporary file in the same folder and a rename, so readers never see a
+/// partial file. Unlike the private helpers it creates no folder, leaves the
+/// folder's permissions alone (a share has its own), and creates the file with
+/// the default mode. It refuses a symlink or special file at `path`.
+pub fn write_shared_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    ensure_regular_file_or_missing(path, "file")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let temp_path = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temp_path)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| std::fs::rename(&temp_path, path));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("Unable to write {}", path.display()));
+    }
+    Ok(())
+}
+
 pub fn enforce_private_file_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {

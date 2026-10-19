@@ -29,6 +29,8 @@ pub struct Config {
     pub codex_home: std::path::PathBuf,
     /// Log directory of each harness for the HISTORY screen.
     pub(crate) history_sources: Vec<(Harness, PathBuf)>,
+    /// Distributed mode; `None` unless the user opted in with a sync folder.
+    pub(crate) sync: Option<crate::sync::SyncSettings>,
     pub start_in_read_screen: bool,
     pub cwd: std::path::PathBuf,
     pub workspace_path: Option<std::path::PathBuf>,
@@ -417,6 +419,8 @@ enum AppEvent {
         message: String,
         is_error: bool,
     },
+    /// The sync file was written (bytes) or could not be.
+    SyncPublished(Result<usize>),
     HistoryCatalogProgress(crate::read::catalog::CatalogProgress),
     HistoryCatalogUpdated {
         strict: crate::read::scan::Catalog,
@@ -566,6 +570,99 @@ fn next_active_screen(screen: ActiveScreen) -> ActiveScreen {
     }
 }
 
+/// Distributed mode state. `AppState::sync` is `None` unless the user opted
+/// in with a sync folder.
+pub(crate) struct SyncState {
+    pub(crate) settings: crate::sync::SyncSettings,
+    /// This machine's usage per harness, from the latest snapshots.
+    exports: BTreeMap<Harness, std::sync::Arc<crate::usage::UsageExport>>,
+    /// Harnesses that will report usage, and when the run started.
+    expected_harnesses: usize,
+    started_at: Instant,
+    /// The latest file for the publisher task to write.
+    tx: watch::Sender<Option<std::sync::Arc<crate::sync::SyncFile>>>,
+    /// New usage since the last file was queued.
+    dirty: bool,
+    last_queued_at: Option<Instant>,
+    pub(crate) last_published_at: Option<Instant>,
+    pub(crate) error: Option<String>,
+}
+
+impl std::fmt::Debug for SyncState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncState")
+            .field("dir", &self.settings.dir)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SyncState {
+    fn new(
+        settings: crate::sync::SyncSettings,
+        tx: watch::Sender<Option<std::sync::Arc<crate::sync::SyncFile>>>,
+        expected_harnesses: usize,
+    ) -> Self {
+        Self {
+            settings,
+            exports: BTreeMap::new(),
+            expected_harnesses,
+            started_at: Instant::now(),
+            tx,
+            dirty: false,
+            last_queued_at: None,
+            last_published_at: None,
+            error: None,
+        }
+    }
+
+    fn note_usage(
+        &mut self,
+        harness: Harness,
+        export: Option<std::sync::Arc<crate::usage::UsageExport>>,
+    ) {
+        if let Some(export) = export {
+            self.exports.insert(harness, export);
+            self.dirty = true;
+        }
+    }
+}
+
+/// Queues this machine's sync file when there is new usage, at most once per
+/// `SYNC_MIN_INTERVAL`. The publisher task writes it.
+fn queue_sync_publish(state: &mut AppState) {
+    let Some(sync) = state.sync.as_mut() else {
+        return;
+    };
+    if !sync.dirty
+        || sync.exports.is_empty()
+        || sync
+            .last_queued_at
+            .is_some_and(|at| at.elapsed() < SYNC_MIN_INTERVAL)
+    {
+        return;
+    }
+    // The first file describes every harness, so other machines never see a
+    // half-empty one.
+    if sync.last_queued_at.is_none()
+        && sync.exports.len() < sync.expected_harnesses
+        && sync.started_at.elapsed() < SYNC_FIRST_WAIT
+    {
+        return;
+    }
+    let catalog = state.read_browser.strict_catalog_clone();
+    let file = crate::sync::build_sync_file(
+        &sync.settings.machine,
+        &sync.exports,
+        &catalog,
+        sync.settings.share_titles,
+        unix_time_seconds(),
+    );
+    sync.dirty = false;
+    sync.last_queued_at = Some(Instant::now());
+    let _ = sync.tx.send(Some(std::sync::Arc::new(file)));
+}
+
 #[derive(Debug)]
 pub(crate) struct AppState {
     pub(crate) active_screen: ActiveScreen,
@@ -616,6 +713,8 @@ pub(crate) struct AppState {
     pub(crate) ui_hit_targets: Vec<UiHitTarget>,
 
     pub(crate) harness_view: HarnessView,
+    /// Distributed mode; `None` unless the user opted in.
+    pub(crate) sync: Option<SyncState>,
     /// The selected chart of the combined USAGE view.
     pub(crate) usage_focus: Harness,
     pub(crate) models_range: DayRange,
@@ -659,6 +758,14 @@ const STATE_STORE_SCHEMA_VERSION: u32 = 4;
 const STATE_STORE_FILE_NAME: &str = "state.json";
 const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 const IDLE_UI_TICK: Duration = Duration::from_secs(1);
+/// The sync file is rebuilt at most this often.
+const SYNC_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// The first sync file waits for every harness's first snapshot, but not
+/// longer than this (a cold first scan can take a while).
+const SYNC_FIRST_WAIT: Duration = Duration::from_secs(90);
+/// An unchanged sync file is written again after this long, so other
+/// machines can tell this one is still running.
+const SYNC_HEARTBEAT: Duration = Duration::from_secs(15 * 60);
 const LIMIT_RESET_COOLDOWN_SECS: i64 = 60 * 60;
 const LIMIT_EXHAUSTED_EPSILON: f64 = 0.01;
 static LIMIT_RESET_ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -1029,6 +1136,9 @@ async fn run_inner(
         let scan_cache_db_path = scan_cache_db_path.clone();
         let usage_days = config.usage_days;
         let usage_scan_limits = config.usage_scan_limits;
+        let sync_options = crate::usage::SyncOptions {
+            export: config.sync.is_some(),
+        };
         let refresh = Duration::from_secs(config.refresh_usage_secs);
         let mut usage_refresh_rx = usage_refresh_rx;
         let mut shutdown_rx = shutdown_rx.clone();
@@ -1060,14 +1170,16 @@ async fn run_inner(
                         let home = home.clone();
                         let workspace_path = workspace_path.clone();
                         let scan_cache_db_path = scan_cache_db_path.clone();
+                        let sync_options = sync_options.clone();
                         move || {
-                            crate::usage::compute_snapshot(
+                            crate::usage::compute_snapshot_with(
                                 harness,
                                 usage_days,
                                 &home,
                                 workspace_path.as_deref(),
                                 usage_scan_limits,
                                 Some(scan_cache_db_path.as_path()),
+                                &sync_options,
                             )
                         }
                     })
@@ -1102,6 +1214,49 @@ async fn run_inner(
             }
         });
     }
+
+    // Spawn the sync publisher (distributed mode, opt-in): it writes this
+    // machine's file into the sync folder when new usage is queued.
+    let sync_state = config.sync.clone().map(|settings| {
+        let (tx, mut rx) = watch::channel::<Option<std::sync::Arc<crate::sync::SyncFile>>>(None);
+        let evt_tx = evt_tx.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
+        let worker_settings = settings.clone();
+        tokio::spawn(async move {
+            // Fingerprint and time of the last file written.
+            let mut last: Option<(u64, Instant)> = None;
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    changed = rx.changed() => {
+                        if changed.is_err() { break; }
+                    }
+                }
+                let Some(file) = rx.borrow_and_update().clone() else {
+                    continue;
+                };
+                let fingerprint = crate::sync::content_fingerprint(&file);
+                if last.is_some_and(|(previous, at)| {
+                    previous == fingerprint && at.elapsed() < SYNC_HEARTBEAT
+                }) {
+                    continue;
+                }
+                let settings = worker_settings.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || crate::sync::publish(&settings, &file))
+                        .await
+                        .unwrap_or_else(|error| Err(anyhow!("sync publish task failed: {error}")));
+                if result.is_ok() {
+                    last = Some((fingerprint, Instant::now()));
+                }
+                if evt_tx.send(AppEvent::SyncPublished(result)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let expected_harnesses = 1 + usize::from(config.claude_dir.is_some());
+        SyncState::new(settings, tx, expected_harnesses)
+    });
 
     // Spawn the Claude Code limits worker.
     {
@@ -1392,6 +1547,7 @@ async fn run_inner(
         mouse_position: None,
         ui_hit_targets: Vec::new(),
         harness_view: restored_ui_state.harness_view,
+        sync: sync_state,
         usage_focus: restored_ui_state.usage_focus,
         models_range: restored_ui_state.models_range,
         cost_range: restored_ui_state.cost_range,
@@ -1471,6 +1627,7 @@ async fn run_inner(
             }
         }
 
+        queue_sync_publish(&mut state);
         if dirty {
             terminal.draw(|f| crate::ui::render(f, &mut state))?;
         }
@@ -2725,9 +2882,24 @@ fn scroll_api_stat_periods(state: &mut AppState, amount: usize, older: bool) -> 
 
 fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
     match evt {
+        AppEvent::SyncPublished(result) => {
+            if let Some(sync) = state.sync.as_mut() {
+                match result {
+                    Ok(_) => {
+                        sync.last_published_at = Some(Instant::now());
+                        sync.error = None;
+                    }
+                    Err(error) => sync.error = Some(format!("{error:#}")),
+                }
+            }
+            true
+        }
         AppEvent::UsageUpdated(crate::harness::Harness::Codex, res) => {
             match res {
                 Ok(snapshot) => {
+                    if let Some(sync) = state.sync.as_mut() {
+                        sync.note_usage(Harness::Codex, snapshot.export.clone());
+                    }
                     if state.workspace_path.is_some()
                         && !state.no_sessions_confirm_dismissed
                         && snapshot.matched_session_files == 0
@@ -2747,6 +2919,9 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
         AppEvent::UsageUpdated(crate::harness::Harness::Claude, res) => {
             match res {
                 Ok(snapshot) => {
+                    if let Some(sync) = state.sync.as_mut() {
+                        sync.note_usage(Harness::Claude, snapshot.export.clone());
+                    }
                     state.claude_usage = Some(std::sync::Arc::new(snapshot));
                     state.claude_usage_error = None;
                     state.claude_usage_updated_at = Some(Instant::now());
@@ -3308,6 +3483,7 @@ impl AppState {
             mouse_position: None,
             ui_hit_targets: Vec::new(),
             harness_view: defaults.harness_view,
+            sync: None,
             usage_focus: defaults.usage_focus,
             models_range: defaults.models_range,
             cost_range: defaults.cost_range,
@@ -3906,6 +4082,53 @@ mod tests {
         assert_eq!(state.cost_projects.selected(), Some(0));
         state.active_screen = ActiveScreen::Models;
         assert!(!move_cost_project_selection(&mut state, 1));
+    }
+
+    #[test]
+    fn sync_publish_waits_for_every_harness_then_throttles() {
+        let (tx, mut rx) = watch::channel(None);
+        let settings = crate::sync::SyncSettings {
+            dir: PathBuf::from("/share"),
+            machine: crate::sync::MachineInfo {
+                id: "0123456789abcdef".to_string(),
+                name: "pc-a".to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.3".to_string(),
+                utc_offset_minutes: 0,
+            },
+            share_titles: false,
+            ignore: Vec::new(),
+        };
+        let mut state = AppState::for_tests();
+        state.sync = Some(SyncState::new(settings, tx, 2));
+        let export = std::sync::Arc::new(crate::usage::UsageExport::default());
+        let note = |state: &mut AppState, harness| {
+            state
+                .sync
+                .as_mut()
+                .expect("sync")
+                .note_usage(harness, Some(export.clone()));
+        };
+
+        note(&mut state, Harness::Codex);
+        queue_sync_publish(&mut state);
+        assert!(rx.borrow().is_none(), "the first file waits for Claude");
+
+        note(&mut state, Harness::Claude);
+        queue_sync_publish(&mut state);
+        let first = rx.borrow_and_update().clone().expect("queued");
+        assert_eq!(first.usage.len(), 2);
+
+        // New usage inside the minimum interval is held back.
+        note(&mut state, Harness::Codex);
+        queue_sync_publish(&mut state);
+        assert!(!rx.has_changed().expect("open"), "throttled");
+        assert!(state.sync.as_ref().expect("sync").dirty, "still pending");
+
+        // Without opt-in nothing is ever queued.
+        let mut off = AppState::for_tests();
+        assert!(off.sync.is_none());
+        queue_sync_publish(&mut off);
     }
 
     #[test]

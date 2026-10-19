@@ -109,6 +109,46 @@ undocumented and uses Claude Code's token, read per request and never stored.
 `--claude-limits off` disables Claude limits. The command never fails Claude Code's status line: on any error it
 prints a minimal line and exits 0. No credentials are read.
 
+## Distributed mode (opt-in)
+
+If you run llmon on several PCs, they can share their usage. This is off
+unless you set a sync folder: a folder that every PC can read and write,
+such as an SMB share, a NAS, or a Syncthing folder. The folder must already
+exist (llmon never creates it, so an unmounted share is not mistaken for an
+empty one). Set it in `config.json`:
+
+```json
+"sync": { "dir": "/mnt/share/llmon", "machine_name": null, "share_titles": false, "ignore": [] }
+```
+
+or run `llmon --sync-dir <folder>`. There is no server, no listening port, and
+no credential: the folder is the only channel. Each llmon writes one file,
+`llmon-sync-<machine id>.json`, when its usage changed (at most once a minute),
+and an llmon that is off leaves its last file behind.
+
+The file holds, for each harness:
+
+- usage per project: tokens per day and per model per day, runs, and agent
+  time (the same numbers llmon caches for each log, summed per project), with
+  no log file paths;
+- sessions: id, project path, start time, model, git branch and commit,
+  repository URL (without any user name or password), subagent count, and
+  token total.
+
+Session titles are the first line of your prompt, so they are not shared
+unless you set `share_titles` to `true`. Prompts and completions are never
+shared. Anyone who can read the folder can read the file, including project
+paths and session ids.
+
+`machine_name` is how other machines see this one (default: the host name,
+plus "(WSL)" under WSL). The machine id is a random value kept in
+`machine-id` in the llmon home. `ignore` lists machines (by name or id) whose
+files are skipped, for example a second llmon on this PC that reads the same
+logs, which would otherwise count them twice.
+
+Status: this version writes the file. Reading the other machines' files and
+showing them is coming in the next versions.
+
 ## Run
 
 By default, `llmon` shows usage for **All workspaces** (regardless of current directory).
@@ -167,7 +207,7 @@ Config precedence:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 6,
   "usage_days": 30,
   "refresh_usage_secs": 300,
   "refresh_limits_secs": 60,
@@ -180,9 +220,15 @@ Config precedence:
   "scan_cache_max_entries": 50000,
   "history_project_roots": [],
   "history_deep_depth": 2,
-  "history_deep_max_depth": 8
+  "history_deep_max_depth": 8,
+  "claude_limits": "statusline",
+  "pricing": {},
+  "sync": { "dir": null, "machine_name": null, "share_titles": false, "ignore": [] }
 }
 ```
+
+`pricing` overrides the built-in price tables (see COST) and `sync` is
+distributed mode (see below); both are optional.
 
 ### Optional Deep repository discovery
 

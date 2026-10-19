@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.3
+
+- Distributed mode, first part (opt-in): with a sync folder set (`sync.dir`
+  in `config.json`, or `--sync-dir`), llmon writes this machine's usage per
+  project and its sessions to `llmon-sync-<machine id>.json` there. Titles
+  are not shared unless `sync.share_titles` is on. Nothing is read or written
+  without a sync folder. Config schema 6 adds the `sync` section.
+
 ## 0.5.2
 
 - LIMITS cards: the 5-hour line shows used / remaining, like the weekly
