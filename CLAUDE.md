@@ -168,7 +168,15 @@ same layout; differences are noted per module.
   exported only with `sync.share_titles`, and repository URLs lose their
   credentials (`strip_url_credentials`). The publisher is a task fed by a
   `watch` channel (`SyncState`, `queue_sync_publish`); a missing folder is an
-  error, never created. Files from peers are untrusted input.
+  error, never created. A second task polls the folder (`read_peers`, with a
+  `PeerCache` so an unchanged file is not parsed again). Files from peers are
+  untrusted input: `load_peer_file` bounds their size and `sanitize_file`
+  cleans every string and number that is shown or summed. Merging needs no
+  rescan: in distributed mode a local snapshot keeps its `SnapshotParts`, and
+  `refresh_merged_usage` builds each harness's "all PCs" snapshot from them
+  plus the peers' `RemoteUsage` (cheap, on the event loop). Screens read
+  snapshots through `AppState::usage_snapshot`, which applies the machine
+  scope (`m`).
 - `locale.rs` - Classic, System Compact, and System Full number/date
   formatting (`DisplayFormatter`). It reads the OS locale through `libc` or
   `windows-sys`.

@@ -20,11 +20,12 @@
 
 use crate::harness::Harness;
 use crate::read::scan::Catalog;
-use crate::usage::{ExportGroup, UsageExport};
+use crate::usage::{ExportGroup, RemoteUsage, UsageExport};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,6 +37,11 @@ pub(crate) const SYNC_FILE_SUFFIX: &str = ".json";
 const MACHINE_ID_FILE_NAME: &str = "machine-id";
 /// Sessions exported per harness, newest first.
 const MAX_EXPORT_SESSIONS: usize = 20_000;
+/// Limits on what is accepted from another machine's file.
+const MAX_SYNC_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PEER_GROUPS: usize = 50_000;
+const MAX_PEER_SESSIONS: usize = 200_000;
+const MAX_MODELS_PER_DAY: usize = 64;
 
 /// The `sync` section of `config.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -372,6 +378,286 @@ pub(crate) fn publish(settings: &SyncSettings, file: &SyncFile) -> Result<usize>
     Ok(bytes.len())
 }
 
+impl SyncSettings {
+    /// Whether a machine's file is read: not ours (a copy of our own file
+    /// under another name), and not on the ignore list (by id or name).
+    fn accepts(&self, file: &SyncFile) -> bool {
+        file.machine.id != self.machine.id
+            && !self.ignore.iter().any(|entry| {
+                let entry = entry.trim();
+                entry == file.machine.id || entry.eq_ignore_ascii_case(&file.machine.name)
+            })
+    }
+}
+
+/// The other machines' files, as read from the sync folder.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PeerScan {
+    /// Sorted by machine name.
+    pub(crate) peers: Vec<Arc<SyncFile>>,
+    /// Files that were skipped, each with the reason.
+    pub(crate) problems: Vec<String>,
+}
+
+impl PeerScan {
+    /// Whether nothing changed since `other`: the same files (the cache hands
+    /// out the same `Arc` for an unchanged file) and the same problems.
+    pub(crate) fn unchanged_from(&self, other: &PeerScan) -> bool {
+        self.problems == other.problems
+            && self.peers.len() == other.peers.len()
+            && self
+                .peers
+                .iter()
+                .zip(&other.peers)
+                .all(|(left, right)| Arc::ptr_eq(left, right))
+    }
+}
+
+/// Parsed peer files by path, so a file is read again only when its size or
+/// modification time changed.
+#[derive(Default)]
+pub(crate) struct PeerCache {
+    entries: HashMap<PathBuf, CachedPeer>,
+}
+
+struct CachedPeer {
+    len: u64,
+    modified_ms: i64,
+    result: std::result::Result<Arc<SyncFile>, String>,
+}
+
+/// Reads the other machines' files from the sync folder. An unreadable
+/// folder is an error; a bad file is skipped and reported in `problems`.
+pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Result<PeerScan> {
+    let own_name = sync_file_name(&settings.machine.id);
+    let entries = std::fs::read_dir(&settings.dir)
+        .with_context(|| format!("Sync folder {} is not available", settings.dir.display()))?;
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut scan = PeerScan::default();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(SYNC_FILE_PREFIX)
+            || !name.ends_with(SYNC_FILE_SUFFIX)
+            || name == own_name
+        {
+            continue;
+        }
+        let path = entry.path();
+        seen.insert(path.clone());
+        // A symlink or special file is refused, like everywhere else.
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            scan.problems
+                .push(format!("{name}: not a regular file, skipped"));
+            continue;
+        }
+        let len = metadata.len();
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(crate::read::scan::system_time_to_epoch_ms)
+            .unwrap_or(0);
+        let result = match cache.entries.get(&path) {
+            Some(cached) if cached.len == len && cached.modified_ms == modified_ms => {
+                cached.result.clone()
+            }
+            _ => {
+                let result = load_peer_file(&path, &name, len);
+                cache.entries.insert(
+                    path,
+                    CachedPeer {
+                        len,
+                        modified_ms,
+                        result: result.clone(),
+                    },
+                );
+                result
+            }
+        };
+        match result {
+            Ok(file) if settings.accepts(&file) => scan.peers.push(file),
+            Ok(_) => {}
+            Err(problem) => scan.problems.push(format!("{name}: {problem}")),
+        }
+    }
+    cache.entries.retain(|path, _| seen.contains(path));
+    // Two files with one machine id (a copy): the newer one wins.
+    scan.peers
+        .sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    let mut ids = HashSet::new();
+    scan.peers
+        .retain(|peer| ids.insert(peer.machine.id.clone()));
+    scan.peers.sort_by(|left, right| {
+        left.machine
+            .name
+            .to_lowercase()
+            .cmp(&right.machine.name.to_lowercase())
+            .then_with(|| left.machine.id.cmp(&right.machine.id))
+    });
+    scan.problems.sort();
+    Ok(scan)
+}
+
+fn load_peer_file(path: &Path, name: &str, len: u64) -> std::result::Result<Arc<SyncFile>, String> {
+    let limit_mib = MAX_SYNC_FILE_BYTES / (1024 * 1024);
+    if len > MAX_SYNC_FILE_BYTES {
+        return Err(format!("larger than {limit_mib} MiB, skipped"));
+    }
+    // Read at most one byte past the limit, in case the file grew since the
+    // size check.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_SYNC_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("unreadable ({error})"))?;
+    if bytes.len() as u64 > MAX_SYNC_FILE_BYTES {
+        return Err(format!("larger than {limit_mib} MiB, skipped"));
+    }
+    let mut file: SyncFile = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("not a valid sync file ({error})"))?;
+    if file.format != SYNC_FORMAT {
+        return Err("not an llmon sync file".to_string());
+    }
+    if file.version > SYNC_VERSION {
+        return Err(format!(
+            "format version {} is newer than this llmon understands ({SYNC_VERSION}); update llmon",
+            file.version
+        ));
+    }
+    if !is_valid_machine_id(&file.machine.id) {
+        return Err("invalid machine id".to_string());
+    }
+    if name != sync_file_name(&file.machine.id) {
+        return Err("file name does not match its machine id".to_string());
+    }
+    sanitize_file(&mut file);
+    Ok(Arc::new(file))
+}
+
+/// Text from another machine, as safe to draw: no control characters (a
+/// terminal escape sequence must not reach the screen), at most `max`
+/// characters.
+pub(crate) fn clean_text(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control())
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn clean_option(text: Option<String>, max: usize) -> Option<String> {
+    text.map(|text| clean_text(&text, max))
+        .filter(|text| !text.is_empty())
+}
+
+/// `L:YYYY-MM-DD` or `U:YYYY-MM-DD`.
+fn is_valid_day_key(key: &str) -> bool {
+    key.len() == 12
+        && (key.starts_with("L:") || key.starts_with("U:"))
+        && chrono::NaiveDate::parse_from_str(&key[2..], "%Y-%m-%d").is_ok()
+}
+
+fn clamp_tokens(tokens: &mut crate::usage::TokenBreakdown) {
+    tokens.input = tokens.input.max(0);
+    tokens.cache_write = tokens.cache_write.max(0);
+    tokens.cache_write_1h = tokens.cache_write_1h.max(0);
+    tokens.cache_read = tokens.cache_read.max(0);
+    tokens.output = tokens.output.max(0);
+}
+
+/// Cleans everything in a peer's file that is shown or summed.
+fn sanitize_file(file: &mut SyncFile) {
+    let machine = &mut file.machine;
+    machine.name = clean_text(&machine.name, 64);
+    if machine.name.is_empty() {
+        machine.name = "unnamed".to_string();
+    }
+    machine.os = clean_text(&machine.os, 32);
+    machine.llmon = clean_text(&machine.llmon, 32);
+    machine.utc_offset_minutes = machine.utc_offset_minutes.clamp(-14 * 60, 14 * 60);
+    file.generated_at = file.generated_at.max(0);
+    file.usage.retain(|key, _| Harness::from_key(key).is_some());
+    for groups in file.usage.values_mut() {
+        groups.truncate(MAX_PEER_GROUPS);
+        for group in groups.iter_mut() {
+            sanitize_group(group);
+        }
+    }
+    file.sessions
+        .retain(|key, _| Harness::from_key(key).is_some());
+    for sessions in file.sessions.values_mut() {
+        sessions.truncate(MAX_PEER_SESSIONS);
+        for session in sessions.iter_mut() {
+            sanitize_session(session);
+        }
+        sessions.retain(|session| !session.id.is_empty());
+    }
+}
+
+fn sanitize_group(group: &mut ExportGroup) {
+    group.cwd = clean_option(group.cwd.take(), 1024);
+    group.daily.retain(|key, _| is_valid_day_key(key));
+    for totals in group.daily.values_mut() {
+        clamp_tokens(&mut totals.tokens);
+        totals.agent_ms = totals.agent_ms.max(0);
+        totals.agent_runs = totals.agent_runs.max(0);
+    }
+    group.models.retain(|key, _| is_valid_day_key(key));
+    for models in group.models.values_mut() {
+        let cleaned: BTreeMap<String, crate::usage::TokenBreakdown> = std::mem::take(models)
+            .into_iter()
+            .filter_map(|(name, mut tokens)| {
+                let name = clean_text(&name, 128);
+                (!name.is_empty()).then(|| {
+                    clamp_tokens(&mut tokens);
+                    (name, tokens)
+                })
+            })
+            .take(MAX_MODELS_PER_DAY)
+            .collect();
+        *models = cleaned;
+    }
+}
+
+fn sanitize_session(session: &mut ExportSession) {
+    session.id = clean_text(&session.id, 128);
+    session.cwd = clean_text(&session.cwd, 1024);
+    session.started_at = clean_option(session.started_at.take(), 40);
+    session.started_ms = session.started_ms.max(0);
+    session.model = clean_option(session.model.take(), 128);
+    session.provider = clean_option(session.provider.take(), 64);
+    session.client_version = clean_option(session.client_version.take(), 64);
+    session.branch = clean_option(session.branch.take(), 256);
+    session.commit = clean_option(session.commit.take(), 64);
+    session.repo = clean_option(session.repo.take(), 512);
+    session.title = clean_option(session.title.take(), 256);
+    session.subagents = session.subagents.min(10_000);
+    session.tokens = session.tokens.map(|tokens| tokens.max(0));
+}
+
+/// The usage of the other machines for one harness, ready to be added to a
+/// snapshot. A machine whose local calendar is in another time zone than
+/// ours (`local_utc_offset_minutes`) is counted by its UTC days.
+pub(crate) fn remote_usage(
+    peers: &[Arc<SyncFile>],
+    harness: Harness,
+    local_utc_offset_minutes: i32,
+) -> Vec<RemoteUsage> {
+    peers
+        .iter()
+        .flat_map(|peer| {
+            let same_calendar = peer.machine.utc_offset_minutes == local_utc_offset_minutes;
+            peer.usage
+                .get(harness.key())
+                .into_iter()
+                .flatten()
+                .map(move |group| RemoteUsage::from_export(group, same_calendar))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +930,292 @@ mod tests {
         // Publishing again replaces the file.
         publish(&settings, &file).expect("republish");
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn machine_with(id: &str, name: &str, utc_offset_minutes: i32) -> MachineInfo {
+        MachineInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            utc_offset_minutes,
+            ..machine()
+        }
+    }
+
+    fn settings_for(dir: &Path, machine: MachineInfo, ignore: &[&str]) -> SyncSettings {
+        SyncSettings {
+            dir: dir.to_path_buf(),
+            machine,
+            share_titles: false,
+            ignore: ignore.iter().map(|entry| entry.to_string()).collect(),
+        }
+    }
+
+    /// Publishes a file for `machine` with one Codex session.
+    fn publish_for(dir: &Path, machine: &MachineInfo, session_id: &str) -> SyncFile {
+        let settings = settings_for(dir, machine.clone(), &[]);
+        let file = build_sync_file(
+            machine,
+            &usage_export(),
+            &catalog_of(vec![session(Harness::Codex, session_id, "/work/app", 5)]),
+            true,
+            100,
+        );
+        publish(&settings, &file).expect("publish peer file");
+        file
+    }
+
+    const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const ID_C: &str = "cccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn peers_are_read_except_ourselves_and_ignored_machines() {
+        let share = make_temp_dir("peers");
+        let ours = machine_with(ID_A, "pc-a", 540);
+        publish_for(&share, &ours, "a1");
+        publish_for(&share, &machine_with(ID_B, "pc-b", 540), "b1");
+        publish_for(&share, &machine_with(ID_C, "Laptop", 540), "c1");
+        // Files that are not sync files are left alone.
+        std::fs::write(share.join("notes.txt"), "hello").expect("write notes");
+        std::fs::write(share.join(".llmon-sync-xyz.json.tmp-1"), "partial").expect("write temp");
+
+        let mut cache = PeerCache::default();
+        let all = read_peers(&settings_for(&share, ours.clone(), &[]), &mut cache).expect("scan");
+        let names: Vec<&str> = all.peers.iter().map(|p| p.machine.name.as_str()).collect();
+        assert_eq!(names, vec!["Laptop", "pc-b"], "sorted, without ourselves");
+        assert!(all.problems.is_empty(), "{:?}", all.problems);
+        assert_eq!(all.peers[1].sessions["codex"][0].id, "b1");
+        assert_eq!(
+            all.peers[1].sessions["codex"][0].title.as_deref(),
+            Some("secret prompt of b1"),
+            "a peer that shares titles"
+        );
+
+        // Ignored by name (any case) or by id.
+        let by_name =
+            read_peers(&settings_for(&share, ours.clone(), &["LAPTOP"]), &mut cache).expect("scan");
+        assert_eq!(by_name.peers.len(), 1);
+        assert_eq!(by_name.peers[0].machine.name, "pc-b");
+        let by_id =
+            read_peers(&settings_for(&share, ours, &[ID_B, " laptop "]), &mut cache).expect("scan");
+        assert!(by_id.peers.is_empty());
+
+        // A folder that is gone is an error, not an empty list.
+        let _ = std::fs::remove_dir_all(&share);
+        let gone = read_peers(
+            &settings_for(&share, machine_with(ID_A, "pc-a", 540), &[]),
+            &mut cache,
+        );
+        assert!(gone.is_err());
+    }
+
+    #[test]
+    fn bad_peer_files_are_skipped_with_a_reason() {
+        let share = make_temp_dir("bad-peers");
+        let name = |id: &str| share.join(sync_file_name(id));
+        let valid = serde_json::to_value(build_sync_file(
+            &machine_with(ID_B, "pc-b", 0),
+            &usage_export(),
+            &catalog_of(Vec::new()),
+            false,
+            1,
+        ))
+        .expect("encode");
+        let with = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut value = valid.clone();
+            change(&mut value);
+            serde_json::to_vec(&value).expect("encode")
+        };
+        std::fs::write(name(ID_B), "{ this is not json").expect("write");
+        std::fs::write(
+            name(ID_C),
+            with(&|value| value["format"] = serde_json::json!("something-else")),
+        )
+        .expect("write");
+        let newer = "dddddddddddddddddddddddddddddddd";
+        std::fs::write(
+            name(newer),
+            with(&|value| {
+                value["version"] = serde_json::json!(99);
+                value["machine"]["id"] = serde_json::json!(newer);
+            }),
+        )
+        .expect("write");
+        let mismatch = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        std::fs::write(name(mismatch), with(&|_| {})).expect("write");
+        let bad_id = "not-hex-at-all-but-long-enough";
+        std::fs::write(
+            name(bad_id),
+            with(&|value| value["machine"]["id"] = serde_json::json!(bad_id)),
+        )
+        .expect("write");
+        let huge = "ffffffffffffffffffffffffffffffff";
+        std::fs::File::create(name(huge))
+            .and_then(|file| file.set_len(MAX_SYNC_FILE_BYTES + 1))
+            .expect("sparse file");
+        #[cfg(unix)]
+        {
+            let target = share.join("target.json");
+            std::fs::write(&target, "{}").expect("write target");
+            let linked = "99999999999999999999999999999999";
+            std::os::unix::fs::symlink(&target, name(linked)).expect("symlink");
+        }
+
+        let ours = machine_with(ID_A, "pc-a", 0);
+        let scan =
+            read_peers(&settings_for(&share, ours, &[]), &mut PeerCache::default()).expect("scan");
+        assert!(scan.peers.is_empty(), "{:?}", scan.peers);
+        let problems = scan.problems.join("\n");
+        assert!(problems.contains("not a valid sync file"), "{problems}");
+        assert!(problems.contains("not an llmon sync file"), "{problems}");
+        assert!(problems.contains("is newer than this llmon"), "{problems}");
+        assert!(
+            problems.contains("does not match its machine id"),
+            "{problems}"
+        );
+        assert!(problems.contains("invalid machine id"), "{problems}");
+        assert!(problems.contains("larger than 64 MiB"), "{problems}");
+        #[cfg(unix)]
+        {
+            assert!(problems.contains("not a regular file"), "{problems}");
+            assert_eq!(scan.problems.len(), 7, "{problems}");
+        }
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn hostile_values_are_cleaned_before_they_reach_the_screen() {
+        let share = make_temp_dir("hostile");
+        let mut peer = build_sync_file(
+            &machine_with(ID_B, "pc\u{1b}[31m-b\nnext", 99_999),
+            &usage_export(),
+            &catalog_of(vec![
+                session(Harness::Codex, "ok", "/work/app", 5),
+                session(Harness::Codex, "", "/work/app", 6),
+            ]),
+            true,
+            -5,
+        );
+        let ok = peer
+            .sessions
+            .get_mut("codex")
+            .expect("sessions")
+            .iter_mut()
+            .find(|session| session.id == "ok")
+            .expect("session ok");
+        ok.title = Some("line one\r\nline\u{7} two".to_string());
+        ok.tokens = Some(-9);
+        let group = &mut peer.usage.get_mut("codex").expect("usage")[0];
+        group.cwd = Some("/work/\u{1b}]0;title\u{7}app".to_string());
+        group
+            .daily
+            .insert("L:not-a-day".to_string(), Default::default());
+        group.daily.insert(
+            "U:2026-09-02".to_string(),
+            crate::usage::DailyTotals {
+                tokens: TokenBreakdown {
+                    input: -5,
+                    output: 7,
+                    ..Default::default()
+                },
+                agent_ms: -1,
+                agent_runs: 2,
+            },
+        );
+        group.models.insert("junk".to_string(), BTreeMap::new());
+        group
+            .models
+            .get_mut("U:2026-09-01")
+            .expect("day")
+            .insert("bad\u{1b}model".to_string(), TokenBreakdown::default());
+        peer.usage.insert("unknown-harness".to_string(), Vec::new());
+        publish(&settings_for(&share, peer.machine.clone(), &[]), &peer).expect("publish");
+
+        let scan = read_peers(
+            &settings_for(&share, machine_with(ID_A, "pc-a", 0), &[]),
+            &mut PeerCache::default(),
+        )
+        .expect("scan");
+        let file = &scan.peers[0];
+        assert_eq!(file.machine.name, "pc[31m-bnext");
+        assert_eq!(file.machine.utc_offset_minutes, 14 * 60);
+        assert_eq!(file.generated_at, 0);
+        assert!(!file.usage.contains_key("unknown-harness"));
+        let group = &file.usage["codex"][0];
+        assert_eq!(group.cwd.as_deref(), Some("/work/]0;titleapp"));
+        assert!(!group.daily.contains_key("L:not-a-day"));
+        let day = group.daily["U:2026-09-02"];
+        assert_eq!((day.tokens.input, day.tokens.output), (0, 7));
+        assert_eq!((day.agent_ms, day.agent_runs), (0, 2));
+        assert!(!group.models.contains_key("junk"));
+        assert!(group.models["U:2026-09-01"].contains_key("badmodel"));
+        let sessions = &file.sessions["codex"];
+        assert_eq!(sessions.len(), 1, "a session without an id is dropped");
+        assert_eq!(sessions[0].tokens, Some(0));
+        assert_eq!(sessions[0].title.as_deref(), Some("line oneline two"));
+    }
+
+    #[test]
+    fn unchanged_peer_files_are_not_read_again() {
+        let share = make_temp_dir("cache");
+        let peer = machine_with(ID_B, "pc-b", 0);
+        publish_for(&share, &peer, "b1");
+        let settings = settings_for(&share, machine_with(ID_A, "pc-a", 0), &[]);
+        let mut cache = PeerCache::default();
+
+        let first = read_peers(&settings, &mut cache).expect("scan");
+        let second = read_peers(&settings, &mut cache).expect("scan");
+        assert!(second.unchanged_from(&first));
+        assert!(Arc::ptr_eq(&first.peers[0], &second.peers[0]));
+
+        // A rewritten file (here with another session id, so another size).
+        publish_for(&share, &peer, "a-longer-session-id");
+        let third = read_peers(&settings, &mut cache).expect("scan");
+        assert!(!third.unchanged_from(&second));
+        assert_eq!(
+            third.peers[0].sessions["codex"][0].id,
+            "a-longer-session-id"
+        );
+
+        // A deleted file leaves the cache and the list.
+        std::fs::remove_file(share.join(sync_file_name(ID_B))).expect("delete");
+        let fourth = read_peers(&settings, &mut cache).expect("scan");
+        assert!(fourth.peers.is_empty());
+        assert!(cache.entries.is_empty());
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn remote_usage_follows_the_peer_calendar() {
+        let share = make_temp_dir("calendar");
+        let mut peer = build_sync_file(
+            &machine_with(ID_B, "pc-b", 480),
+            &usage_export(),
+            &catalog_of(Vec::new()),
+            false,
+            1,
+        );
+        let group = &mut peer.usage.get_mut("codex").expect("usage")[0];
+        group
+            .daily
+            .insert("L:2026-09-01".to_string(), Default::default());
+        let peers = vec![Arc::new(peer)];
+        let _ = std::fs::remove_dir_all(share);
+
+        // Same time zone: both calendars are used as they are.
+        let same = remote_usage(&peers, Harness::Codex, 480);
+        assert_eq!(same.len(), 1);
+        assert!(same[0].daily_keys().contains(&"L:2026-09-01".to_string()));
+        // Another time zone: only UTC days, which stand in for local ones.
+        let other = remote_usage(&peers, Harness::Codex, 540);
+        let keys = other[0].daily_keys();
+        assert!(keys.contains(&"U:2026-09-01".to_string()), "{keys:?}");
+        assert!(keys.contains(&"L:2026-09-01".to_string()), "{keys:?}");
+        assert_eq!(
+            other[0].model_keys(),
+            vec!["L:2026-09-01".to_string(), "U:2026-09-01".to_string()]
+        );
+        // A harness the peer has no usage for.
+        assert!(remote_usage(&peers, Harness::Claude, 480).is_empty());
     }
 }

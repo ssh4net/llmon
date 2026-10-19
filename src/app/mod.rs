@@ -341,6 +341,39 @@ impl HarnessView {
     }
 }
 
+/// Whose usage the screens show in distributed mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MachineScope {
+    /// This machine plus the other machines of the sync folder.
+    #[default]
+    All,
+    ThisPc,
+}
+
+impl MachineScope {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::All => Self::ThisPc,
+            Self::ThisPc => Self::All,
+        }
+    }
+
+    fn store_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ThisPc => "this",
+        }
+    }
+
+    fn from_store(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "this" => Some(Self::ThisPc),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum BarFillMode {
     #[default]
@@ -421,6 +454,8 @@ enum AppEvent {
     },
     /// The sync file was written (bytes) or could not be.
     SyncPublished(Result<usize>),
+    /// The other machines' files were read, or the folder could not be.
+    PeersUpdated(Result<crate::sync::PeerScan>),
     HistoryCatalogProgress(crate::read::catalog::CatalogProgress),
     HistoryCatalogUpdated {
         strict: crate::read::scan::Catalog,
@@ -453,6 +488,7 @@ pub(crate) enum UiClickAction {
     SetModelsRange(DayRange),
     SetCostRange(DayRange),
     SelectCostProject(usize),
+    SetMachineScope(MachineScope),
     ToggleBarFillMode,
     SetHistoryProjectMode(crate::read::catalog::ProjectViewMode),
     ConfirmHistoryCatalogScan,
@@ -586,6 +622,13 @@ pub(crate) struct SyncState {
     last_queued_at: Option<Instant>,
     pub(crate) last_published_at: Option<Instant>,
     pub(crate) error: Option<String>,
+    /// The other machines, from the latest read of the sync folder.
+    pub(crate) peers: Vec<std::sync::Arc<crate::sync::SyncFile>>,
+    /// Files of the folder that were skipped, each with the reason.
+    pub(crate) problems: Vec<String>,
+    pub(crate) read_error: Option<String>,
+    /// Each harness's snapshot with the other machines' usage added.
+    usage_all: BTreeMap<Harness, std::sync::Arc<LocalUsageSnapshot>>,
 }
 
 impl std::fmt::Debug for SyncState {
@@ -598,7 +641,7 @@ impl std::fmt::Debug for SyncState {
 }
 
 impl SyncState {
-    fn new(
+    pub(crate) fn new(
         settings: crate::sync::SyncSettings,
         tx: watch::Sender<Option<std::sync::Arc<crate::sync::SyncFile>>>,
         expected_harnesses: usize,
@@ -613,6 +656,10 @@ impl SyncState {
             last_queued_at: None,
             last_published_at: None,
             error: None,
+            peers: Vec::new(),
+            problems: Vec::new(),
+            read_error: None,
+            usage_all: BTreeMap::new(),
         }
     }
 
@@ -661,6 +708,34 @@ fn queue_sync_publish(state: &mut AppState) {
     sync.dirty = false;
     sync.last_queued_at = Some(Instant::now());
     let _ = sync.tx.send(Some(std::sync::Arc::new(file)));
+}
+
+/// Builds each harness's snapshot again with the other machines' usage added,
+/// from what the local snapshot was built from: no log is read.
+pub(crate) fn refresh_merged_usage(state: &mut AppState) {
+    let Some(sync) = state.sync.as_mut() else {
+        return;
+    };
+    sync.usage_all.clear();
+    if sync.peers.is_empty() {
+        return;
+    }
+    let local_offset = chrono::Local::now().offset().local_minus_utc() / 60;
+    for harness in crate::harness::ALL_HARNESSES {
+        let local = match harness {
+            Harness::Codex => state.codex_usage.as_ref(),
+            Harness::Claude => state.claude_usage.as_ref(),
+        };
+        let Some(parts) = local.and_then(|snapshot| snapshot.parts.as_ref()) else {
+            continue;
+        };
+        let remote = crate::sync::remote_usage(&sync.peers, harness, local_offset);
+        if remote.is_empty() {
+            continue;
+        }
+        sync.usage_all
+            .insert(harness, std::sync::Arc::new(parts.build(&remote)));
+    }
 }
 
 #[derive(Debug)]
@@ -715,6 +790,7 @@ pub(crate) struct AppState {
     pub(crate) harness_view: HarnessView,
     /// Distributed mode; `None` unless the user opted in.
     pub(crate) sync: Option<SyncState>,
+    pub(crate) machine_scope: MachineScope,
     /// The selected chart of the combined USAGE view.
     pub(crate) usage_focus: Harness,
     pub(crate) models_range: DayRange,
@@ -760,6 +836,8 @@ const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 const IDLE_UI_TICK: Duration = Duration::from_secs(1);
 /// The sync file is rebuilt at most this often.
 const SYNC_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the sync folder is read for the other machines' files.
+const SYNC_POLL: Duration = Duration::from_secs(30);
 /// The first sync file waits for every harness's first snapshot, but not
 /// longer than this (a cold first scan can take a while).
 const SYNC_FIRST_WAIT: Duration = Duration::from_secs(90);
@@ -791,6 +869,7 @@ pub(crate) enum LimitResetButtonState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedUiState {
     harness_view: HarnessView,
+    machine_scope: MachineScope,
     usage_focus: Harness,
     models_range: DayRange,
     cost_range: DayRange,
@@ -820,6 +899,7 @@ impl PersistedUiState {
     fn default_for_workspace(workspace_path: Option<PathBuf>) -> Self {
         Self {
             harness_view: HarnessView::default(),
+            machine_scope: MachineScope::default(),
             usage_focus: Harness::Codex,
             models_range: DayRange::Last30Days,
             cost_range: DayRange::Last30Days,
@@ -849,6 +929,7 @@ impl PersistedUiState {
     fn from_app_state(state: &AppState) -> Self {
         Self {
             harness_view: state.harness_view,
+            machine_scope: state.machine_scope,
             usage_focus: state.usage_focus,
             models_range: state.models_range,
             cost_range: state.cost_range,
@@ -904,6 +985,7 @@ impl Default for StateStore {
 struct StoredGlobalState {
     #[serde(default)]
     harness_view: Option<String>,
+    machine_scope: Option<String>,
     usage_focus: Option<String>,
     models_range: Option<String>,
     cost_range: Option<String>,
@@ -1258,6 +1340,66 @@ async fn run_inner(
         SyncState::new(settings, tx, expected_harnesses)
     });
 
+    // Spawn the peers reader (distributed mode): it polls the sync folder
+    // for the other machines' files and reports when they changed.
+    if let Some(settings) = config.sync.clone() {
+        let evt_tx = evt_tx.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let cache =
+                std::sync::Arc::new(std::sync::Mutex::new(crate::sync::PeerCache::default()));
+            let mut last_scan: Option<crate::sync::PeerScan> = None;
+            let mut last_error: Option<String> = None;
+            loop {
+                let result = tokio::task::spawn_blocking({
+                    let settings = settings.clone();
+                    let cache = cache.clone();
+                    move || {
+                        let mut cache = cache
+                            .lock()
+                            .map_err(|_| anyhow!("the peer cache is unavailable"))?;
+                        crate::sync::read_peers(&settings, &mut cache)
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| Err(anyhow!("sync read task failed: {error}")));
+                // Report changes only; a recovery after an error is a change.
+                let report = match result {
+                    Ok(scan) => {
+                        let recovered = last_error.take().is_some();
+                        let changed = !last_scan
+                            .as_ref()
+                            .is_some_and(|previous| previous.unchanged_from(&scan));
+                        if recovered || changed {
+                            last_scan = Some(scan.clone());
+                            Some(Ok(scan))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(error) => {
+                        let text = format!("{error:#}");
+                        if last_error.as_deref() == Some(text.as_str()) {
+                            None
+                        } else {
+                            last_error = Some(text);
+                            Some(Err(error))
+                        }
+                    }
+                };
+                if let Some(report) = report {
+                    if evt_tx.send(AppEvent::PeersUpdated(report)).await.is_err() {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = tokio::time::sleep(SYNC_POLL) => {}
+                }
+            }
+        });
+    }
+
     // Spawn the Claude Code limits worker.
     {
         let evt_tx = evt_tx.clone();
@@ -1548,6 +1690,7 @@ async fn run_inner(
         ui_hit_targets: Vec::new(),
         harness_view: restored_ui_state.harness_view,
         sync: sync_state,
+        machine_scope: restored_ui_state.machine_scope,
         usage_focus: restored_ui_state.usage_focus,
         models_range: restored_ui_state.models_range,
         cost_range: restored_ui_state.cost_range,
@@ -2068,6 +2211,10 @@ fn handle_input_event(
                 state.display_style = state.display_style.toggled();
                 return Ok(InputOutcome::Continue(true));
             }
+            (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) if state.sync.is_some() => {
+                state.machine_scope = state.machine_scope.toggled();
+                return Ok(InputOutcome::Continue(true));
+            }
             (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => {
                 let harness = state.focused_harness();
                 let theme = state.harness_themes.get(harness).cycled();
@@ -2224,6 +2371,11 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
         UiClickAction::SetCostRange(range) => {
             let changed = state.cost_range != range;
             state.cost_range = range;
+            changed
+        }
+        UiClickAction::SetMachineScope(scope) => {
+            let changed = state.machine_scope != scope;
+            state.machine_scope = scope;
             changed
         }
         UiClickAction::SelectCostProject(index) => {
@@ -2882,6 +3034,21 @@ fn scroll_api_stat_periods(state: &mut AppState, amount: usize, older: bool) -> 
 
 fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
     match evt {
+        AppEvent::PeersUpdated(result) => {
+            if let Some(sync) = state.sync.as_mut() {
+                match result {
+                    Ok(scan) => {
+                        sync.peers = scan.peers;
+                        sync.problems = scan.problems;
+                        sync.read_error = None;
+                    }
+                    // The last machines read stay, next to the error.
+                    Err(error) => sync.read_error = Some(format!("{error:#}")),
+                }
+            }
+            refresh_merged_usage(state);
+            true
+        }
         AppEvent::SyncPublished(result) => {
             if let Some(sync) = state.sync.as_mut() {
                 match result {
@@ -2909,6 +3076,7 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
                     state.codex_usage = Some(std::sync::Arc::new(snapshot));
                     state.codex_usage_error = None;
                     state.codex_usage_updated_at = Some(Instant::now());
+                    refresh_merged_usage(state);
                 }
                 Err(err) => {
                     state.codex_usage_error = Some(err.to_string());
@@ -2925,6 +3093,7 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
                     state.claude_usage = Some(std::sync::Arc::new(snapshot));
                     state.claude_usage_error = None;
                     state.claude_usage_updated_at = Some(Instant::now());
+                    refresh_merged_usage(state);
                 }
                 Err(err) => {
                     state.claude_usage_error = Some(err.to_string());
@@ -3153,6 +3322,14 @@ fn load_persisted_ui_state_with_history_depth(
             state.bar_fill_mode = mode;
         }
     }
+    if let Some(scope) = store
+        .global
+        .machine_scope
+        .as_deref()
+        .and_then(MachineScope::from_store)
+    {
+        state.machine_scope = scope;
+    }
     if let Some(view_text) = store.global.harness_view.as_deref() {
         if let Some(view) = HarnessView::from_store(view_text) {
             state.harness_view = view;
@@ -3251,6 +3428,7 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.claude_accent_theme = Some(state.harness_themes.claude.store_value().to_string());
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
     store.global.harness_view = Some(state.harness_view.store_value().to_string());
+    store.global.machine_scope = Some(state.machine_scope.store_value().to_string());
     store.global.usage_focus = Some(state.usage_focus.key().to_string());
     store.global.models_range = Some(state.models_range.store_value().to_string());
     store.global.cost_range = Some(state.cost_range.store_value().to_string());
@@ -3484,6 +3662,7 @@ impl AppState {
             ui_hit_targets: Vec::new(),
             harness_view: defaults.harness_view,
             sync: None,
+            machine_scope: defaults.machine_scope,
             usage_focus: defaults.usage_focus,
             models_range: defaults.models_range,
             cost_range: defaults.cost_range,
@@ -3557,6 +3736,28 @@ impl AppState {
 
     pub(crate) fn harness_colors(&self, harness: Harness) -> (Color, Color) {
         self.harness_themes.get(harness).colors()
+    }
+
+    /// The usage snapshot of a harness for the selected machine scope: with
+    /// the other machines' usage added when the scope is all machines and
+    /// there are any, else this machine's alone.
+    pub(crate) fn usage_snapshot(
+        &self,
+        harness: Harness,
+    ) -> Option<std::sync::Arc<LocalUsageSnapshot>> {
+        if self.machine_scope == MachineScope::All {
+            if let Some(all) = self
+                .sync
+                .as_ref()
+                .and_then(|sync| sync.usage_all.get(&harness))
+            {
+                return Some(all.clone());
+            }
+        }
+        match harness {
+            Harness::Codex => self.codex_usage.clone(),
+            Harness::Claude => self.claude_usage.clone(),
+        }
     }
 
     pub(crate) fn usage_updated_label(&self, harness: crate::harness::Harness) -> Option<String> {
@@ -4129,6 +4330,65 @@ mod tests {
         let mut off = AppState::for_tests();
         assert!(off.sync.is_none());
         queue_sync_publish(&mut off);
+    }
+
+    #[test]
+    fn machine_scope_key_needs_distributed_mode_and_is_remembered() {
+        let (usage_tx, _usage_rx) = mpsc::channel::<()>(1);
+        let (limits_tx, _limits_rx) = mpsc::channel::<()>(1);
+        let (reset_tx, _reset_rx) = mpsc::channel::<String>(1);
+        let (catalog_tx, _catalog_rx) = mpsc::channel::<()>(1);
+        let home = make_temp_dir("machine-scope");
+        let press = |state: &mut AppState| {
+            handle_input_event(
+                state,
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char('m'),
+                    KeyModifiers::NONE,
+                )),
+                &usage_tx,
+                &limits_tx,
+                &reset_tx,
+                &catalog_tx,
+                &home,
+            )
+            .expect("handle key")
+        };
+
+        let mut state = AppState::for_tests();
+        assert_eq!(state.machine_scope, MachineScope::All);
+        let _ = press(&mut state);
+        assert_eq!(state.machine_scope, MachineScope::All, "off without opt-in");
+
+        let (tx, _rx) = watch::channel(None);
+        let settings = crate::sync::SyncSettings {
+            dir: PathBuf::from("/share"),
+            machine: crate::sync::MachineInfo {
+                id: "0123456789abcdef".to_string(),
+                name: "pc-a".to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.4".to_string(),
+                utc_offset_minutes: 0,
+            },
+            share_titles: false,
+            ignore: Vec::new(),
+        };
+        state.sync = Some(SyncState::new(settings, tx, 1));
+        let _ = press(&mut state);
+        assert_eq!(state.machine_scope, MachineScope::ThisPc);
+        assert!(apply_ui_click_action(
+            &mut state,
+            UiClickAction::SetMachineScope(MachineScope::All)
+        ));
+        assert_eq!(state.machine_scope, MachineScope::All);
+
+        // The choice survives a restart.
+        let mut persisted = PersistedUiState::from_app_state(&state);
+        persisted.machine_scope = MachineScope::ThisPc;
+        save_persisted_ui_state(&home, &persisted).expect("save");
+        let loaded = load_persisted_ui_state(&home, None).expect("load");
+        assert_eq!(loaded.machine_scope, MachineScope::ThisPc);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

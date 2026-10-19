@@ -332,6 +332,9 @@ pub struct LocalUsageSnapshot {
     /// This machine's usage for distributed mode; `None` unless asked for
     /// through `SyncOptions::export`.
     pub(crate) export: Option<Arc<UsageExport>>,
+    /// What this snapshot is built from, kept in distributed mode so it can
+    /// be built again with other machines' usage (`SnapshotParts::build`).
+    pub(crate) parts: Option<Arc<SnapshotParts>>,
     /// Tokens per model per day, over every cached day (not only the chart
     /// window), largest model first.
     pub model_daily: Vec<ModelDailyUsage>,
@@ -948,7 +951,8 @@ pub fn compute_snapshot(
 /// snapshot costs nothing extra unless the user opted in.
 #[derive(Debug, Clone, Default)]
 pub struct SyncOptions {
-    /// Also collect this machine's usage for the exchange (`export`).
+    /// Also collect this machine's usage for the exchange (`export`) and
+    /// keep what the snapshot is built from (`parts`).
     pub export: bool,
 }
 
@@ -1000,25 +1004,26 @@ pub fn compute_snapshot_with(
     );
 
     if !sessions_root.exists() {
-        let acc = sink.acc;
-        return Ok(build_snapshot(
-            summary_day_keys,
-            acc.daily,
-            acc.model_totals,
-            utc_summary_day_keys,
-            acc.utc_daily,
-            acc.utc_model_totals,
-            0,
-            activity_first_weekday,
-            activity_day_keys,
-            acc.project_activity,
-            Vec::new(),
-            acc.model_daily,
-            0,
-            0,
-            0,
-            0,
-        ));
+        // No logs on this machine: an empty snapshot, which in distributed
+        // mode still takes the other machines' usage.
+        let UsageSink { acc, export, .. } = sink;
+        let parts = SnapshotParts {
+            acc,
+            meta: PartsMeta {
+                workspace_path: workspace_path.map(Path::to_path_buf),
+                summary_day_keys,
+                utc_summary_day_keys,
+                activity_first_weekday,
+                activity_day_keys,
+                project_usage: Vec::new(),
+                scan_total_files: 0,
+                scan_indexed_files: 0,
+                scan_pending_files: 0,
+                scan_processed_bytes: 0,
+            },
+        };
+        let export = export.map(|builder| Arc::new(builder.finish(BTreeMap::new())));
+        return Ok(finish_snapshot(parts, export));
     }
 
     // Build a full candidate list (metadata-only).
@@ -1333,10 +1338,6 @@ pub fn compute_snapshot_with(
     }
 
     let UsageSink { acc, export, .. } = sink;
-    let chart_day_keys =
-        make_complete_chart_day_keys(&acc.daily, UsageZone::Local, &summary_day_keys);
-    let utc_chart_day_keys =
-        make_complete_chart_day_keys(&acc.utc_daily, UsageZone::Utc, &utc_summary_day_keys);
     let project_usage = build_project_usage_summaries(
         &candidates,
         &candidate_paths,
@@ -1345,27 +1346,35 @@ pub fn compute_snapshot_with(
     );
     let export =
         export.map(|builder| Arc::new(builder.finish(local_file_tokens(&scan_cache_store))));
+    let parts = SnapshotParts {
+        acc,
+        meta: PartsMeta {
+            workspace_path: workspace_path.map(Path::to_path_buf),
+            summary_day_keys,
+            utc_summary_day_keys,
+            activity_first_weekday,
+            activity_day_keys,
+            project_usage,
+            scan_total_files,
+            scan_indexed_files,
+            scan_pending_files,
+            scan_processed_bytes,
+        },
+    };
+    Ok(finish_snapshot(parts, export))
+}
 
-    let mut snapshot = build_snapshot(
-        chart_day_keys,
-        acc.daily,
-        acc.model_totals,
-        utc_chart_day_keys,
-        acc.utc_daily,
-        acc.utc_model_totals,
-        acc.matched_session_files,
-        activity_first_weekday,
-        activity_day_keys,
-        acc.project_activity,
-        project_usage,
-        acc.model_daily,
-        scan_total_files,
-        scan_indexed_files,
-        scan_pending_files,
-        scan_processed_bytes,
-    );
-    snapshot.export = export;
-    Ok(snapshot)
+/// The snapshot of this machine. In distributed mode (`export` is set) it
+/// also keeps what it is built from, so it can be built again with the other
+/// machines' usage.
+fn finish_snapshot(parts: SnapshotParts, export: Option<Arc<UsageExport>>) -> LocalUsageSnapshot {
+    let Some(export) = export else {
+        return parts.into_snapshot();
+    };
+    let mut snapshot = parts.build(&[]);
+    snapshot.export = Some(export);
+    snapshot.parts = Some(Arc::new(parts));
+    snapshot
 }
 
 /// Moves cache rows of deleted logs into the archive, drops archive rows of
@@ -1535,6 +1544,7 @@ fn build_snapshot(
         project_activity: build_project_activity(activity_day_keys, project_activity),
         project_usage,
         export: None,
+        parts: None,
         model_daily: model_daily.local,
         utc_model_daily: model_daily.utc,
         project_model_daily: model_daily.local_projects,
@@ -1832,6 +1842,153 @@ pub(crate) fn add_model_tokens_limited(
             .entry("other".to_string())
             .or_default()
             .add(tokens);
+    }
+}
+
+/// Everything but the usage totals that a snapshot is built from.
+struct PartsMeta {
+    workspace_path: Option<PathBuf>,
+    summary_day_keys: Vec<String>,
+    utc_summary_day_keys: Vec<String>,
+    activity_first_weekday: Weekday,
+    activity_day_keys: Vec<String>,
+    project_usage: Vec<ProjectUsageSummary>,
+    scan_total_files: usize,
+    scan_indexed_files: usize,
+    scan_pending_files: usize,
+    scan_processed_bytes: u64,
+}
+
+/// What a snapshot is built from: this machine's usage and the scan state.
+/// It is kept (in distributed mode only) so the same snapshot can be built
+/// again with usage from other machines, without scanning the logs.
+pub(crate) struct SnapshotParts {
+    acc: UsageAccumulator,
+    meta: PartsMeta,
+}
+
+impl std::fmt::Debug for SnapshotParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotParts").finish_non_exhaustive()
+    }
+}
+
+impl SnapshotParts {
+    /// The snapshot of this machine alone.
+    fn into_snapshot(self) -> LocalUsageSnapshot {
+        self.meta.assemble(self.acc)
+    }
+
+    /// A snapshot with other machines' usage added to this machine's.
+    pub(crate) fn build(&self, remote: &[RemoteUsage]) -> LocalUsageSnapshot {
+        let mut acc = self.acc.clone();
+        let filters = UsageFilters {
+            workspace_path: self.meta.workspace_path.as_deref(),
+            summary_days: self.meta.summary_day_keys.iter().cloned().collect(),
+            utc_summary_days: self.meta.utc_summary_day_keys.iter().cloned().collect(),
+        };
+        for usage in remote {
+            acc.apply(usage.usage(), &filters);
+        }
+        self.meta.assemble(acc)
+    }
+}
+
+impl PartsMeta {
+    fn assemble(&self, acc: UsageAccumulator) -> LocalUsageSnapshot {
+        let chart_day_keys =
+            make_complete_chart_day_keys(&acc.daily, UsageZone::Local, &self.summary_day_keys);
+        let utc_chart_day_keys = make_complete_chart_day_keys(
+            &acc.utc_daily,
+            UsageZone::Utc,
+            &self.utc_summary_day_keys,
+        );
+        build_snapshot(
+            chart_day_keys,
+            acc.daily,
+            acc.model_totals,
+            utc_chart_day_keys,
+            acc.utc_daily,
+            acc.utc_model_totals,
+            acc.matched_session_files,
+            self.activity_first_weekday,
+            self.activity_day_keys.clone(),
+            acc.project_activity,
+            self.project_usage.clone(),
+            acc.model_daily,
+            self.scan_total_files,
+            self.scan_indexed_files,
+            self.scan_pending_files,
+            self.scan_processed_bytes,
+        )
+    }
+}
+
+/// One project's usage on another machine, applied like a log file's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteUsage {
+    cwd: Option<String>,
+    daily: HashMap<String, DailyTotals>,
+    model_totals_by_day: HashMap<String, HashMap<String, TokenBreakdown>>,
+}
+
+impl RemoteUsage {
+    /// `same_calendar` is false when the machine's local calendar is in
+    /// another time zone than ours: its UTC days then stand in for its local
+    /// days, since the local ones would land on the wrong dates.
+    pub(crate) fn from_export(group: &ExportGroup, same_calendar: bool) -> Self {
+        let keep = |key: &str| -> Vec<String> {
+            if same_calendar {
+                return vec![key.to_string()];
+            }
+            match key.strip_prefix("U:") {
+                Some(day) => vec![key.to_string(), format!("L:{day}")],
+                None => Vec::new(),
+            }
+        };
+        let mut daily = HashMap::new();
+        for (key, totals) in &group.daily {
+            for key in keep(key) {
+                daily.insert(key, *totals);
+            }
+        }
+        let mut model_totals_by_day = HashMap::new();
+        for (key, models) in &group.models {
+            let models: HashMap<String, TokenBreakdown> = models
+                .iter()
+                .map(|(model, tokens)| (model.clone(), *tokens))
+                .collect();
+            for key in keep(key) {
+                model_totals_by_day.insert(key, models.clone());
+            }
+        }
+        Self {
+            cwd: group.cwd.clone(),
+            daily,
+            model_totals_by_day,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn daily_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.daily.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[cfg(test)]
+    pub(crate) fn model_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.model_totals_by_day.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    fn usage(&self) -> FileUsageRef<'_> {
+        FileUsageRef {
+            session_cwd: self.cwd.as_deref(),
+            daily: &self.daily,
+            model_totals_by_day: &self.model_totals_by_day,
+        }
     }
 }
 
@@ -4537,6 +4694,180 @@ mod tests {
         assert_eq!(app.agent_runs, 3);
         assert_eq!(app.last_activity_day.as_deref(), Some("2026-09-02"));
         assert!(merge_project_activity(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_is_rebuilt_with_other_machines_usage() {
+        let root = make_temp_dir("peers-usage");
+        let codex_home = root.join("codex");
+        let sessions_root = codex_home.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let now_ms = Utc::now().timestamp_millis();
+        let path = sessions_root.join("local.jsonl");
+        append_session_meta_line(&path, now_ms - 60_000, "/outside/alpha");
+        append_total_token_line(&path, now_ms - 50_000, 1_000, 600, 100);
+
+        let compute = |export: bool| {
+            compute_snapshot_with(
+                Harness::Codex,
+                30,
+                &codex_home,
+                None,
+                default_test_limits(false),
+                None,
+                &SyncOptions { export },
+            )
+            .expect("snapshot")
+        };
+        // Without opt-in nothing extra is collected or kept.
+        let plain = compute(false);
+        assert!(plain.export.is_none() && plain.parts.is_none());
+        assert_eq!(plain.totals.last30_days_tokens, 1_100);
+
+        let local = compute(true);
+        assert_eq!(local.totals.last30_days_tokens, 1_100);
+        let parts = local
+            .parts
+            .clone()
+            .expect("parts are kept in distributed mode");
+        let export = local.export.clone().expect("export");
+        assert_eq!(export.groups.len(), 1);
+        assert_eq!(export.groups[0].cwd.as_deref(), Some("/outside/alpha"));
+
+        // Another machine used a different project and a different model.
+        let day_key = |zone| cache_day_key_for_timestamp_ms(now_ms, zone).expect("day key");
+        let tokens = TokenBreakdown {
+            input: 400,
+            cache_read: 100,
+            output: 50,
+            ..TokenBreakdown::default()
+        };
+        let remote_group = ExportGroup {
+            cwd: Some("/other/beta".to_string()),
+            daily: [UsageZone::Local, UsageZone::Utc]
+                .into_iter()
+                .map(|zone| {
+                    (
+                        day_key(zone),
+                        DailyTotals {
+                            tokens,
+                            agent_ms: 5_000,
+                            agent_runs: 2,
+                        },
+                    )
+                })
+                .collect(),
+            models: [UsageZone::Local, UsageZone::Utc]
+                .into_iter()
+                .map(|zone| {
+                    (
+                        day_key(zone),
+                        BTreeMap::from([("remote-model".to_string(), tokens)]),
+                    )
+                })
+                .collect(),
+        };
+        let remote = [RemoteUsage::from_export(&remote_group, true)];
+        let merged = parts.build(&remote);
+        assert_eq!(merged.totals.last30_days_tokens, 1_100 + 550);
+        assert_eq!(merged.utc_totals.last30_days_tokens, 1_100 + 550);
+        let models: Vec<&str> = merged
+            .model_daily
+            .iter()
+            .map(|series| series.model.as_str())
+            .collect();
+        assert!(
+            models.contains(&"gpt-test") && models.contains(&"remote-model"),
+            "{models:?}"
+        );
+        let projects: Vec<&str> = merged
+            .project_activity
+            .iter()
+            .map(|project| project.display_path.as_str())
+            .collect();
+        assert!(
+            projects.contains(&"/outside/alpha") && projects.contains(&"/other/beta"),
+            "{projects:?}"
+        );
+        let local_runs = local.days.last().expect("today").agent_runs;
+        let today = merged.days.last().expect("today");
+        assert_eq!(
+            today.agent_runs,
+            local_runs + 2,
+            "the remote runs are added"
+        );
+        assert_eq!(
+            today.agent_time_ms,
+            local.days.last().expect("today").agent_time_ms + 5_000
+        );
+
+        // The local snapshot, its export, and a rebuild without remote usage
+        // are unchanged: peers' usage is never echoed back.
+        assert_eq!(local.totals.last30_days_tokens, 1_100);
+        assert_eq!(local.export.as_deref(), Some(&*export));
+        assert_eq!(parts.build(&[]).totals.last30_days_tokens, 1_100);
+        assert!(
+            merged.parts.is_none(),
+            "a merged snapshot is not merged again"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_machine_without_logs_still_takes_other_machines_usage() {
+        // A PC that has only one of the tools has no log folder for the other.
+        let root = make_temp_dir("no-logs-peers");
+        let home = root.join("claude-never-used");
+        let snapshot = compute_snapshot_with(
+            Harness::Claude,
+            30,
+            &home,
+            None,
+            default_test_limits(false),
+            None,
+            &SyncOptions { export: true },
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.totals.last30_days_tokens, 0);
+        assert!(snapshot
+            .export
+            .as_ref()
+            .is_some_and(|export| export.groups.is_empty()));
+        let parts = snapshot.parts.clone().expect("parts for an empty snapshot");
+
+        let now_ms = Utc::now().timestamp_millis();
+        let day_key = |zone| cache_day_key_for_timestamp_ms(now_ms, zone).expect("day key");
+        let tokens = TokenBreakdown {
+            output: 70,
+            ..TokenBreakdown::default()
+        };
+        let group = ExportGroup {
+            cwd: Some("/other/beta".to_string()),
+            daily: BTreeMap::from([(
+                day_key(UsageZone::Utc),
+                DailyTotals {
+                    tokens,
+                    ..DailyTotals::default()
+                },
+            )]),
+            models: BTreeMap::new(),
+        };
+        let merged = parts.build(&[RemoteUsage::from_export(&group, true)]);
+        assert_eq!(merged.utc_totals.last30_days_tokens, 70);
+
+        // Without opt-in the empty snapshot keeps nothing.
+        let plain = compute_snapshot(
+            Harness::Claude,
+            30,
+            &home,
+            None,
+            default_test_limits(false),
+            None,
+        )
+        .expect("snapshot");
+        assert!(plain.parts.is_none() && plain.export.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

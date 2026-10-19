@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.4
+
+- Distributed mode, second part (opt-in): llmon reads the other machines'
+  files from the sync folder and adds their usage to USAGE, MODELS, COST,
+  and ACTIVITY. `ALL PCS (n)` / `THIS PC` pills in the header and the `m` key
+  choose whose usage is shown. Other machines' files are validated and
+  cleaned, and a bad one is reported in the footer instead of breaking
+  anything. A machine with no log folder of one tool still shows the other
+  machines' usage of it.
+
 ## 0.5.3
 
 - Distributed mode, first part (opt-in): with a sync folder set (`sync.dir`

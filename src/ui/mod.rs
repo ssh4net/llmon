@@ -4,7 +4,7 @@ mod models;
 use crate::app::HarnessView;
 use crate::app::{
     AccentTheme, ActiveScreen, ApiStatGraph, ApiStatGrouping, AppState, BarFillMode,
-    ChartOrientation, DayRange, LimitResetButtonState, UiClickAction, UiHitTarget,
+    ChartOrientation, DayRange, LimitResetButtonState, MachineScope, UiClickAction, UiHitTarget,
 };
 use crate::harness::Harness;
 use crate::locale::{DisplayFormatter, DisplayStyle};
@@ -193,7 +193,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             render_footer(frame, chunks[2], state);
 
             if state.show_help {
-                render_help_overlay(frame, area, state.active_screen);
+                render_help_overlay(frame, area, state.active_screen, state.sync.is_some());
             }
             if state.no_sessions_confirm_open {
                 render_no_sessions_overlay(frame, area, state);
@@ -216,7 +216,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             render_footer(frame, chunks[2], state);
 
             if state.show_help {
-                render_help_overlay(frame, area, screen);
+                render_help_overlay(frame, area, screen, state.sync.is_some());
             }
         }
         ActiveScreen::Activity => {
@@ -235,7 +235,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             render_footer(frame, chunks[2], state);
 
             if state.show_help {
-                render_help_overlay(frame, area, state.active_screen);
+                render_help_overlay(frame, area, state.active_screen, state.sync.is_some());
             }
         }
         ActiveScreen::ApiStat => {
@@ -247,7 +247,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             render_footer(frame, chunks[2], state);
 
             if state.show_help {
-                render_help_overlay(frame, area, state.active_screen);
+                render_help_overlay(frame, area, state.active_screen, state.sync.is_some());
             }
         }
         ActiveScreen::LimitResets => {
@@ -266,7 +266,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             render_footer(frame, chunks[2], state);
 
             if state.show_help {
-                render_help_overlay(frame, area, state.active_screen);
+                render_help_overlay(frame, area, state.active_screen, state.sync.is_some());
             }
         }
         ActiveScreen::Read => {
@@ -288,7 +288,7 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             );
             render_history_style_controls(frame, inner, state);
             let (x, y, right) = crate::read::tui::history_title_end(inner);
-            render_harness_pills(frame, state, x, y, right);
+            let _ = render_harness_pills(frame, state, x, y, right);
         }
     }
 
@@ -414,7 +414,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
 
 /// The clickable COMBINED / CODEX / CLAUDE pills from column `x` of row
 /// `y`; pills that would pass `right` get no click target.
-fn render_harness_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: u16, right: u16) {
+fn render_harness_pills(
+    frame: &mut Frame<'_>,
+    state: &mut AppState,
+    x: u16,
+    y: u16,
+    right: u16,
+) -> u16 {
     let views = [
         ("COMBINED", HarnessView::Combined),
         ("CODEX", HarnessView::Codex),
@@ -437,6 +443,41 @@ fn render_harness_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: 
     }
     let area = Rect::new(x, y, right.saturating_sub(x), 1);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    next_x
+}
+
+/// In distributed mode, with other machines in the sync folder: the ALL PCS /
+/// THIS PC pills, which choose whose usage the screens show.
+fn render_machine_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: u16, right: u16) {
+    let Some(sync) = state.sync.as_ref().filter(|sync| !sync.peers.is_empty()) else {
+        return;
+    };
+    let all_label = format!("ALL PCS ({})", sync.peers.len() + 1);
+    let pills = [
+        (all_label.as_str(), MachineScope::All),
+        ("THIS PC", MachineScope::ThisPc),
+    ];
+    let mut spans = vec![Span::raw("  ")];
+    let mut next_x = x.saturating_add(2);
+    let mut targets = Vec::new();
+    for (label, scope) in pills {
+        let span = pill(label, state.machine_scope == scope);
+        let width =
+            u16::try_from(UnicodeWidthStr::width(span.content.as_ref())).unwrap_or(u16::MAX);
+        if next_x.saturating_add(width) <= right {
+            targets.push(UiHitTarget {
+                area: Rect::new(next_x, y, width, 1),
+                action: UiClickAction::SetMachineScope(scope),
+            });
+        } else {
+            break;
+        }
+        next_x = next_x.saturating_add(width);
+        spans.push(span);
+    }
+    state.ui_hit_targets.extend(targets);
+    let area = Rect::new(x, y, right.saturating_sub(x), 1);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Screen title, the COMBINED / CODEX / CLAUDE pills, and the scan status.
@@ -457,13 +498,9 @@ fn render_harness_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
     let title_end = row[0]
         .x
         .saturating_add(u16::try_from(UnicodeWidthStr::width(title)).unwrap_or(u16::MAX));
-    render_harness_pills(
-        frame,
-        state,
-        title_end,
-        row[0].y,
-        row[0].x.saturating_add(row[0].width),
-    );
+    let left_right = row[0].x.saturating_add(row[0].width);
+    let pills_end = render_harness_pills(frame, state, title_end, row[0].y, left_right);
+    render_machine_pills(frame, state, pills_end, row[0].y, left_right);
 
     let updated = match usage_view_harness(state.harness_view) {
         Some(harness) => usage_scan_status_label(state, harness),
@@ -2122,15 +2159,36 @@ fn footer_error(state: &AppState) -> String {
     if !err.is_empty() {
         return truncate_middle(err, 80);
     }
-    match state.sync.as_ref().and_then(|sync| sync.error.as_deref()) {
+    let sync_error = state.sync.as_ref().and_then(|sync| {
+        sync.error
+            .as_deref()
+            .or(sync.read_error.as_deref())
+            .or_else(|| sync.problems.first().map(String::as_str))
+    });
+    match sync_error {
         Some(error) => truncate_middle(&format!("Sync: {error}"), 100),
         None => String::new(),
     }
 }
 
+/// The style hint, and in distributed mode the machine scope hint.
+fn footer_style_text(state: &AppState) -> String {
+    let style = format!("Style [n]: {}", state.formatter().style_label());
+    match state.sync.as_ref() {
+        Some(_) => {
+            let scope = match state.machine_scope {
+                MachineScope::All => "all",
+                MachineScope::ThisPc => "this",
+            };
+            format!("{style}  PCs [m]: {scope}")
+        }
+        None => style,
+    }
+}
+
 fn footer_text(state: &AppState) -> String {
     let hint = footer_hint(state.active_screen);
-    let style = format!("Style [n]: {}", state.formatter().style_label());
+    let style = footer_style_text(state);
     let err = footer_error(state);
     if err.is_empty() {
         format!("{hint}  {style}")
@@ -2145,7 +2203,7 @@ fn footer_height(width: u16, state: &AppState) -> u16 {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let err = footer_error(state);
-    let style = format!("Style [n]: {}", state.formatter().style_label());
+    let style = footer_style_text(state);
     let line = Line::from(vec![
         Span::styled(
             footer_hint(state.active_screen),
@@ -2354,10 +2412,7 @@ struct UsagePanel {
 fn usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
     UsagePanel {
         harness,
-        snapshot: match harness {
-            Harness::Codex => state.codex_usage.clone(),
-            Harness::Claude => state.claude_usage.clone(),
-        },
+        snapshot: state.usage_snapshot(harness),
         label: None,
     }
 }
@@ -2386,11 +2441,9 @@ fn view_snapshots(state: &AppState) -> Vec<(Harness, Arc<crate::usage::LocalUsag
     view_harnesses(state.harness_view)
         .iter()
         .filter_map(|harness| {
-            let snapshot = match harness {
-                Harness::Codex => state.codex_usage.clone(),
-                Harness::Claude => state.claude_usage.clone(),
-            };
-            snapshot.map(|snapshot| (*harness, snapshot))
+            state
+                .usage_snapshot(*harness)
+                .map(|snapshot| (*harness, snapshot))
         })
         .collect()
 }
@@ -6009,7 +6062,7 @@ fn render_top_models(
     }
 }
 
-fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) {
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen, sync: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -6105,6 +6158,24 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen) 
             Line::from("  q    - quit (confirm)"),
         ]),
     };
+    // Distributed mode adds the machine scope key, before the last lines.
+    let mut text = text;
+    if sync
+        && matches!(
+            screen,
+            ActiveScreen::Usage
+                | ActiveScreen::Models
+                | ActiveScreen::Cost
+                | ActiveScreen::Activity
+                | ActiveScreen::Read
+        )
+    {
+        let at = text.lines.len().saturating_sub(4).max(1);
+        text.lines.insert(
+            at,
+            Line::from("  m    - show all PCs or this PC (distributed mode)"),
+        );
+    }
     // The popup fits the text: borders and padding take five columns and
     // three rows. Lines wrap only on a narrow terminal.
     let line_widths: Vec<usize> = text.lines.iter().map(Line::width).collect();
@@ -8344,6 +8415,7 @@ mod tests {
             project_activity: Vec::new(),
             project_usage: Vec::new(),
             export: None,
+            parts: None,
             model_daily: Vec::new(),
             utc_model_daily: Vec::new(),
             project_model_daily: Vec::new(),
@@ -8357,6 +8429,11 @@ mod tests {
     }
 
     fn synthetic_codex_snapshot(days: i64) -> crate::usage::LocalUsageSnapshot {
+        synthetic_codex_snapshot_with(days, false)
+    }
+
+    /// `export` keeps what the snapshot is built from, as distributed mode does.
+    fn synthetic_codex_snapshot_with(days: i64, export: bool) -> crate::usage::LocalUsageSnapshot {
         let root = std::env::temp_dir().join(format!(
             "llmon-ui-codex-{}-{}",
             std::process::id(),
@@ -8400,13 +8477,14 @@ mod tests {
             let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
             std::fs::write(&path, body).expect("write session");
         }
-        let snapshot = crate::usage::compute_snapshot(
+        let snapshot = crate::usage::compute_snapshot_with(
             crate::harness::Harness::Codex,
             30,
             &root,
             None,
             crate::usage::ScanLimits::default(),
             None,
+            &crate::usage::SyncOptions { export },
         )
         .expect("synthetic snapshot");
         let _ = std::fs::remove_dir_all(root);
@@ -8976,6 +9054,154 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, vec![0, 1, 2, 3]);
+    }
+
+    /// Another machine's sync file with one Codex project used today.
+    fn peer_file(name: &str, id: &str, cwd: &str, tokens: i64) -> Arc<crate::sync::SyncFile> {
+        let now_ms = Utc::now().timestamp_millis();
+        let day =
+            |zone| crate::usage::cache_day_key_for_timestamp_ms(now_ms, zone).expect("day key");
+        let breakdown = crate::usage::TokenBreakdown {
+            input: tokens,
+            ..Default::default()
+        };
+        let group = crate::usage::ExportGroup {
+            cwd: Some(cwd.to_string()),
+            daily: [UsageZone::Local, UsageZone::Utc]
+                .into_iter()
+                .map(|zone| {
+                    (
+                        day(zone),
+                        crate::usage::DailyTotals {
+                            tokens: breakdown,
+                            agent_ms: 60_000,
+                            agent_runs: 1,
+                        },
+                    )
+                })
+                .collect(),
+            models: [UsageZone::Local, UsageZone::Utc]
+                .into_iter()
+                .map(|zone| {
+                    (
+                        day(zone),
+                        std::collections::BTreeMap::from([("peer-model".to_string(), breakdown)]),
+                    )
+                })
+                .collect(),
+        };
+        Arc::new(crate::sync::SyncFile {
+            format: crate::sync::SYNC_FORMAT.to_string(),
+            version: crate::sync::SYNC_VERSION,
+            machine: crate::sync::MachineInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.4".to_string(),
+                utc_offset_minutes: chrono::Local::now().offset().local_minus_utc() / 60,
+            },
+            generated_at: 1,
+            usage: std::collections::BTreeMap::from([("codex".to_string(), vec![group])]),
+            sessions: std::collections::BTreeMap::new(),
+        })
+    }
+
+    fn sync_state_with_peer() -> crate::app::SyncState {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let settings = crate::sync::SyncSettings {
+            dir: std::path::PathBuf::from("/share"),
+            machine: crate::sync::MachineInfo {
+                id: "00000000000000000000000000000000".to_string(),
+                name: "this-pc".to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.4".to_string(),
+                utc_offset_minutes: 0,
+            },
+            share_titles: false,
+            ignore: Vec::new(),
+        };
+        let mut sync = crate::app::SyncState::new(settings, tx, 1);
+        sync.peers = vec![peer_file(
+            "pc-b",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "/peer/only-project",
+            5_000_000,
+        )];
+        sync
+    }
+
+    #[test]
+    fn distributed_mode_shows_all_pcs_or_this_pc() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        state.harness_view = HarnessView::Codex;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot_with(20, true)));
+        let local_total = state
+            .codex_usage
+            .as_ref()
+            .expect("snapshot")
+            .totals
+            .last30_days_tokens;
+        state.sync = Some(sync_state_with_peer());
+        crate::app::refresh_merged_usage(&mut state);
+
+        let total = |state: &AppState| {
+            state
+                .usage_snapshot(Harness::Codex)
+                .expect("snapshot")
+                .totals
+                .last30_days_tokens
+        };
+        state.machine_scope = MachineScope::All;
+        assert_eq!(total(&state), local_total + 5_000_000);
+        state.machine_scope = MachineScope::ThisPc;
+        assert_eq!(total(&state), local_total);
+
+        // The header says whose usage it is and offers the switch.
+        state.machine_scope = MachineScope::All;
+        let text = render_screen_text(&mut state, 160, 45);
+        assert!(
+            text.contains("ALL PCS (2)") && text.contains("THIS PC"),
+            "{text}"
+        );
+        assert!(text.contains("PCs [m]: all"), "{text}");
+        let scopes: Vec<MachineScope> = state
+            .ui_hit_targets
+            .iter()
+            .filter_map(|target| match target.action {
+                UiClickAction::SetMachineScope(scope) => Some(scope),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scopes, vec![MachineScope::All, MachineScope::ThisPc]);
+
+        // COST lists the other machine's project; THIS PC leaves it out.
+        state.active_screen = ActiveScreen::Cost;
+        state.pricing = {
+            let mut overrides = crate::pricing::PricingOverrides::default();
+            overrides.codex.insert(
+                "peer-model".to_string(),
+                crate::pricing::PriceOverride {
+                    input: 1.0,
+                    output: 1.0,
+                    cache_read: None,
+                    cache_write_5m: None,
+                    cache_write_1h: None,
+                },
+            );
+            crate::pricing::Pricing::new(&overrides)
+        };
+        let all = render_screen_text(&mut state, 160, 45);
+        assert!(all.contains("/peer/only-project"), "{all}");
+        state.machine_scope = MachineScope::ThisPc;
+        let this = render_screen_text(&mut state, 160, 45);
+        assert!(!this.contains("/peer/only-project"), "{this}");
+
+        // Without distributed mode there are no pills and no hint.
+        let mut plain = AppState::for_tests();
+        plain.codex_usage = Some(Arc::new(synthetic_codex_snapshot(5)));
+        let plain_text = render_screen_text(&mut plain, 160, 45);
+        assert!(!plain_text.contains("ALL PCS") && !plain_text.contains("PCs [m]"));
     }
 
     #[test]

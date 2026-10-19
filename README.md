@@ -146,8 +146,17 @@ plus "(WSL)" under WSL). The machine id is a random value kept in
 files are skipped, for example a second llmon on this PC that reads the same
 logs, which would otherwise count them twice.
 
-Status: this version writes the file. Reading the other machines' files and
-showing them is coming in the next versions.
+Each llmon also reads the other machines' files (every 30 seconds) and adds
+their usage to USAGE, MODELS, COST, and ACTIVITY. The header then shows two
+pills, `ALL PCS (n)` and `THIS PC`; `m` (or a click) switches between them,
+and the choice is remembered. The other machines' projects appear in COST and
+ACTIVITY by their own paths. A machine whose local calendar is in another
+time zone is counted by its UTC days. Files from the other machines are
+untrusted input: they are size-limited, checked, and cleaned (no control
+characters, no negative numbers), and a bad file is skipped and named in the
+footer. A machine that is switched off keeps its last file, so its history
+stays visible. HISTORY will show the other machines' sessions in the next
+version.
 
 ## Run
 
