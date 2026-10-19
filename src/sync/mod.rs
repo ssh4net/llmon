@@ -19,7 +19,7 @@
 //!   `sync.share_titles` is on.
 
 use crate::harness::Harness;
-use crate::read::scan::Catalog;
+use crate::read::scan::{session_start_fields, Catalog, RemoteSession, SessionSummary};
 use crate::usage::{ExportGroup, RemoteUsage, UsageExport};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -637,6 +637,84 @@ fn sanitize_session(session: &mut ExportSession) {
     session.tokens = session.tokens.map(|tokens| tokens.max(0));
 }
 
+/// The other machines' sessions as session summaries for HISTORY. The log is
+/// not here, so `file_path` is only a unique key. A session that two machines
+/// report belongs to the one with the newer file.
+pub(crate) fn remote_sessions(peers: &[Arc<SyncFile>]) -> Vec<SessionSummary> {
+    let mut ordered: Vec<&Arc<SyncFile>> = peers.iter().collect();
+    ordered.sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    let mut seen: HashSet<(Harness, String)> = HashSet::new();
+    let mut sessions = Vec::new();
+    for peer in ordered {
+        for (key, exported) in &peer.sessions {
+            let Some(harness) = Harness::from_key(key) else {
+                continue;
+            };
+            for session in exported {
+                if seen.insert((harness, session.id.clone())) {
+                    sessions.push(remote_summary(peer, harness, session));
+                }
+            }
+        }
+    }
+    sessions
+}
+
+fn remote_summary(peer: &SyncFile, harness: Harness, session: &ExportSession) -> SessionSummary {
+    let file_path = PathBuf::from(format!(
+        "sync://{}/{}/{}",
+        peer.machine.id,
+        harness.key(),
+        session.id
+    ));
+    let (started_at_raw, started_at_label, started_at_sort_key_ms) =
+        session_start_fields(session.started_at.clone(), session.started_ms, &file_path);
+    // Without a recorded start the exported sort key is all there is.
+    let started_at_sort_key_ms = if started_at_raw.is_some() {
+        started_at_sort_key_ms
+    } else {
+        session.started_ms
+    };
+    // A title is shared only on request; otherwise name the session by what
+    // is not prompt text.
+    let title = session.title.clone().unwrap_or_else(|| {
+        let short: String = session.id.chars().take(8).collect();
+        let mut parts = vec![format!("Session {short}")];
+        parts.extend(session.branch.clone());
+        parts.extend(
+            session
+                .model
+                .as_deref()
+                .map(crate::usage::model_display_name),
+        );
+        parts.join(" | ")
+    });
+    SessionSummary {
+        harness,
+        file_path,
+        session_id: session.id.clone(),
+        cwd: session.cwd.clone(),
+        title,
+        started_at_raw,
+        started_at_label,
+        started_at_sort_key_ms,
+        git_branch: session.branch.clone(),
+        git_commit: session.commit.clone(),
+        repo_url: session.repo.clone(),
+        model_provider: session.provider.clone(),
+        client_version: session.client_version.clone(),
+        model: session.model.clone(),
+        subagent_files: Vec::new(),
+        remote: Some(RemoteSession {
+            machine_id: peer.machine.id.clone(),
+            machine_name: peer.machine.name.clone(),
+            os: peer.machine.os.clone(),
+            tokens: session.tokens,
+            subagents: session.subagents,
+        }),
+    }
+}
+
 /// The usage of the other machines for one harness, ready to be added to a
 /// snapshot. A machine whose local calendar is in another time zone than
 /// ours (`local_utc_offset_minutes`) is counted by its UTC days.
@@ -696,6 +774,7 @@ mod tests {
             client_version: None,
             model: Some("gpt-test".to_string()),
             subagent_files: Vec::new(),
+            remote: None,
         }
     }
 
@@ -1183,6 +1262,91 @@ mod tests {
         assert!(fourth.peers.is_empty());
         assert!(cache.entries.is_empty());
         let _ = std::fs::remove_dir_all(share);
+    }
+
+    fn exported_session(id: &str, started_ms: i64) -> ExportSession {
+        ExportSession {
+            id: id.to_string(),
+            cwd: "/peer/app".to_string(),
+            started_at: Some("2026-09-01T10:00:00Z".to_string()),
+            started_ms,
+            model: Some("claude-opus-5-5".to_string()),
+            provider: None,
+            client_version: Some("2.1".to_string()),
+            branch: Some("feature".to_string()),
+            commit: None,
+            repo: None,
+            title: None,
+            subagents: 2,
+            tokens: Some(1_234),
+        }
+    }
+
+    fn peer_with_sessions(
+        id: &str,
+        name: &str,
+        generated_at: i64,
+        sessions: Vec<ExportSession>,
+    ) -> Arc<SyncFile> {
+        let mut file = build_sync_file(
+            &machine_with(id, name, 0),
+            &BTreeMap::new(),
+            &catalog_of(Vec::new()),
+            false,
+            generated_at,
+        );
+        file.sessions.insert("claude".to_string(), sessions);
+        Arc::new(file)
+    }
+
+    #[test]
+    fn remote_sessions_become_session_summaries_without_a_log() {
+        let older = peer_with_sessions(
+            ID_B,
+            "pc-b",
+            10,
+            vec![
+                exported_session("s1-aaaaaaaa", 100),
+                exported_session("only-b-xxxx", 50),
+            ],
+        );
+        let mut titled = exported_session("s1-aaaaaaaa", 200);
+        titled.title = Some("shared title".to_string());
+        let newer = peer_with_sessions(ID_C, "pc-c", 20, vec![titled]);
+
+        let sessions = remote_sessions(&[older, newer]);
+        assert_eq!(
+            sessions.len(),
+            2,
+            "a session two machines report is listed once"
+        );
+        let shared = sessions
+            .iter()
+            .find(|session| session.session_id == "s1-aaaaaaaa")
+            .expect("shared session");
+        let remote = shared.remote.as_ref().expect("remote");
+        assert_eq!(
+            remote.machine_name, "pc-c",
+            "the machine with the newer file"
+        );
+        assert_eq!(shared.title, "shared title");
+        assert_eq!(
+            shared.file_path,
+            PathBuf::from(format!("sync://{ID_C}/claude/s1-aaaaaaaa"))
+        );
+        assert_eq!(shared.harness, Harness::Claude);
+        assert_eq!(shared.cwd, "/peer/app");
+        assert_eq!(shared.started_at_sort_key_ms, 200);
+        assert!(shared.subagent_files.is_empty());
+        assert_eq!((remote.tokens, remote.subagents), (Some(1_234), 2));
+
+        // Without a shared title the session is named by what is not prompt text.
+        let untitled = sessions
+            .iter()
+            .find(|session| session.session_id == "only-b-xxxx")
+            .expect("untitled");
+        assert_eq!(untitled.title, "Session only-b-x | feature | Opus 5.5");
+        assert!(sessions.iter().all(|session| session.remote.is_some()));
     }
 
     #[test]

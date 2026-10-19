@@ -4,7 +4,7 @@ use crate::usage::{normalize_project_key, TokenBreakdown};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -52,6 +52,19 @@ pub(crate) struct SessionSummary {
     pub(crate) model: Option<String>,
     /// Subagent transcripts of this session (Claude Code).
     pub(crate) subagent_files: Vec<PathBuf>,
+    /// Set for a session of another machine (distributed mode): its log is
+    /// not here, and `file_path` is only a unique key.
+    pub(crate) remote: Option<RemoteSession>,
+}
+
+/// Where a session from another machine lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteSession {
+    pub(crate) machine_id: String,
+    pub(crate) machine_name: String,
+    pub(crate) os: String,
+    pub(crate) tokens: Option<i64>,
+    pub(crate) subagents: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -178,6 +191,39 @@ pub(crate) fn merge_catalogs(catalogs: Vec<Catalog>) -> Catalog {
         projects: finish_project_builders(grouped),
         files_scanned,
         files_skipped,
+    }
+}
+
+/// `local` and the sessions of other machines as one catalog, grouped by
+/// project. A remote session that the local catalog has too (same harness and
+/// session id, for example synced logs) is left out.
+pub(crate) fn with_remote_sessions(local: &Catalog, remote: &[SessionSummary]) -> Catalog {
+    let known: HashSet<(Harness, &str)> = local
+        .projects
+        .iter()
+        .flat_map(|project| project.sessions.iter())
+        .map(|session| (session.harness, session.session_id.as_str()))
+        .collect();
+    let mut grouped: BTreeMap<String, ProjectBuilder> = BTreeMap::new();
+    let sessions = local
+        .projects
+        .iter()
+        .flat_map(|project| project.sessions.iter());
+    let extra = remote
+        .iter()
+        .filter(|session| !known.contains(&(session.harness, session.session_id.as_str())));
+    for session in sessions.chain(extra) {
+        grouped
+            .entry(normalize_project_key(&session.cwd))
+            .or_default()
+            .sessions
+            .push(session.clone());
+    }
+    Catalog {
+        sessions_dir: local.sessions_dir.clone(),
+        projects: finish_project_builders(grouped),
+        files_scanned: local.files_scanned,
+        files_skipped: local.files_skipped,
     }
 }
 
@@ -452,6 +498,100 @@ mod tests {
 
     fn write_session(path: &Path, body: &str) {
         std::fs::write(path, body).expect("write session");
+    }
+
+    fn summary(harness: Harness, id: &str, cwd: &str, started_ms: i64) -> SessionSummary {
+        SessionSummary {
+            harness,
+            file_path: PathBuf::from(format!("/logs/{id}.jsonl")),
+            session_id: id.to_string(),
+            cwd: cwd.to_string(),
+            title: id.to_string(),
+            started_at_raw: None,
+            started_at_label: "--".to_string(),
+            started_at_sort_key_ms: started_ms,
+            git_branch: None,
+            git_commit: None,
+            repo_url: None,
+            model_provider: None,
+            client_version: None,
+            model: None,
+            subagent_files: Vec::new(),
+            remote: None,
+        }
+    }
+
+    #[test]
+    fn remote_sessions_join_the_local_catalog_by_project() {
+        let local_catalog = catalog_with(vec![
+            summary(Harness::Codex, "local-1", "/work/app", 10),
+            summary(Harness::Codex, "both", "/work/app", 20),
+        ]);
+        let remote = |id: &str, cwd: &str, started_ms: i64| {
+            let mut session = summary(Harness::Codex, id, cwd, started_ms);
+            session.remote = Some(RemoteSession {
+                machine_id: "b".repeat(32),
+                machine_name: "pc-b".to_string(),
+                os: "Linux".to_string(),
+                tokens: Some(5),
+                subagents: 0,
+            });
+            session
+        };
+        let merged = with_remote_sessions(
+            &local_catalog,
+            &[
+                remote("remote-1", "/work/app/", 30),
+                remote("both", "/work/app", 40),
+                remote("elsewhere", "/work/other", 5),
+            ],
+        );
+        let paths: Vec<(String, Vec<&str>)> = merged
+            .projects
+            .iter()
+            .map(|project| {
+                (
+                    normalize_project_key(&project.display_path),
+                    project
+                        .sessions
+                        .iter()
+                        .map(|s| s.session_id.as_str())
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                ("/work/app".to_string(), vec!["remote-1", "both", "local-1"]),
+                ("/work/other".to_string(), vec!["elsewhere"]),
+            ],
+            "one project across machines; a session both have is listed once, as the local one"
+        );
+        let both = &merged.projects[0].sessions[1];
+        assert!(both.remote.is_none(), "the local copy wins");
+        assert_eq!(
+            local_catalog.projects[0].sessions.len(),
+            2,
+            "the input is untouched"
+        );
+    }
+
+    fn catalog_with(sessions: Vec<SessionSummary>) -> Catalog {
+        let mut grouped: BTreeMap<String, ProjectBuilder> = BTreeMap::new();
+        for session in sessions {
+            grouped
+                .entry(normalize_project_key(&session.cwd))
+                .or_default()
+                .sessions
+                .push(session);
+        }
+        Catalog {
+            sessions_dir: PathBuf::from("/logs"),
+            projects: finish_project_builders(grouped),
+            files_scanned: 0,
+            files_skipped: 0,
+        }
     }
 
     #[cfg(not(windows))]

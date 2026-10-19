@@ -274,6 +274,39 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             state
                 .read_browser
                 .set_harness_filter(usage_view_harness(state.harness_view));
+            // Distributed mode: the other machines' sessions are listed when
+            // the machine scope is all PCs.
+            let pills_extra = match state.sync.as_ref() {
+                Some(sync) => {
+                    state.read_browser.set_remote_view(
+                        &sync.remote_sessions,
+                        state.machine_scope == MachineScope::All,
+                        Some(&sync.settings.machine.name),
+                    );
+                    if sync.peers.is_empty() {
+                        0
+                    } else {
+                        machine_pills_width(sync.peers.len() + 1)
+                    }
+                }
+                None => {
+                    state.read_browser.clear_remote_view();
+                    0
+                }
+            };
+            state.read_browser.set_pills_extra(pills_extra);
+            // Project totals come from this machine's snapshots of the
+            // harnesses shown.
+            let usage_snapshots: Vec<Arc<crate::usage::LocalUsageSnapshot>> =
+                view_harnesses(state.harness_view)
+                    .iter()
+                    .filter_map(|harness| match harness {
+                        Harness::Codex => state.codex_usage.clone(),
+                        Harness::Claude => state.claude_usage.clone(),
+                    })
+                    .collect();
+            let usages: Vec<&crate::usage::LocalUsageSnapshot> =
+                usage_snapshots.iter().map(Arc::as_ref).collect();
             let system_locale = state.system_locale.clone();
             let formatter = DisplayFormatter::new(state.display_style, &system_locale);
             let accent_text_color = state.accent_text_color();
@@ -281,14 +314,18 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 frame,
                 inner,
                 &mut state.read_browser,
-                state.codex_usage.as_deref(),
-                state.codex_usage_error.as_deref(),
+                &usages,
+                state
+                    .codex_usage_error
+                    .as_deref()
+                    .or(state.claude_usage_error.as_deref()),
                 formatter,
                 accent_text_color,
             );
             render_history_style_controls(frame, inner, state);
-            let (x, y, right) = crate::read::tui::history_title_end(inner);
-            let _ = render_harness_pills(frame, state, x, y, right);
+            let (x, y, right) = crate::read::tui::history_title_end(inner, pills_extra);
+            let pills_end = render_harness_pills(frame, state, x, y, right);
+            render_machine_pills(frame, state, pills_end, y, right);
         }
     }
 
@@ -446,16 +483,32 @@ fn render_harness_pills(
     next_x
 }
 
+const MACHINE_THIS_LABEL: &str = "THIS PC";
+
+fn machine_all_label(machines: usize) -> String {
+    format!("ALL PCS ({machines})")
+}
+
+/// Columns the machine pills take after the harness pills.
+fn machine_pills_width(machines: usize) -> u16 {
+    let width = 2
+        + UnicodeWidthStr::width(machine_all_label(machines).as_str())
+        + 2
+        + UnicodeWidthStr::width(MACHINE_THIS_LABEL)
+        + 2;
+    u16::try_from(width).unwrap_or(u16::MAX)
+}
+
 /// In distributed mode, with other machines in the sync folder: the ALL PCS /
 /// THIS PC pills, which choose whose usage the screens show.
 fn render_machine_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: u16, right: u16) {
     let Some(sync) = state.sync.as_ref().filter(|sync| !sync.peers.is_empty()) else {
         return;
     };
-    let all_label = format!("ALL PCS ({})", sync.peers.len() + 1);
+    let all_label = machine_all_label(sync.peers.len() + 1);
     let pills = [
         (all_label.as_str(), MachineScope::All),
-        ("THIS PC", MachineScope::ThisPc),
+        (MACHINE_THIS_LABEL, MachineScope::ThisPc),
     ];
     let mut spans = vec![Span::raw("  ")];
     let mut next_x = x.saturating_add(2);
@@ -9202,6 +9255,139 @@ mod tests {
         plain.codex_usage = Some(Arc::new(synthetic_codex_snapshot(5)));
         let plain_text = render_screen_text(&mut plain, 160, 45);
         assert!(!plain_text.contains("ALL PCS") && !plain_text.contains("PCs [m]"));
+    }
+
+    #[test]
+    fn history_lists_sessions_of_other_machines_with_their_machine() {
+        use crate::read::scan::{Catalog, ProjectRecord, SessionSummary};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let local = SessionSummary {
+            harness: Harness::Codex,
+            file_path: std::path::PathBuf::from("/logs/local.jsonl"),
+            session_id: "local-session".to_string(),
+            cwd: "/work/app".to_string(),
+            title: "local title".to_string(),
+            started_at_raw: None,
+            started_at_label: "2026-09-01 10:00".to_string(),
+            started_at_sort_key_ms: 1_000,
+            git_branch: None,
+            git_commit: None,
+            repo_url: None,
+            model_provider: None,
+            client_version: None,
+            model: None,
+            subagent_files: Vec::new(),
+            remote: None,
+        };
+        let catalog = Catalog {
+            sessions_dir: std::path::PathBuf::from("/logs"),
+            projects: vec![ProjectRecord {
+                stable_id: "path:/work/app".to_string(),
+                logical_name: "app".to_string(),
+                display_path: "/work/app".to_string(),
+                checkouts: vec!["/work/app".to_string()],
+                sessions: vec![local],
+                owner_session_count: 1,
+                confidence: 100,
+                source_flags: crate::read::catalog::SOURCE_OWNER,
+                missing: false,
+            }],
+            files_scanned: 1,
+            files_skipped: 0,
+        };
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Read;
+        state.read_browser = crate::read::tui::BrowserState::new(catalog);
+        let mut sync = sync_state_with_peer();
+        let session = |id: &str, started_ms: i64| crate::sync::ExportSession {
+            id: id.to_string(),
+            cwd: "/work/app".to_string(),
+            started_at: Some("2026-09-02T10:00:00Z".to_string()),
+            started_ms,
+            model: Some("claude-opus-5-5".to_string()),
+            provider: None,
+            client_version: None,
+            branch: Some("feature".to_string()),
+            commit: None,
+            repo: None,
+            title: None,
+            subagents: 1,
+            tokens: Some(4_321),
+        };
+        let mut peer = (*sync.peers[0]).clone();
+        peer.sessions.insert(
+            "claude".to_string(),
+            vec![
+                session("remote-session-1", 3_000),
+                session("remote-session-2", 2_000),
+            ],
+        );
+        sync.peers = vec![Arc::new(peer)];
+        sync.remote_sessions = Arc::new(crate::sync::remote_sessions(&sync.peers));
+        state.sync = Some(sync);
+        let press = |state: &mut AppState, code: KeyCode| {
+            let _ = crate::read::tui::handle_event(
+                &mut state.read_browser,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        };
+
+        // The project list carries the pills and the machines of the project.
+        let projects = render_screen_text(&mut state, 160, 45);
+        assert!(projects.contains("ALL PCS (2)"), "{projects}");
+        assert!(
+            projects.contains("MACHINES  pc-b, this-pc (this PC)"),
+            "{projects}"
+        );
+        assert!(
+            projects.contains("OTHER_MACHINES  2 sessions / 8,642 tokens"),
+            "{projects}"
+        );
+
+        // The sessions of all machines, newest first, each with its machine.
+        press(&mut state, KeyCode::Enter);
+        let sessions = render_screen_text(&mut state, 160, 45);
+        let has_row = |machine_columns: &str, title: &str| {
+            sessions
+                .lines()
+                .any(|line| line.contains(machine_columns) && line.contains(title))
+        };
+        assert!(has_row("claude  pc-b", "Session remote-s"), "{sessions}");
+        assert!(has_row("codex   this-pc", "local title"), "{sessions}");
+        // The first (newest) session is remote: its detail says where it is.
+        assert!(sessions.contains("MACHINE  pc-b (Linux)"), "{sessions}");
+        assert!(
+            sessions.contains("RESUME  on pc-b: claude --resume remote-session-1"),
+            "{sessions}"
+        );
+        assert!(sessions.contains("PROJECT  /work/app"), "{sessions}");
+        assert!(sessions.contains("TOKENS  4,321"), "{sessions}");
+        assert!(sessions.contains("The log is on pc-b"), "{sessions}");
+        assert!(
+            !sessions.contains("/logs/"),
+            "no log path of a remote session: {sessions}"
+        );
+
+        // A local session is marked as this machine's.
+        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Down);
+        let local_detail = render_screen_text(&mut state, 160, 45);
+        assert!(
+            local_detail.contains("MACHINE  this-pc (this PC)"),
+            "{local_detail}"
+        );
+        assert!(
+            local_detail.contains("PATH  /logs/local.jsonl"),
+            "{local_detail}"
+        );
+
+        // THIS PC lists only this machine's sessions, with no machine names
+        // on rows that do not need one.
+        state.machine_scope = MachineScope::ThisPc;
+        let this = render_screen_text(&mut state, 160, 45);
+        assert!(!this.contains("remote-s"), "{this}");
+        assert!(this.contains("local title"), "{this}");
     }
 
     #[test]

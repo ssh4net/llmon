@@ -155,8 +155,16 @@ time zone is counted by its UTC days. Files from the other machines are
 untrusted input: they are size-limited, checked, and cleaned (no control
 characters, no negative numbers), and a bad file is skipped and named in the
 footer. A machine that is switched off keeps its last file, so its history
-stays visible. HISTORY will show the other machines' sessions in the next
-version.
+stays visible.
+
+HISTORY lists the other machines' sessions too, grouped by project with this
+machine's (a project used on two PCs is one project). Each session row names
+its machine, and the detail says where it is: the machine and its OS, the
+project path on that machine, the token total, and the resume command to run
+there (`on pc-b: claude --resume <id>`). The log itself stays on its machine,
+so the turn and tool-call counts are only shown for this machine's sessions.
+A project's detail lists its machines and the other machines' sessions and
+tokens. `m` and the pills apply to HISTORY as well.
 
 ## Run
 

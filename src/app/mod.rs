@@ -627,6 +627,8 @@ pub(crate) struct SyncState {
     /// Files of the folder that were skipped, each with the reason.
     pub(crate) problems: Vec<String>,
     pub(crate) read_error: Option<String>,
+    /// The other machines' sessions, for HISTORY.
+    pub(crate) remote_sessions: std::sync::Arc<Vec<crate::read::scan::SessionSummary>>,
     /// Each harness's snapshot with the other machines' usage added.
     usage_all: BTreeMap<Harness, std::sync::Arc<LocalUsageSnapshot>>,
 }
@@ -659,6 +661,7 @@ impl SyncState {
             peers: Vec::new(),
             problems: Vec::new(),
             read_error: None,
+            remote_sessions: std::sync::Arc::new(Vec::new()),
             usage_all: BTreeMap::new(),
         }
     }
@@ -3041,6 +3044,8 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
                         sync.peers = scan.peers;
                         sync.problems = scan.problems;
                         sync.read_error = None;
+                        sync.remote_sessions =
+                            std::sync::Arc::new(crate::sync::remote_sessions(&sync.peers));
                     }
                     // The last machines read stay, next to the error.
                     Err(error) => sync.read_error = Some(format!("{error:#}")),

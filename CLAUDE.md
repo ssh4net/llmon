@@ -176,7 +176,12 @@ same layout; differences are noted per module.
   `refresh_merged_usage` builds each harness's "all PCs" snapshot from them
   plus the peers' `RemoteUsage` (cheap, on the event loop). Screens read
   snapshots through `AppState::usage_snapshot`, which applies the machine
-  scope (`m`).
+  scope (`m`). The peers' sessions become `SessionSummary` values with
+  `remote: Some(RemoteSession)` and a `sync://` key as their path
+  (`sync::remote_sessions`); the HISTORY browser merges them with its local
+  catalog (`with_remote_sessions`, the local copy wins for a session both
+  report) and never loads a log for them. `BrowserState::strict_catalog` stays
+  local-only, because the publisher exports it.
 - `locale.rs` - Classic, System Compact, and System Full number/date
   formatting (`DisplayFormatter`). It reads the OS locale through `libc` or
   `windows-sys`.

@@ -4,8 +4,8 @@ use crate::read::catalog::{
     CatalogProgress, CatalogScanPhase, CatalogSnapshot, ProjectViewMode, SOURCE_NOISY_TREE,
 };
 use crate::read::scan::{
-    filter_catalog, load_session_detail, truncate_single_line, Catalog, ProjectRecord,
-    SessionDetail, SessionSummary,
+    filter_catalog, load_session_detail, truncate_single_line, with_remote_sessions, Catalog,
+    ProjectRecord, SessionDetail, SessionSummary,
 };
 use crate::usage::{
     format_compact_kmb, format_duration, normalize_project_key, LocalUsageSnapshot,
@@ -22,6 +22,7 @@ use ratatui::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -70,6 +71,15 @@ pub(crate) struct BrowserState {
     /// Show only this harness's sessions; `None` shows every harness, with a
     /// badge on each session.
     harness_filter: Option<Harness>,
+    /// Sessions of other machines (distributed mode), and whether the list
+    /// shows them.
+    remote_sessions: Arc<Vec<SessionSummary>>,
+    show_remote: bool,
+    /// This machine's name; set while sessions of several machines can be
+    /// listed, so each row names its machine.
+    local_machine: Option<String>,
+    /// Columns the app draws after the title (the machine pills).
+    pills_extra: u16,
 }
 
 impl BrowserState {
@@ -117,7 +127,49 @@ impl BrowserState {
             layout: UiLayout::default(),
             last_click: None,
             harness_filter: None,
+            remote_sessions: Arc::new(Vec::new()),
+            show_remote: false,
+            local_machine: None,
+            pills_extra: 0,
         }
+    }
+
+    /// Sets the sessions of other machines and whether they are listed.
+    /// `local_machine` names this machine while distributed mode is on.
+    /// Returns whether the list changed.
+    pub(crate) fn set_remote_view(
+        &mut self,
+        sessions: &Arc<Vec<SessionSummary>>,
+        show: bool,
+        local_machine: Option<&str>,
+    ) -> bool {
+        let show = show && !sessions.is_empty();
+        let local_machine = local_machine.map(str::to_string);
+        if Arc::ptr_eq(&self.remote_sessions, sessions)
+            && self.show_remote == show
+            && self.local_machine == local_machine
+        {
+            return false;
+        }
+        self.remote_sessions = sessions.clone();
+        self.show_remote = show;
+        self.local_machine = local_machine;
+        self.rebuild_visible_catalog();
+        true
+    }
+
+    /// Distributed mode is off: no remote sessions, no machine names.
+    pub(crate) fn clear_remote_view(&mut self) {
+        if self.show_remote || self.local_machine.is_some() || !self.remote_sessions.is_empty() {
+            self.remote_sessions = Arc::new(Vec::new());
+            self.show_remote = false;
+            self.local_machine = None;
+            self.rebuild_visible_catalog();
+        }
+    }
+
+    pub(crate) fn set_pills_extra(&mut self, columns: u16) {
+        self.pills_extra = columns;
     }
 
     /// Returns whether the filter changed.
@@ -286,9 +338,14 @@ impl BrowserState {
         let selected_id = self
             .selected_project()
             .map(|project| project.stable_id.clone());
+        let with_remote = if self.show_remote {
+            with_remote_sessions(&self.strict_catalog, &self.remote_sessions)
+        } else {
+            self.strict_catalog.clone()
+        };
         let strict = match self.harness_filter {
-            Some(harness) => filter_catalog(&self.strict_catalog, harness),
-            None => self.strict_catalog.clone(),
+            Some(harness) => filter_catalog(&with_remote, harness),
+            None => with_remote,
         };
         self.catalog = match self.project_mode {
             ProjectViewMode::Strict => strict,
@@ -338,12 +395,19 @@ impl BrowserState {
     }
 
     fn ensure_selected_session_detail(&mut self) -> Result<()> {
-        let Some((harness, path)) = self
-            .selected_session()
-            .map(|session| (session.harness, session.file_path.clone()))
-        else {
+        let Some((harness, path, remote)) = self.selected_session().map(|session| {
+            (
+                session.harness,
+                session.file_path.clone(),
+                session.remote.is_some(),
+            )
+        }) else {
             return Ok(());
         };
+        // The log of a remote session is on its machine.
+        if remote {
+            return Ok(());
+        }
         if self.session_details.contains_key(&path) {
             return Ok(());
         }
@@ -823,7 +887,7 @@ pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &mut BrowserState,
-    usage: Option<&LocalUsageSnapshot>,
+    usages: &[&LocalUsageSnapshot],
     usage_error: Option<&str>,
     formatter: DisplayFormatter<'_>,
     accent_color: Color,
@@ -843,7 +907,7 @@ pub(crate) fn render(
             frame,
             chunks[1],
             state,
-            usage,
+            usages,
             usage_error,
             formatter,
             accent_color,
@@ -878,7 +942,7 @@ fn render_header(
         formatter.format_usize(state.catalog.files_skipped)
     );
     let summary_width = u16::try_from(UnicodeWidthStr::width(summary.as_str())).unwrap_or(u16::MAX);
-    let title_width = history_title_width();
+    let title_width = history_title_width(state.pills_extra);
     let show_summary = content_area.width >= title_width.saturating_add(summary_width);
     let row = Layout::default()
         .direction(Direction::Horizontal)
@@ -917,21 +981,24 @@ pub(crate) const HISTORY_TITLE: &str = "SESSION_HISTORY :: ";
 /// Room the header keeps after the title for the harness pills.
 pub(crate) const HISTORY_PILLS_WIDTH: u16 = 26;
 
-fn history_title_width() -> u16 {
+/// `extra` columns more are kept for the machine pills (distributed mode).
+fn history_title_width(extra: u16) -> u16 {
     u16::try_from(UnicodeWidthStr::width(HISTORY_TITLE))
         .unwrap_or(u16::MAX)
         .saturating_add(HISTORY_PILLS_WIDTH)
+        .saturating_add(extra)
 }
 
 /// Where the header title ends, on which row, and how far the pills after
 /// it may reach.
-pub(crate) fn history_title_end(area: Rect) -> (u16, u16, u16) {
+pub(crate) fn history_title_end(area: Rect, extra: u16) -> (u16, u16, u16) {
     let line_area = header_line_area(area);
     let title_end = line_area
         .x
         .saturating_add(u16::try_from(UnicodeWidthStr::width(HISTORY_TITLE)).unwrap_or(u16::MAX));
     let right = title_end
         .saturating_add(HISTORY_PILLS_WIDTH)
+        .saturating_add(extra)
         .min(line_area.x.saturating_add(line_area.width));
     (title_end, line_area.y, right)
 }
@@ -982,7 +1049,7 @@ fn render_projects_view(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &mut BrowserState,
-    usage: Option<&LocalUsageSnapshot>,
+    usages: &[&LocalUsageSnapshot],
     usage_error: Option<&str>,
     formatter: DisplayFormatter<'_>,
     accent_color: Color,
@@ -1046,8 +1113,13 @@ fn render_projects_view(
         .highlight_symbol(">> ");
     frame.render_stateful_widget(list, columns[0], &mut state.project_state);
 
-    let detail_text =
-        render_project_detail(state.selected_project(), usage, usage_error, formatter);
+    let detail_text = render_project_detail(
+        state.selected_project(),
+        usages,
+        usage_error,
+        state.local_machine.as_deref(),
+        formatter,
+    );
     frame.render_widget(
         Paragraph::new(detail_text)
             .block(
@@ -1117,6 +1189,23 @@ fn render_sessions_view(
         .split(area);
 
     let project = state.selected_project();
+    // With sessions of several machines each row names its machine.
+    let local_machine = state.local_machine.as_deref();
+    let machine_width = if state.show_remote {
+        project
+            .map(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .map(|session| session_machine(local_machine, session).chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+            .clamp(4, 14)
+    } else {
+        0
+    };
     let items = project
         .map(|project| {
             std::iter::once(ListItem::new(Line::from("..")))
@@ -1126,18 +1215,31 @@ fn render_sessions_view(
                     } else {
                         "R"
                     };
-                    let agents = if session.subagent_files.is_empty() {
+                    let subagents = session
+                        .subagent_files
+                        .len()
+                        .max(session.remote.as_ref().map_or(0, |remote| remote.subagents));
+                    let agents = if subagents == 0 {
                         String::new()
                     } else {
-                        format!("  [+{} agents]", session.subagent_files.len())
+                        format!("  [+{subagents} agents]")
                     };
                     // Combined history names each session's harness.
                     let harness = match state.harness_filter {
                         Some(_) => String::new(),
                         None => format!("{:<6}  ", session.harness.key()),
                     };
+                    let machine = if machine_width > 0 {
+                        let name = truncate_single_line(
+                            session_machine(local_machine, session),
+                            machine_width,
+                        );
+                        format!("{name:<machine_width$}  ")
+                    } else {
+                        String::new()
+                    };
                     let label = format!(
-                        "{relation}  {harness}{}  {}{agents}",
+                        "{relation}  {harness}{machine}{}  {}{agents}",
                         session_started_label(session, formatter),
                         truncate_single_line(&session.title, 64)
                     );
@@ -1165,6 +1267,7 @@ fn render_sessions_view(
     let detail_text = render_session_detail(
         state.selected_session(),
         state.selected_session_detail(),
+        state.local_machine.as_deref(),
         formatter,
     );
     frame.render_widget(
@@ -1186,8 +1289,9 @@ fn render_sessions_view(
 
 fn render_project_detail(
     project: Option<&ProjectRecord>,
-    usage: Option<&LocalUsageSnapshot>,
+    usages: &[&LocalUsageSnapshot],
     usage_error: Option<&str>,
+    local_machine: Option<&str>,
     formatter: DisplayFormatter<'_>,
 ) -> Text<'static> {
     let Some(project) = project else {
@@ -1200,9 +1304,10 @@ fn render_project_detail(
         .map(|session| session_started_label(session, formatter))
         .unwrap_or_else(|| "--".to_string());
 
+    // Usage totals come from this machine's snapshots of the harnesses shown.
     let mut usage_totals = (0i64, 0i64, 0i64, 0i64, 0usize);
-    let mut usage_paths = BTreeSet::new();
-    if let Some(snapshot) = usage {
+    for snapshot in usages {
+        let mut usage_paths = BTreeSet::new();
         for path in &project.checkouts {
             let key = normalize_project_key(path);
             if !usage_paths.insert(key) {
@@ -1217,9 +1322,18 @@ fn render_project_detail(
             }
         }
     }
-    let expected_files = project.owner_session_count;
+    // Sessions of other machines are not scanned here.
+    let expected_files = project
+        .sessions
+        .iter()
+        .take(project.owner_session_count)
+        .filter(|session| session.remote.is_none())
+        .count();
     let indexed_files = usage_totals.4;
-    let scan_complete = usage.is_some_and(|snapshot| snapshot.scan_pending_files == 0);
+    let scan_complete = !usages.is_empty()
+        && usages
+            .iter()
+            .all(|snapshot| snapshot.scan_pending_files == 0);
     let usage_ready =
         usage_error.is_none() && expected_files > 0 && indexed_files >= expected_files;
     let project_scan = if expected_files == 0 {
@@ -1254,6 +1368,28 @@ fn render_project_detail(
         )
     } else {
         ("--".to_string(), "--".to_string())
+    };
+    let mut machines: BTreeSet<String> = BTreeSet::new();
+    let mut remote_sessions = 0usize;
+    let mut remote_tokens = 0i64;
+    for session in &project.sessions {
+        match &session.remote {
+            Some(remote) => {
+                machines.insert(remote.machine_name.clone());
+                remote_sessions += 1;
+                remote_tokens = remote_tokens.saturating_add(remote.tokens.unwrap_or(0));
+            }
+            None => {
+                if let Some(local) = local_machine {
+                    machines.insert(format!("{local} (this PC)"));
+                }
+            }
+        }
+    }
+    let machines_label = if local_machine.is_none() {
+        None
+    } else {
+        Some(machines.into_iter().collect::<Vec<_>>().join(", "))
     };
     let discovery_label = if project.missing {
         "MISSING".to_string()
@@ -1329,6 +1465,32 @@ fn render_project_detail(
         )),
     ];
 
+    // Machines that have sessions of this project (distributed mode).
+    if let Some(label) = machines_label {
+        lines.insert(
+            4,
+            Line::from(vec![
+                Span::styled("MACHINES", Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::raw(label),
+            ]),
+        );
+        if remote_sessions > 0 {
+            lines.insert(
+                5,
+                Line::from(vec![
+                    Span::styled("OTHER_MACHINES", Style::default().fg(Color::Gray)),
+                    Span::raw("  "),
+                    Span::raw(format!(
+                        "{} sessions / {} tokens",
+                        formatter.format_usize(remote_sessions),
+                        format_project_count(remote_tokens, formatter)
+                    )),
+                ]),
+            );
+        }
+    }
+
     for checkout in &project.checkouts {
         lines.push(Line::from(format!("- {checkout}")));
     }
@@ -1364,11 +1526,13 @@ fn format_project_count(value: i64, formatter: DisplayFormatter<'_>) -> String {
 fn render_session_detail(
     session: Option<&SessionSummary>,
     detail: Option<&SessionDetail>,
+    local_machine: Option<&str>,
     formatter: DisplayFormatter<'_>,
 ) -> Text<'static> {
     let Some(session) = session else {
         return Text::from("No sessions in this project.");
     };
+    let remote = session.remote.as_ref();
 
     let mut lines = vec![
         Line::from(vec![
@@ -1389,11 +1553,18 @@ fn render_session_detail(
             Span::raw("  "),
             Span::raw(session.session_id.clone()),
         ]),
+        // A remote session's log is not here; its project path is on its machine.
         Line::from(vec![
-            Span::styled("PATH", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if remote.is_some() { "PROJECT" } else { "PATH" },
+                Style::default().fg(Color::Gray),
+            ),
             Span::raw("  "),
             Span::raw(truncate_single_line(
-                &session.file_path.display().to_string(),
+                &match remote {
+                    Some(_) => session.cwd.clone(),
+                    None => session.file_path.display().to_string(),
+                },
                 96,
             )),
         ]),
@@ -1445,15 +1616,43 @@ fn render_session_detail(
         ]));
     }
 
+    // With sessions of several machines, say which one this is on.
+    if let Some(local) = local_machine {
+        let machine = match remote {
+            Some(remote) => format!("{} ({})", remote.machine_name, remote.os),
+            None => format!("{local} (this PC)"),
+        };
+        lines.insert(
+            3,
+            Line::from(vec![
+                Span::styled("MACHINE", Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::raw(machine),
+            ]),
+        );
+    }
+
     let resume = match session.harness {
         Harness::Codex => format!("codex resume {}", session.session_id),
         Harness::Claude => format!("claude --resume {}", session.session_id),
+    };
+    let resume = match remote {
+        Some(remote) => format!("on {}: {resume}", remote.machine_name),
+        None => resume,
     };
     lines.push(Line::from(vec![
         Span::styled("RESUME", Style::default().fg(Color::Gray)),
         Span::raw("  "),
         Span::raw(resume),
     ]));
+
+    if let Some(remote) = remote.filter(|remote| remote.subagents > 0) {
+        lines.push(Line::from(vec![
+            Span::styled("SUBAGENTS", Style::default().fg(Color::Gray)),
+            Span::raw("  "),
+            Span::raw(formatter.format_usize(remote.subagents)),
+        ]));
+    }
 
     if !session.subagent_files.is_empty() {
         lines.push(Line::from(vec![
@@ -1476,6 +1675,24 @@ fn render_session_detail(
             Span::raw("  "),
             Span::raw(raw.clone()),
         ]));
+    }
+
+    if let Some(remote) = remote {
+        lines.push(Line::from(""));
+        if let Some(tokens) = remote.tokens {
+            lines.push(Line::from(vec![
+                Span::styled("TOKENS", Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::raw(formatter.format_count(tokens)),
+            ]));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(
+                "The log is on {}; open it there for the turns and tool calls.",
+                remote.machine_name
+            ),
+            Style::default().fg(Color::Gray),
+        )));
     }
 
     if let Some(detail) = detail {
@@ -1586,6 +1803,16 @@ fn render_session_detail(
     }
 
     Text::from(lines)
+}
+
+/// The machine a session is on: its own for a remote session, else this one.
+fn session_machine<'a>(local_machine: Option<&'a str>, session: &'a SessionSummary) -> &'a str {
+    session
+        .remote
+        .as_ref()
+        .map(|remote| remote.machine_name.as_str())
+        .or(local_machine)
+        .unwrap_or("")
 }
 
 fn session_started_label(session: &SessionSummary, formatter: DisplayFormatter<'_>) -> String {
@@ -1757,6 +1984,7 @@ mod tests {
             client_version: None,
             model: None,
             subagent_files: Vec::new(),
+            remote: None,
         }
     }
 

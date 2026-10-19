@@ -223,6 +223,7 @@ impl SessionSummaryBuilder {
             client_version: self.client_version,
             model: self.model,
             subagent_files: Vec::new(),
+            remote: None,
         }
     }
 }

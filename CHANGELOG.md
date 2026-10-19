@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.5
+
+- Distributed mode, third part (opt-in): HISTORY lists the other machines'
+  sessions, grouped by project with this machine's. Rows name their machine;
+  the detail shows the machine, the project path there, the tokens, and the
+  resume command to run on that machine. The project detail lists its
+  machines and the other machines' sessions and tokens. `m` and the ALL PCS /
+  THIS PC pills apply to HISTORY too.
+- HISTORY: the project detail now totals the usage of every harness shown, not
+  only Codex's, so Claude Code projects no longer read "NO DATA".
+
 ## 0.5.4
 
 - Distributed mode, second part (opt-in): llmon reads the other machines'
