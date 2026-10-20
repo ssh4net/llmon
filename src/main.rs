@@ -213,6 +213,31 @@ enum Command {
         #[arg(long)]
         wrap: Option<String>,
     },
+    /// Distributed mode helpers (the mode itself is set in `config.json`).
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Set, generate, or remove the passphrase that encrypts the sync files.
+    ///
+    /// Use the same passphrase on every PC. Only the key derived from it is
+    /// stored (a private file in the llmon home), never the passphrase, and
+    /// `LLMON_SYNC_PASSPHRASE` takes precedence over the stored key.
+    Passphrase {
+        /// Make a random passphrase, show it once, and store its key.
+        #[arg(long, conflicts_with_all = ["stdin", "remove"])]
+        generate: bool,
+        /// Read the passphrase from the first line of standard input.
+        #[arg(long, conflicts_with_all = ["generate", "remove"])]
+        stdin: bool,
+        /// Delete the stored key; the files are plain again.
+        #[arg(long, conflicts_with_all = ["generate", "stdin"])]
+        remove: bool,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -365,6 +390,29 @@ async fn main() -> Result<()> {
         let home = resolve_llmon_home(args.llmon_home.clone());
         providers::claude::limits::statusline::run(home.as_deref(), wrap.as_deref());
         return Ok(());
+    }
+
+    if let Some(Command::Sync {
+        command:
+            SyncCommand::Passphrase {
+                generate,
+                stdin,
+                remove,
+            },
+    }) = &args.command
+    {
+        let home = resolve_llmon_home(args.llmon_home.clone())
+            .context("Unable to resolve LLMON_HOME (default: ~/.llmon)")?;
+        let action = if *remove {
+            sync::passphrase::Action::Remove
+        } else if *generate {
+            sync::passphrase::Action::Generate
+        } else if *stdin {
+            sync::passphrase::Action::Stdin
+        } else {
+            sync::passphrase::Action::Prompt
+        };
+        return sync::passphrase::run(&home, action);
     }
 
     if args.dump_limits {

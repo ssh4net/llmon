@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.8
+
+- `llmon sync passphrase` sets the sync passphrase: it asks twice without
+  echo, reads one line with `--stdin`, makes a random 125-bit one with
+  `--generate`, or deletes the stored key with `--remove`. Only the key the
+  passphrase derives is stored, as a private `sync.key` file in the llmon home.
+
 ## 0.5.7
 
 - Distributed mode: the sync files can be encrypted. Set the same passphrase

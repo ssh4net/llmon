@@ -24,6 +24,7 @@
 //!   `sync.share_titles` is on.
 
 mod crypto;
+pub(crate) mod passphrase;
 
 use crate::harness::Harness;
 use crate::read::scan::{session_start_fields, Catalog, RemoteSession, SessionSummary};

@@ -163,6 +163,12 @@ impl SyncKey {
         Ok(buffer)
     }
 
+    /// What `sync.key` holds for this key.
+    pub(crate) fn key_file_text(&self) -> String {
+        let hex: String = self.0.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("{KEY_FILE_TAG} {hex}\n")
+    }
+
     fn from_key_file_text(text: &str) -> Option<Self> {
         let hex = text.trim().strip_prefix(KEY_FILE_TAG)?.trim();
         if hex.len() != KEY_LEN * 2 || !hex.is_ascii() {
@@ -181,12 +187,6 @@ impl SyncKey {
     /// The same derivation at a cost tests can afford many times.
     pub(crate) fn for_tests(passphrase: &str) -> Self {
         Self::derive(passphrase, 64, 1).expect("derive")
-    }
-
-    /// What `sync.key` holds for this key.
-    pub(crate) fn key_file_text(&self) -> String {
-        let hex: String = self.0.iter().map(|byte| format!("{byte:02x}")).collect();
-        format!("{KEY_FILE_TAG} {hex}\n")
     }
 }
 
@@ -236,6 +236,55 @@ fn load_key_file(llmon_home: &Path) -> Result<Option<SyncKey>> {
                 path.display()
             )
         })
+}
+
+/// Stores the key in the llmon home as a private file. The passphrase is not
+/// stored, only the key it derives.
+pub(crate) fn save_key_file(llmon_home: &Path, key: &SyncKey) -> Result<PathBuf> {
+    let path = key_file_path(llmon_home);
+    crate::storage::write_private_file_atomic(&path, key.key_file_text().as_bytes())?;
+    Ok(path)
+}
+
+/// Deletes the stored key. `false` when there was none.
+pub(crate) fn remove_key_file(llmon_home: &Path) -> Result<bool> {
+    let path = key_file_path(llmon_home);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Unable to remove {}", path.display()))?;
+            Ok(true)
+        }
+        Ok(_) => bail!(
+            "Refusing to remove {}: expected a regular file",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Unable to inspect {}", path.display())),
+    }
+}
+
+/// Letters and digits without the ones that look alike (0, 1, I, O).
+const PASSPHRASE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const PASSPHRASE_GROUPS: usize = 5;
+const PASSPHRASE_GROUP_LEN: usize = 5;
+
+/// A random passphrase of 125 bits, written in groups to be read out and typed:
+/// `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`.
+pub(crate) fn generate_passphrase() -> Result<String> {
+    let mut random = [0_u8; PASSPHRASE_GROUPS * PASSPHRASE_GROUP_LEN];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| anyhow!("The system has no random source"))?;
+    let mut text = String::new();
+    for (index, byte) in random.iter().enumerate() {
+        if index > 0 && index % PASSPHRASE_GROUP_LEN == 0 {
+            text.push('-');
+        }
+        // 256 is a multiple of 32, so the low five bits are uniform.
+        text.push(char::from(PASSPHRASE_ALPHABET[usize::from(byte & 31)]));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]

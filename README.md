@@ -174,9 +174,20 @@ that PC is off).
 
 A sync folder is often a cloud folder (Dropbox, iCloud Drive) or a share, so
 whoever runs it can read the files. Set the same passphrase on every PC to
-encrypt them: put it in the environment of llmon as `LLMON_SYNC_PASSPHRASE`
-(for example in your shell profile). llmon reads it at start and never writes
-it anywhere.
+encrypt them:
+
+```bash
+llmon sync passphrase              # asks twice, without echo (12+ characters)
+llmon sync passphrase --generate   # a random 125-bit passphrase, shown once
+llmon sync passphrase --stdin      # first line of standard input, for scripts
+llmon sync passphrase --remove     # back to plain files
+```
+
+Only the key derived from the passphrase is stored, in `sync.key` in the llmon
+home (a private file; never in `config.json`, never in the sync folder). Keep
+the passphrase itself in your password manager: you type it once on each PC.
+`LLMON_SYNC_PASSPHRASE` in the environment takes precedence over the stored
+key and stores nothing.
 
 - Each file is encrypted and authenticated (ChaCha20-Poly1305, with the key
   derived from the passphrase by Argon2id), and named by the machine id
@@ -196,8 +207,8 @@ it anywhere.
   own file, and a PC that still has the old one shows "cannot decrypt" until
   it is changed.
 - It does not hide how many PCs there are, nor the sizes and times of their
-  files. It does not protect against someone who can read your home folder or
-  environment on a PC.
+  files. It does not protect against someone who can read your home folder on
+  a PC, where the key is, or who can read the folder and has the passphrase.
 
 ## Run
 
