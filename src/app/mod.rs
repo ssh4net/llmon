@@ -4304,6 +4304,7 @@ mod tests {
             },
             share_titles: false,
             ignore: Vec::new(),
+            key: None,
         };
         let mut state = AppState::for_tests();
         state.sync = Some(SyncState::new(settings, tx, 2));
@@ -4377,6 +4378,7 @@ mod tests {
             },
             share_titles: false,
             ignore: Vec::new(),
+            key: None,
         };
         state.sync = Some(SyncState::new(settings, tx, 1));
         let _ = press(&mut state);

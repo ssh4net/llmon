@@ -159,9 +159,17 @@ same layout; differences are noted per module.
 - `sync/` - distributed mode (opt-in, off unless `sync.dir` or `--sync-dir`
   is set): llmon instances exchange usage, projects, and sessions through a
   shared folder, one `llmon-sync-<machine id>.json` per machine. No server and
-  no listening port; the folder is the only channel. The usage part is the
-  per-project sum of the two maps the scan cache keeps per log file
-  (`usage::ExportGroup`, built by `compute_snapshot_with` when
+  no listening port; the folder is the only channel. With a passphrase
+  (`LLMON_SYNC_PASSPHRASE`, or the `sync.key` file in the llmon home) the
+  files are encrypted (`sync/crypto.rs`: Argon2id with a fixed public salt,
+  then ChaCha20-Poly1305 with an HKDF key per file) and named by the machine
+  id alone; a PC reads only the form it writes, and removes its own file of
+  the other form after each publish. Changing the KDF cost or salt, or the
+  file layout, breaks every PC that has not updated, so the pinned tests in
+  `crypto.rs` must stay. The key is llmon's own secret, not another tool's
+  credential, and is the only secret llmon stores (never in `config.json`).
+  The usage part is the per-project sum of the two maps the scan cache keeps
+  per log file (`usage::ExportGroup`, built by `compute_snapshot_with` when
   `SyncOptions::export` is set), so it needs no new aggregation. The export
   must come from local data only, never from merged peer data, or machines
   echo each other's totals. Prompt text stays local: session titles are

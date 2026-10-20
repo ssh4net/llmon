@@ -137,8 +137,8 @@ The file holds, for each harness:
 
 Session titles are the first line of your prompt, so they are not shared
 unless you set `share_titles` to `true`. Prompts and completions are never
-shared. Anyone who can read the folder can read the file, including project
-paths and session ids.
+shared. Without a passphrase (see Encryption below) anyone who can read the
+folder can read the file, including project paths and session ids.
 
 `machine_name` is how other machines see this one (default: the host name,
 plus "(WSL)" under WSL). The machine id is a random value kept in
@@ -169,6 +169,35 @@ tokens. `m` and the pills apply to HISTORY as well.
 COST gets a BY MACHINE panel with each machine's tokens, cost, share, OS, and
 how old its data is (older than a day is shown in yellow, which usually means
 that PC is off).
+
+### Encryption
+
+A sync folder is often a cloud folder (Dropbox, iCloud Drive) or a share, so
+whoever runs it can read the files. Set the same passphrase on every PC to
+encrypt them: put it in the environment of llmon as `LLMON_SYNC_PASSPHRASE`
+(for example in your shell profile). llmon reads it at start and never writes
+it anywhere.
+
+- Each file is encrypted and authenticated (ChaCha20-Poly1305, with the key
+  derived from the passphrase by Argon2id), and named by the machine id
+  alone: no `llmon`, no extension, nothing readable. The folder shows random
+  bytes, their sizes, and their times.
+- A file that does not decrypt (another passphrase, or a changed file) is
+  skipped and named in the footer, so a folder that others can write is not
+  trusted blindly.
+- A PC reads only the kind it writes. With a passphrase it ignores plain
+  files, and without one it ignores encrypted files; the footer says how many
+  ("1 unencrypted file(s) ignored: set the passphrase on those PCs").
+- To turn encryption on for existing PCs, update llmon on all of them, then
+  set the passphrase on each. A PC removes its own old plain file as soon as
+  it has written the encrypted one. Cloud services keep old versions of a
+  deleted file for a while; remove them there if that matters.
+- To change the passphrase, set the new one on every PC. Each overwrites its
+  own file, and a PC that still has the old one shows "cannot decrypt" until
+  it is changed.
+- It does not hide how many PCs there are, nor the sizes and times of their
+  files. It does not protect against someone who can read your home folder or
+  environment on a PC.
 
 ## Run
 

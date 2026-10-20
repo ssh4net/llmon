@@ -4,9 +4,14 @@
 //! folder is configured (`sync.dir` in `config.json`, or `--sync-dir`).
 //!
 //! Every instance writes one file, `llmon-sync-<machine-id>.json`, and reads
-//! the files of the others. There is no server, no listening port, and no
-//! credential: the folder is the only channel, and an instance that is off
-//! leaves its last file behind.
+//! the files of the others. There is no server and no listening port: the
+//! folder is the only channel, and an instance that is off leaves its last
+//! file behind.
+//!
+//! With a passphrase (`LLMON_SYNC_PASSPHRASE`, or the key file `llmon sync
+//! passphrase` writes) the files are encrypted and named by the machine id
+//! alone (see `crypto`); without one they stay plain JSON. A PC reads only
+//! the kind it writes, so a plain file cannot stand in for an encrypted one.
 //!
 //! What a file holds:
 //! - the machine (id, name, OS, time zone offset, llmon version);
@@ -17,6 +22,8 @@
 //!   repository URL (without credentials), subagent count, and token total.
 //!   Titles are the first line of the prompt, so they are left out unless
 //!   `sync.share_titles` is on.
+
+mod crypto;
 
 use crate::harness::Harness;
 use crate::read::scan::{session_start_fields, Catalog, RemoteSession, SessionSummary};
@@ -66,6 +73,8 @@ pub(crate) struct SyncSettings {
     pub(crate) machine: MachineInfo,
     pub(crate) share_titles: bool,
     pub(crate) ignore: Vec<String>,
+    /// Set when a passphrase is: the files are then encrypted.
+    pub(crate) key: Option<crypto::SyncKey>,
 }
 
 impl SyncSettings {
@@ -82,22 +91,57 @@ impl SyncSettings {
             return Ok(None);
         };
         let machine = MachineInfo::local(llmon_home, config.machine_name.as_deref())?;
+        let key = crypto::resolve_key(llmon_home)?;
         Ok(Some(Self {
             dir,
             machine,
             share_titles: config.share_titles,
             ignore: config.ignore.clone(),
+            key,
         }))
     }
 
     /// This machine's file in the sync folder.
     pub(crate) fn own_file(&self) -> PathBuf {
-        self.dir.join(sync_file_name(&self.machine.id))
+        self.dir.join(self.own_file_name())
+    }
+
+    fn own_file_name(&self) -> String {
+        match self.key {
+            Some(_) => encrypted_file_name(&self.machine.id),
+            None => sync_file_name(&self.machine.id),
+        }
+    }
+
+    /// The file this machine wrote in the other form (plain before a
+    /// passphrase was set, encrypted after it was removed), which must not
+    /// stay behind: a plain copy would keep the data readable.
+    fn other_own_file(&self) -> PathBuf {
+        self.dir.join(self.other_own_file_name())
+    }
+
+    fn other_own_file_name(&self) -> String {
+        match self.key {
+            Some(_) => sync_file_name(&self.machine.id),
+            None => encrypted_file_name(&self.machine.id),
+        }
     }
 }
 
 pub(crate) fn sync_file_name(machine_id: &str) -> String {
     format!("{SYNC_FILE_PREFIX}{machine_id}{SYNC_FILE_SUFFIX}")
+}
+
+/// An encrypted file is named by the machine id alone: random, so it says
+/// nothing, and it is the same name after the key changes, so the file is
+/// replaced rather than left behind.
+pub(crate) fn encrypted_file_name(machine_id: &str) -> String {
+    machine_id.to_ascii_lowercase()
+}
+
+/// Whether a file name could be an encrypted sync file.
+fn is_encrypted_file_name(name: &str) -> bool {
+    is_valid_machine_id(name)
 }
 
 /// One machine running llmon.
@@ -378,9 +422,33 @@ pub(crate) fn publish(settings: &SyncSettings, file: &SyncFile) -> Result<usize>
     if !metadata.is_dir() {
         anyhow::bail!("Sync folder {} is not a directory", settings.dir.display());
     }
-    let bytes = serde_json::to_vec(file).context("Unable to encode the sync file")?;
+    let json = serde_json::to_vec(file).context("Unable to encode the sync file")?;
+    let bytes = match &settings.key {
+        Some(key) => key.seal(&json)?,
+        None => json,
+    };
     crate::storage::write_shared_file_atomic(&settings.own_file(), &bytes)?;
+    remove_other_own_file(settings)?;
     Ok(bytes.len())
+}
+
+/// Removes this machine's file of the other form, once the new one is in
+/// place, so no readable copy of the data stays in the folder.
+fn remove_other_own_file(settings: &SyncSettings) -> Result<()> {
+    let path = settings.other_own_file();
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(&path).with_context(|| {
+                format!(
+                    "The new sync file was written, but the old one ({}) could not be removed",
+                    path.display()
+                )
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Unable to inspect {}", path.display())),
+    }
 }
 
 impl SyncSettings {
@@ -434,17 +502,37 @@ struct CachedPeer {
 /// Reads the other machines' files from the sync folder. An unreadable
 /// folder is an error; a bad file is skipped and reported in `problems`.
 pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Result<PeerScan> {
-    let own_name = sync_file_name(&settings.machine.id);
+    let own_name = settings.own_file_name();
     let entries = std::fs::read_dir(&settings.dir)
         .with_context(|| format!("Sync folder {} is not available", settings.dir.display()))?;
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut scan = PeerScan::default();
+    // Files of the other form: not read (a plain file must not stand in for
+    // an encrypted one), but counted so the footer can say why.
+    let mut other_form = 0_usize;
     for entry in entries.filter_map(|entry| entry.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(SYNC_FILE_PREFIX)
-            || !name.ends_with(SYNC_FILE_SUFFIX)
-            || name == own_name
-        {
+        let is_plain_name = name.starts_with(SYNC_FILE_PREFIX) && name.ends_with(SYNC_FILE_SUFFIX);
+        let wanted = if settings.key.is_some() {
+            is_encrypted_file_name(&name)
+        } else {
+            is_plain_name
+        };
+        if !wanted {
+            let ours = name == settings.other_own_file_name();
+            let other = if settings.key.is_some() {
+                is_plain_name
+            } else {
+                // Only the length a machine id has, so that a stray hex name
+                // is not taken for an encrypted file.
+                name.len() == 32 && is_encrypted_file_name(&name)
+            };
+            if other && !ours {
+                other_form += 1;
+            }
+            continue;
+        }
+        if name == own_name {
             continue;
         }
         let path = entry.path();
@@ -469,7 +557,7 @@ pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Resu
                 cached.result.clone()
             }
             _ => {
-                let result = load_peer_file(&path, &name, len);
+                let result = load_peer_file(settings, &path, &name, len);
                 cache.entries.insert(
                     path,
                     CachedPeer {
@@ -484,7 +572,9 @@ pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Resu
         match result {
             Ok(file) if settings.accepts(&file) => scan.peers.push(file),
             Ok(_) => {}
-            Err(problem) => scan.problems.push(format!("{name}: {problem}")),
+            Err(problem) => scan
+                .problems
+                .push(format!("{}: {problem}", display_file_name(&name))),
         }
     }
     cache.entries.retain(|path, _| seen.contains(path));
@@ -502,10 +592,32 @@ pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Resu
             .then_with(|| left.machine.id.cmp(&right.machine.id))
     });
     scan.problems.sort();
+    if other_form > 0 {
+        let note = if settings.key.is_some() {
+            format!("{other_form} unencrypted file(s) ignored: set the passphrase on those PCs")
+        } else {
+            format!("{other_form} encrypted file(s) ignored: set the passphrase on this PC")
+        };
+        scan.problems.push(note);
+    }
     Ok(scan)
 }
 
-fn load_peer_file(path: &Path, name: &str, len: u64) -> std::result::Result<Arc<SyncFile>, String> {
+/// An encrypted file's name is a long random id: shortened for the footer.
+fn display_file_name(name: &str) -> String {
+    if name.len() > 16 && is_encrypted_file_name(name) {
+        format!("{}..", &name[..8])
+    } else {
+        name.to_string()
+    }
+}
+
+fn load_peer_file(
+    settings: &SyncSettings,
+    path: &Path,
+    name: &str,
+    len: u64,
+) -> std::result::Result<Arc<SyncFile>, String> {
     let limit_mib = MAX_SYNC_FILE_BYTES / (1024 * 1024);
     if len > MAX_SYNC_FILE_BYTES {
         return Err(format!("larger than {limit_mib} MiB, skipped"));
@@ -519,7 +631,11 @@ fn load_peer_file(path: &Path, name: &str, len: u64) -> std::result::Result<Arc<
     if bytes.len() as u64 > MAX_SYNC_FILE_BYTES {
         return Err(format!("larger than {limit_mib} MiB, skipped"));
     }
-    let mut file: SyncFile = serde_json::from_slice(&bytes)
+    let json = match &settings.key {
+        Some(key) => key.open(&bytes).map_err(|error| error.to_string())?,
+        None => bytes,
+    };
+    let mut file: SyncFile = serde_json::from_slice(&json)
         .map_err(|error| format!("not a valid sync file ({error})"))?;
     if file.format != SYNC_FORMAT {
         return Err("not an llmon sync file".to_string());
@@ -533,7 +649,11 @@ fn load_peer_file(path: &Path, name: &str, len: u64) -> std::result::Result<Arc<
     if !is_valid_machine_id(&file.machine.id) {
         return Err("invalid machine id".to_string());
     }
-    if name != sync_file_name(&file.machine.id) {
+    let expected_name = match settings.key {
+        Some(_) => encrypted_file_name(&file.machine.id),
+        None => sync_file_name(&file.machine.id),
+    };
+    if !name.eq_ignore_ascii_case(&expected_name) {
         return Err("file name does not match its machine id".to_string());
     }
     sanitize_file(&mut file);
@@ -977,6 +1097,7 @@ mod tests {
             machine: machine(),
             share_titles: false,
             ignore: Vec::new(),
+            key: None,
         };
         let file = build_sync_file(
             &settings.machine,
@@ -1031,6 +1152,7 @@ mod tests {
             machine,
             share_titles: false,
             ignore: ignore.iter().map(|entry| entry.to_string()).collect(),
+            key: None,
         }
     }
 
@@ -1091,6 +1213,223 @@ mod tests {
             &mut cache,
         );
         assert!(gone.is_err());
+    }
+
+    fn encrypted_settings(dir: &Path, machine: MachineInfo, passphrase: &str) -> SyncSettings {
+        SyncSettings {
+            key: Some(crypto::SyncKey::for_tests(passphrase)),
+            ..settings_for(dir, machine, &[])
+        }
+    }
+
+    /// Publishes a file for `settings`' machine with one Codex session.
+    fn publish_with(settings: &SyncSettings, session_id: &str) -> SyncFile {
+        let file = build_sync_file(
+            &settings.machine,
+            &usage_export(),
+            &catalog_of(vec![session(Harness::Codex, session_id, "/work/app", 5)]),
+            true,
+            100,
+        );
+        publish(settings, &file).expect("publish");
+        file
+    }
+
+    fn folder_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("list")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_encrypted_file_is_named_by_the_machine_id_and_shows_nothing() {
+        let share = make_temp_dir("encrypted-publish");
+        let settings = encrypted_settings(&share, machine_with(ID_A, "Visible Name", 540), "pw");
+        let file = publish_with(&settings, "a1");
+
+        assert_eq!(folder_names(&share), vec![ID_A.to_string()]);
+        let bytes = std::fs::read(settings.own_file()).expect("read back");
+        let plain = serde_json::to_vec(&file).expect("encode");
+        assert_eq!(bytes.len(), plain.len() + crypto::OVERHEAD);
+        for text in ["llmon", "Visible Name", "/work/app", "gpt-test", "{\""] {
+            assert!(
+                !bytes
+                    .windows(text.len())
+                    .any(|window| window == text.as_bytes()),
+                "{text} is readable in the file"
+            );
+        }
+        let opened = settings
+            .key
+            .as_ref()
+            .expect("key")
+            .open(&bytes)
+            .expect("open");
+        assert_eq!(
+            serde_json::from_slice::<SyncFile>(&opened).expect("parse"),
+            file
+        );
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn machines_with_one_passphrase_read_each_other_and_others_are_rejected() {
+        let share = make_temp_dir("encrypted-peers");
+        let ours = encrypted_settings(&share, machine_with(ID_A, "pc-a", 540), "shared");
+        publish_with(&ours, "a1");
+        publish_with(
+            &encrypted_settings(&share, machine_with(ID_B, "pc-b", 540), "shared"),
+            "b1",
+        );
+        publish_with(
+            &encrypted_settings(&share, machine_with(ID_C, "pc-c", 540), "other"),
+            "c1",
+        );
+
+        let scan = read_peers(&ours, &mut PeerCache::default()).expect("scan");
+        let names: Vec<&str> = scan.peers.iter().map(|p| p.machine.name.as_str()).collect();
+        assert_eq!(names, vec!["pc-b"], "without ourselves and the other group");
+        assert_eq!(scan.peers[0].sessions["codex"][0].id, "b1");
+        assert_eq!(scan.problems.len(), 1, "{:?}", scan.problems);
+        assert_eq!(
+            scan.problems[0],
+            "cccccccc..: cannot decrypt (wrong passphrase, or not an llmon file)"
+        );
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn a_changed_or_renamed_encrypted_file_is_not_trusted() {
+        let share = make_temp_dir("encrypted-tamper");
+        let ours = encrypted_settings(&share, machine_with(ID_A, "pc-a", 0), "shared");
+        let theirs = encrypted_settings(&share, machine_with(ID_B, "pc-b", 0), "shared");
+        publish_with(&theirs, "b1");
+
+        let mut bytes = std::fs::read(theirs.own_file()).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(theirs.own_file(), &bytes).expect("tamper");
+        let scan = read_peers(&ours, &mut PeerCache::default()).expect("scan");
+        assert!(scan.peers.is_empty());
+        assert!(
+            scan.problems[0].contains("cannot decrypt"),
+            "{:?}",
+            scan.problems
+        );
+
+        // A valid file under another machine's name: it opens, but it is not
+        // what the name says, so it must not replace that machine.
+        publish_with(&theirs, "b1");
+        std::fs::copy(theirs.own_file(), share.join(ID_C)).expect("copy");
+        let scan = read_peers(&ours, &mut PeerCache::default()).expect("scan");
+        assert_eq!(scan.peers.len(), 1, "only the real file of pc-b");
+        assert_eq!(scan.problems.len(), 1, "{:?}", scan.problems);
+        assert!(
+            scan.problems[0].ends_with("file name does not match its machine id"),
+            "{:?}",
+            scan.problems
+        );
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn a_pc_reads_only_the_form_it_writes_and_says_what_it_skipped() {
+        let share = make_temp_dir("encrypted-forms");
+        let plain_a = settings_for(&share, machine_with(ID_A, "pc-a", 0), &[]);
+        let plain_b = settings_for(&share, machine_with(ID_B, "pc-b", 0), &[]);
+        let secret_c = encrypted_settings(&share, machine_with(ID_C, "pc-c", 0), "shared");
+        publish_with(&plain_b, "b1");
+        publish_with(&secret_c, "c1");
+        // Not a sync file: too short to be a machine id, and not 32 characters.
+        std::fs::write(share.join("deadbeef"), "x").expect("write");
+        std::fs::write(share.join("notes.txt"), "x").expect("write");
+
+        let plain_scan = read_peers(&plain_a, &mut PeerCache::default()).expect("scan");
+        let names: Vec<&str> = plain_scan
+            .peers
+            .iter()
+            .map(|p| p.machine.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["pc-b"]);
+        assert_eq!(
+            plain_scan.problems,
+            vec!["1 encrypted file(s) ignored: set the passphrase on this PC".to_string()]
+        );
+
+        let secret_a = encrypted_settings(&share, machine_with(ID_A, "pc-a", 0), "shared");
+        let secret_scan = read_peers(&secret_a, &mut PeerCache::default()).expect("scan");
+        let names: Vec<&str> = secret_scan
+            .peers
+            .iter()
+            .map(|p| p.machine.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["pc-c"], "the plain file of pc-b is not read");
+        assert_eq!(secret_scan.problems.len(), 2, "{:?}", secret_scan.problems);
+        assert!(
+            secret_scan.problems[0].starts_with("deadbeef: "),
+            "a short hex name is tried, and a file's own problem comes first: {:?}",
+            secret_scan.problems
+        );
+        assert_eq!(
+            secret_scan.problems[1],
+            "1 unencrypted file(s) ignored: set the passphrase on those PCs"
+        );
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn changing_the_form_removes_this_pcs_old_file_and_only_that() {
+        let share = make_temp_dir("encrypted-switch");
+        let plain = settings_for(&share, machine_with(ID_A, "pc-a", 0), &[]);
+        let secret = encrypted_settings(&share, machine_with(ID_A, "pc-a", 0), "shared");
+        let other = settings_for(&share, machine_with(ID_B, "pc-b", 0), &[]);
+        publish_with(&other, "b1");
+
+        publish_with(&plain, "a1");
+        assert!(plain.own_file().exists());
+        publish_with(&secret, "a1");
+        assert_eq!(
+            folder_names(&share),
+            vec![ID_A.to_string(), sync_file_name(ID_B)],
+            "the readable copy is gone; the other PC's file is not ours to touch"
+        );
+
+        publish_with(&plain, "a1");
+        assert_eq!(
+            folder_names(&share),
+            vec![sync_file_name(ID_A), sync_file_name(ID_B)]
+        );
+        let _ = std::fs::remove_dir_all(share);
+    }
+
+    #[test]
+    fn the_key_file_turns_encryption_on_for_a_run() {
+        let home = make_temp_dir("encrypted-resolve");
+        let share = home.join("share");
+        std::fs::create_dir_all(&share).expect("create share");
+        let config = SyncConfig {
+            dir: Some(share.clone()),
+            ..SyncConfig::default()
+        };
+
+        let plain = SyncSettings::resolve(&config, None, &home)
+            .expect("resolve")
+            .expect("enabled");
+        assert_eq!(plain.key, None);
+        assert!(plain.own_file().to_string_lossy().ends_with(".json"));
+
+        let key = crypto::SyncKey::for_tests("stored");
+        std::fs::write(crypto::key_file_path(&home), key.key_file_text()).expect("write key");
+        let secret = SyncSettings::resolve(&config, None, &home)
+            .expect("resolve")
+            .expect("enabled");
+        assert_eq!(secret.key, Some(key));
+        assert_eq!(secret.own_file(), share.join(&secret.machine.id));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

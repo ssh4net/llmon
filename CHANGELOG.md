@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.7
+
+- Distributed mode: the sync files can be encrypted. Set the same passphrase
+  on every PC (`LLMON_SYNC_PASSPHRASE`, or a `sync.key` file in the llmon
+  home) and each file is encrypted and authenticated (Argon2id, then
+  ChaCha20-Poly1305) and named by the machine id alone, so a cloud folder
+  shows only random bytes. A PC reads only the form it writes and removes its
+  own file of the other form; the footer says what it skipped or could not
+  decrypt.
+
 ## 0.5.6
 
 - Distributed mode: COST gets a BY MACHINE panel (tokens, cost, share, OS, and

@@ -9172,6 +9172,7 @@ mod tests {
             },
             share_titles: false,
             ignore: Vec::new(),
+            key: None,
         };
         let mut sync = crate::app::SyncState::new(settings, tx, 1);
         sync.peers = vec![peer_file(

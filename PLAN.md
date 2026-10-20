@@ -350,6 +350,14 @@ folder set nothing is read, written, or computed.
   part is the per-project sum of the maps the scan cache already keeps per
   log, so merging reuses the normal aggregation. Prompt text is not shared:
   session titles only with `sync.share_titles`.
+- **Encryption.** The folder is often a cloud folder, so a passphrase
+  encrypts the files (Argon2id, then ChaCha20-Poly1305 with an HKDF key per
+  file) and names them by the machine id alone. The key comes from
+  `LLMON_SYNC_PASSPHRASE` or a private key file in the llmon home, never from
+  `config.json`. A PC reads only the form it writes, so a plain file cannot
+  stand in for an encrypted one; the footer says what it skipped. The OS
+  keychain was left out: WSL and headless Linux have none, and it adds
+  native dependencies.
 - **Screens.** ALL PCS / THIS PC (`m`) applies to USAGE, MODELS, COST
   (with a BY MACHINE panel), ACTIVITY, and HISTORY. APISTAT and LIMITS are
   account data, so they stay as they are.

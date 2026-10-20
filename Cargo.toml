@@ -1,16 +1,18 @@
 [package]
 name = "llmon"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.103"
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4.43", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+ring = "0.17.14"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
