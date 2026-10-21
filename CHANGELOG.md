@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.10
+
+- Claude limits: the `claude -p /usage` fallback now also works with Claude
+  Code builds whose JSON output has no `usage_report` (seen on macOS): llmon
+  reads the `Current session` and `Current week` lines of the text instead,
+  in both date spellings (`Oct 21 at 8:20pm`, `Oct 21, 8:20pm`). The report
+  is still preferred when it is there. The error for output with neither now
+  says "no usage report or limits" and no longer claims the cause is the login.
+
 ## 0.5.9
 
 - Claude limits: when the status-line snapshot is more than 15 minutes old

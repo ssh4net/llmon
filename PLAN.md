@@ -269,7 +269,8 @@ The maintainer adds the rest.
   Code's status line.
 - **Stale status line.** The snapshot only changes while Claude Code runs.
   Once it is older than 15 minutes, the limits worker runs
-  `claude -p /usage` (JSON `usage_report`, no tokens, no transcript) every
+  `claude -p /usage` (JSON `usage_report` or, for builds without one, its
+  text lines; no tokens, no transcript) every
   10 minutes at most, and pauses when the status line is live again
   (`docs/sources.md` S6).
 

@@ -10,16 +10,22 @@
 //! In print mode with `--output-format json`, Claude Code emits the events of
 //! the run; the `/usage` one carries a `usage_report` with a `rate_limits`
 //! object in the same `limits[]` shape as the OAuth endpoint (field notes in
-//! `docs/sources.md`). The text of the command is for people and is not
-//! parsed. The report is undocumented, so a missing field is an error, not a
-//! panic.
+//! `docs/sources.md`). The report is undocumented, so a missing field is an
+//! error, not a panic. Some Claude Code builds print only the result event,
+//! with the text of the command and no report; then the `Current session` and
+//! `Current week` lines of that text are read instead (`parse_text`). The
+//! report always wins when both are there.
 //!
 //! Flags keep the call light and free of side effects: `--no-session-persistence`
 //! leaves no transcript for the usage scan to count, and `--safe-mode` skips
 //! the user's hooks, MCP servers, and plugins.
 
-use super::{oauth, unix_now, AccountRateLimits, LimitsSourceKind};
+use super::{
+    oauth, unix_now, AccountRateLimits, LimitsSourceKind, RateLimitSnapshot, RateLimitWindow,
+    FIVE_HOUR_WINDOW_MINS, SEVEN_DAY_WINDOW_MINS,
+};
 use anyhow::{bail, Context, Result};
+use chrono::{Datelike, Local, TimeZone};
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -285,9 +291,10 @@ fn drain(mut reader: impl Read, cap: usize) -> Vec<u8> {
     kept
 }
 
-/// The limits of the first `usage_report` in the output of
-/// `claude -p /usage --output-format json`: a JSON array of events (a single
-/// event object and one event per line are accepted too).
+/// The limits in the output of `claude -p /usage --output-format json`: a
+/// JSON array of events (a single event object and one event per line are
+/// accepted too). The first `usage_report` is used; without one, the text of
+/// the command.
 pub(crate) fn parse_output(text: &str, now: i64) -> Result<AccountRateLimits> {
     let events = match serde_json::from_str::<Value>(text) {
         Ok(Value::Array(events)) => events,
@@ -300,20 +307,158 @@ pub(crate) fn parse_output(text: &str, now: i64) -> Result<AccountRateLimits> {
     if events.is_empty() {
         bail!("claude printed no JSON events");
     }
-    let report = events
-        .iter()
-        .find_map(|event| event.get("usage_report"))
-        .context("claude reported no usage (a subscription login is needed)")?;
+    let mut limits = match events.iter().find_map(|event| event.get("usage_report")) {
+        Some(report) => parse_report(report, now)?,
+        None => parse_text(&events, now).context(
+            "claude's output has no usage report or limits (a subscription login is needed)",
+        )?,
+    };
+    limits.source = LimitsSourceKind::UsageCommand;
+    Ok(limits)
+}
+
+fn parse_report(report: &Value, now: i64) -> Result<AccountRateLimits> {
     let rate_limits = report
         .get("rate_limits")
         .filter(|rate_limits| rate_limits.is_object())
         .context("claude's usage report has no rate limits")?;
-    let mut limits = oauth::parse_usage(rate_limits, now)?;
+    let limits = oauth::parse_usage(rate_limits, now)?;
     if limits.primary.is_none() && limits.secondary.is_none() && limits.buckets.is_empty() {
         bail!("claude's usage report lists no limits");
     }
-    limits.source = LimitsSourceKind::UsageCommand;
     Ok(limits)
+}
+
+/// The limits from the text of the command, for builds whose JSON has no
+/// `usage_report`. Its limit lines read
+/// `Current session: 6% used - resets Oct 21 at 8:20pm (Region/City)` and
+/// `Current week (all models): ...` or `Current week (<model>): ...`; the date
+/// is written `Oct 21 at 8:20pm` or `Oct 21, 8:20pm` depending on the version.
+/// Lines that do not fit are skipped, and the text carries no extra usage or
+/// active limit.
+fn parse_text(events: &[Value], now: i64) -> Option<AccountRateLimits> {
+    let text = events
+        .iter()
+        .flat_map(|event| {
+            ["result", "local_command_source"]
+                .into_iter()
+                .filter_map(move |key| event.get(key)?.as_str())
+        })
+        .find(|text| text.lines().any(|line| line.trim().starts_with("Current ")))?;
+    let mut limits = AccountRateLimits::empty(LimitsSourceKind::UsageCommand, now);
+    for line in text.lines() {
+        add_text_limit(&mut limits, line.trim(), now);
+    }
+    (limits.primary.is_some() || limits.secondary.is_some() || !limits.buckets.is_empty())
+        .then_some(limits)
+}
+
+fn add_text_limit(limits: &mut AccountRateLimits, line: &str, now: i64) -> Option<()> {
+    let (label, rest) = line.strip_prefix("Current ")?.split_once(": ")?;
+    let (percent, rest) = rest.split_once("% used")?;
+    let percent = percent.trim().parse::<f64>().ok()?;
+    // A reset that cannot be read leaves the percentage without a countdown.
+    let resets_at = rest
+        .split_once("resets ")
+        .and_then(|(_, when)| parse_reset(when, now));
+    let window = |minutes| RateLimitWindow {
+        used_percent: Some(percent),
+        window_duration_mins: Some(minutes),
+        resets_at,
+    };
+    if label == "session" {
+        limits.primary = Some(window(FIVE_HOUR_WINDOW_MINS));
+        return Some(());
+    }
+    let scope = label.strip_prefix("week")?.trim();
+    let scope = scope
+        .strip_prefix('(')
+        .and_then(|scope| scope.strip_suffix(')'))
+        .map(str::trim);
+    match scope {
+        None => limits.secondary = Some(window(SEVEN_DAY_WINDOW_MINS)),
+        Some(scope) if scope.eq_ignore_ascii_case("all models") => {
+            limits.secondary = Some(window(SEVEN_DAY_WINDOW_MINS));
+        }
+        Some(scope) => limits.buckets.push(RateLimitSnapshot {
+            limit_name: Some(scope.strip_suffix(" only").unwrap_or(scope).to_string()),
+            primary: Some(window(SEVEN_DAY_WINDOW_MINS)),
+        }),
+    }
+    Some(())
+}
+
+/// Unix seconds of a reset written in local time, as Claude Code prints it in
+/// the time zone of this machine: `Oct 21 at 8:20pm (Region/City)`,
+/// `Oct 21, 8:20pm`, or just `8:20pm` for the next time the clock shows it.
+/// The zone name is not needed: llmon starts Claude Code with its own
+/// environment, so both use the same zone.
+fn parse_reset(when: &str, now: i64) -> Option<i64> {
+    let when = when.split(" (").next()?.replace(',', " ");
+    let mut words = when
+        .split_whitespace()
+        .filter(|word| !word.eq_ignore_ascii_case("at"));
+    let first = words.next()?;
+    let (date, clock) = match words.next() {
+        Some(day) => (Some((first, day)), words.next()?),
+        None => (None, first),
+    };
+    if words.next().is_some() {
+        return None;
+    }
+    let (hour, minute) = parse_clock(clock)?;
+    let today = Local.timestamp_opt(now, 0).single()?;
+    let at = |year: i32, month: u32, day: u32| {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .map(|time| time.timestamp())
+    };
+    match date {
+        Some((month, day)) => {
+            let (month, day) = (month_number(month)?, day.parse::<u32>().ok()?);
+            // A reset lies ahead, so a date that is long past is next year's.
+            match at(today.year(), month, day)? {
+                found if found + 86_400 >= now => Some(found),
+                _ => at(today.year() + 1, month, day),
+            }
+        }
+        None => match at(today.year(), today.month(), today.day())? {
+            found if found >= now => Some(found),
+            _ => {
+                let tomorrow = today.date_naive().succ_opt()?;
+                at(tomorrow.year(), tomorrow.month(), tomorrow.day())
+            }
+        },
+    }
+}
+
+/// `8:20pm`, `6pm`, `12am` as a 24-hour (hour, minute).
+fn parse_clock(text: &str) -> Option<(u32, u32)> {
+    let text = text.to_ascii_lowercase();
+    let (digits, pm) = match text.strip_suffix("pm") {
+        Some(digits) => (digits, true),
+        None => (text.strip_suffix("am")?, false),
+    };
+    let (hour, minute) = match digits.split_once(':') {
+        Some((hour, minute)) => (hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?),
+        None => (digits.parse::<u32>().ok()?, 0),
+    };
+    if !(1..=12).contains(&hour) || minute > 59 {
+        return None;
+    }
+    Some((hour % 12 + if pm { 12 } else { 0 }, minute))
+}
+
+fn month_number(name: &str) -> Option<u32> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let prefix = name.get(..3)?.to_ascii_lowercase();
+    MONTHS
+        .iter()
+        .position(|month| *month == prefix)
+        .map(|index| index as u32 + 1)
 }
 
 #[cfg(test)]
@@ -430,6 +575,132 @@ mod tests {
         for (input, expected) in cases {
             let error = parse_output(input, NOW).expect_err(input);
             assert!(error.to_string().contains(expected), "{input}: {error}");
+        }
+    }
+
+    fn local_unix(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("local time")
+            .timestamp()
+    }
+
+    /// The text of the command in the layout of a build that prints no
+    /// `usage_report`. Values are synthetic; `\u{b7}` is a middle dot.
+    fn sample_text(separator: &str) -> String {
+        format!(
+            "You are currently using your subscription to power your Claude Code usage\n\n\
+             Current session: 12% used \u{b7} resets Jan 15{separator}10am (Region/City)\n\
+             Current week (all models): 34% used \u{b7} resets Jan 20{separator}9:30pm (Region/City)\n\
+             Current week (Sonnet only): 5% used \u{b7} resets Jan 20{separator}9:30pm (Region/City)\n\n\
+             What's contributing to your limits usage?\n\
+             Last 24h \u{b7} 10 requests \u{b7} 1 session\n  50% of your usage was at >150k context"
+        )
+    }
+
+    #[test]
+    fn the_text_is_read_when_there_is_no_usage_report() {
+        let now = local_unix(2027, 1, 14, 9, 0);
+        for separator in [" at ", ", "] {
+            let output = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "local_command": "usage",
+                "result": sample_text(separator),
+            })
+            .to_string();
+            let limits = parse_output(&output, now).expect(separator);
+            assert_eq!(limits.source, LimitsSourceKind::UsageCommand);
+            assert_eq!(limits.captured_at, now);
+            let session = limits.primary.expect("session");
+            assert_eq!(session.used_percent, Some(12.0));
+            assert_eq!(session.window_duration_mins, Some(FIVE_HOUR_WINDOW_MINS));
+            assert_eq!(session.resets_at, Some(local_unix(2027, 1, 15, 10, 0)));
+            let weekly = limits.secondary.expect("weekly");
+            assert_eq!(weekly.used_percent, Some(34.0));
+            assert_eq!(weekly.window_duration_mins, Some(SEVEN_DAY_WINDOW_MINS));
+            assert_eq!(weekly.resets_at, Some(local_unix(2027, 1, 20, 21, 30)));
+            assert_eq!(limits.buckets.len(), 1);
+            assert_eq!(limits.buckets[0].limit_name.as_deref(), Some("Sonnet"));
+            let scoped = limits.buckets[0].primary.as_ref().expect("bucket");
+            assert_eq!(scoped.used_percent, Some(5.0));
+            assert_eq!(limits.active_limit, None);
+            assert!(limits.extra_usage.is_none());
+        }
+    }
+
+    #[test]
+    fn the_text_is_found_in_the_local_command_source_too() {
+        let events = serde_json::json!([
+            {"type": "assistant",
+             "local_command_source": format!("<local-command-stdout>{}</local-command-stdout>",
+                                             sample_text(" at "))},
+            {"type": "result", "result": sample_text(" at ")}
+        ])
+        .to_string();
+        let limits = parse_output(&events, local_unix(2027, 1, 14, 9, 0)).expect("parse");
+        assert_eq!(limits.buckets.len(), 1, "one copy of the text is read");
+        assert_eq!(limits.primary.and_then(|w| w.used_percent), Some(12.0));
+    }
+
+    #[test]
+    fn the_usage_report_wins_over_the_text() {
+        let mut events: Vec<Value> = serde_json::from_str(&sample_output()).expect("events");
+        events.push(serde_json::json!({
+            "type": "result",
+            "result": "Current session: 99% used \u{b7} resets Jan 15 at 10am (Region/City)"
+        }));
+        let limits = parse_output(&Value::Array(events).to_string(), NOW).expect("parse");
+        assert_eq!(limits.primary.and_then(|w| w.used_percent), Some(12.0));
+    }
+
+    #[test]
+    fn a_reset_that_cannot_be_read_keeps_the_percentage() {
+        let output = serde_json::json!({
+            "result": "Current session: 40% used \u{b7} resets soon\nCurrent week (all models): 7% used"
+        })
+        .to_string();
+        let limits = parse_output(&output, NOW).expect("parse");
+        let session = limits.primary.expect("session");
+        assert_eq!(session.used_percent, Some(40.0));
+        assert_eq!(session.resets_at, None);
+        assert_eq!(limits.secondary.and_then(|w| w.used_percent), Some(7.0));
+    }
+
+    #[test]
+    fn reset_times_are_read_in_every_written_form() {
+        let now = local_unix(2027, 1, 14, 9, 0);
+        let cases = [
+            (
+                "Jan 15 at 10:05am (Region/City)",
+                Some((2027, 1, 15, 10, 5)),
+            ),
+            ("Jan 15, 10:05am (Region/City)", Some((2027, 1, 15, 10, 5))),
+            ("Jan 15 at 12am", Some((2027, 1, 15, 0, 0))),
+            ("Jan 15 at 12pm", Some((2027, 1, 15, 12, 0))),
+            ("Jan 15 at 11:59PM", Some((2027, 1, 15, 23, 59))),
+            ("Sept 3 at 1pm", Some((2027, 9, 3, 13, 0))),
+            ("Mar 3 at 1pm", Some((2027, 3, 3, 13, 0))),
+            // Only a time: the next time the clock shows it.
+            ("6pm (Region/City)", Some((2027, 1, 14, 18, 0))),
+            ("8am", Some((2027, 1, 15, 8, 0))),
+            // A date that is long past is next year's.
+            ("Jan 2 at 1pm", Some((2028, 1, 2, 13, 0))),
+            ("Jan 13 at 1pm", Some((2027, 1, 13, 13, 0))),
+            ("soon", None),
+            ("Foo 3 at 1pm", None),
+            ("Jan 15 at 25pm", None),
+            ("Jan 15 at 10:61am", None),
+            ("Jan 15 at 0am", None),
+            ("Jan 15 at 10", None),
+            ("Feb 30 at 1pm", None),
+            ("Jan 15 at 10am extra", None),
+            ("", None),
+        ];
+        for (text, expected) in cases {
+            let expected = expected.map(|(y, mo, d, h, mi)| local_unix(y, mo, d, h, mi));
+            assert_eq!(parse_reset(text, now), expected, "{text}");
         }
     }
 

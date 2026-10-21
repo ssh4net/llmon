@@ -69,15 +69,26 @@ Observed 2026-10-21 with Claude Code 2.1.304 on a subscription account.
   know the flag fail with `unknown option`, and llmon repeats the call
   without it.
 - Output is a JSON array of events (`system` init, an `assistant` event, a
-  `result`). The `assistant` event has `local_command_source` (the text for
-  people, not parsed) and `usage_report`:
+  `result`). The `assistant` event has `local_command_source` (the text
+  people read) and `usage_report`:
   `{session{total_cost_usd, ...}, rate_limits{limits[], extra_usage{is_enabled,
   monthly_limit, used_credits, utilization, currency}}}`.
 - `rate_limits.limits[]` has the same entries as S1 (`kind`, `group`,
   `percent`, `resets_at` as RFC 3339, `scope`, `severity`, `is_active`), so it
   goes through the same parser. Per-model weekly limits are included.
-- An account without a subscription login prints no `usage_report`; llmon
-  reports "no usage" and tries again at the next interval.
+- Some builds print only the `result` event, one JSON object whose `result`
+  is the text and which has no `usage_report` (seen on macOS; the build was
+  not recorded). llmon then reads the text lines
+  `Current session: 6% used - resets Oct 21 at 8:20pm (Region/City)` and
+  `Current week (all models)` / `Current week (<model>)` (the separator is a
+  middle dot). The date is `Oct 21 at 8:20pm` in one build and
+  `Oct 21, 8:20pm` in another; the year is missing, the minute is rounded,
+  and the zone is the machine's own, so llmon reads it in its local zone.
+  The text has no extra usage and no active limit. A reset that does not
+  parse leaves the percentage without a countdown. The report wins when both
+  are there.
+- An account without a subscription login prints neither; llmon reports "no
+  usage report or limits" and tries again at the next interval.
 - `/status` does not run in print mode ("isn't available in this
   environment").
 
