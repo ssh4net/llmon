@@ -199,6 +199,11 @@ the passphrase itself in your password manager: you type it once on each PC.
 `LLMON_SYNC_PASSPHRASE` in the environment takes precedence over the stored
 key and stores nothing.
 
+With a key already stored, every one of these asks `[y/N]` first (the default
+is no), because the passphrase is not stored: a replaced or removed key cannot
+be shown again, and the other PCs could no longer read this PC's files. Without
+a terminal, and with `--stdin`, add `--force` to skip the question.
+
 - Each file is encrypted and authenticated (ChaCha20-Poly1305, with the key
   derived from the passphrase by Argon2id), and named by the machine id
   alone: no `llmon`, no extension, nothing readable. The folder shows random

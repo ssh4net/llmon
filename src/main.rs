@@ -233,7 +233,8 @@ enum SyncCommand {
     ///
     /// Use the same passphrase on every PC. Only the key derived from it is
     /// stored (a private file in the llmon home), never the passphrase, and
-    /// `LLMON_SYNC_PASSPHRASE` takes precedence over the stored key.
+    /// `LLMON_SYNC_PASSPHRASE` takes precedence over the stored key. With a
+    /// key already stored, it asks before replacing or deleting it.
     Passphrase {
         /// Make a random passphrase, show it once, and store its key.
         #[arg(long, conflicts_with_all = ["stdin", "remove"])]
@@ -244,6 +245,9 @@ enum SyncCommand {
         /// Delete the stored key; the files are plain again.
         #[arg(long, conflicts_with_all = ["generate", "stdin"])]
         remove: bool,
+        /// Replace or delete a stored key without asking (for scripts).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -405,6 +409,7 @@ async fn main() -> Result<()> {
                 generate,
                 stdin,
                 remove,
+                force,
             },
     }) = &args.command
     {
@@ -419,7 +424,7 @@ async fn main() -> Result<()> {
         } else {
             sync::passphrase::Action::Prompt
         };
-        return sync::passphrase::run(&home, action);
+        return sync::passphrase::run(&home, action, *force);
     }
 
     if args.dump_limits {

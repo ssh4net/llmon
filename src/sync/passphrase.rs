@@ -1,6 +1,8 @@
 //! `llmon sync passphrase`: sets, generates or removes the key that encrypts
 //! the sync files (see `crypto`). Only the key the passphrase derives is
-//! stored, in a private file in the llmon home; the passphrase is not.
+//! stored, in a private file in the llmon home; the passphrase is not, so a
+//! stored key cannot be got back once it is replaced or removed. That is why
+//! changing it asks first (`confirm_change`).
 
 use super::crypto::{self, SyncKey};
 use anyhow::{bail, Context, Result};
@@ -25,7 +27,16 @@ pub(crate) enum Action {
     Remove,
 }
 
-pub(crate) fn run(llmon_home: &Path, action: Action) -> Result<()> {
+/// `force` skips the question that is asked when a key is already stored.
+pub(crate) fn run(llmon_home: &Path, action: Action, force: bool) -> Result<()> {
+    confirm_change(
+        llmon_home,
+        action,
+        force,
+        can_ask(action, std::io::stdin().is_terminal()),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
+    )?;
     match action {
         Action::Remove => remove(llmon_home),
         Action::Generate => {
@@ -57,6 +68,65 @@ pub(crate) fn run(llmon_home: &Path, action: Action) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `--stdin` already uses standard input for the passphrase, so only the
+/// other actions can ask, and only when someone is there to answer.
+fn can_ask(action: Action, stdin_is_terminal: bool) -> bool {
+    action != Action::Stdin && stdin_is_terminal
+}
+
+/// A stored key is the one the other PCs' files are encrypted with, and it
+/// cannot be recovered from this PC once it is gone, so replacing or removing
+/// it by accident leaves the PCs unable to read each other's files until the
+/// passphrase is set again everywhere. With a key stored, ask first; where
+/// nobody can answer, refuse unless `force` is set.
+fn confirm_change(
+    llmon_home: &Path,
+    action: Action,
+    force: bool,
+    can_ask: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    let path = crypto::key_file_path(llmon_home);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ if force => return Ok(()),
+        _ => {}
+    }
+    let (verb, effect) = if action == Action::Remove {
+        (
+            "Remove",
+            "This PC would publish plain files again and ignore the other PCs' encrypted ones, and setting the key back needs the passphrase.",
+        )
+    } else {
+        (
+            "Replace",
+            "The other PCs' files are encrypted with the passphrase they have. With a different one, this PC and they cannot read each other's files until every PC has the same passphrase.",
+        )
+    };
+    if !can_ask {
+        bail!(
+            "A sync key is already stored in {}. {effect} Run this in a terminal to confirm, or add --force.",
+            path.display()
+        );
+    }
+    write!(
+        output,
+        "A sync key is already stored in {}.\n{effect}\n{verb} it? [y/N] ",
+        path.display()
+    )
+    .and_then(|()| output.flush())
+    .context("Unable to ask for confirmation")?;
+    let mut answer = String::new();
+    std::io::Read::take(input, MAX_PASSPHRASE_BYTES)
+        .read_line(&mut answer)
+        .context("Unable to read the answer")?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        bail!("Nothing was changed");
+    }
+    Ok(())
 }
 
 fn check_length(passphrase: &str) -> Result<()> {
@@ -174,6 +244,126 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    fn ask(
+        home: &Path,
+        action: Action,
+        force: bool,
+        can_ask: bool,
+        answer: &str,
+    ) -> (Result<()>, String) {
+        let mut output = Vec::new();
+        let result = confirm_change(
+            home,
+            action,
+            force,
+            can_ask,
+            &mut answer.as_bytes(),
+            &mut output,
+        );
+        (result, String::from_utf8(output).expect("utf-8 output"))
+    }
+
+    #[test]
+    fn nothing_is_asked_while_no_key_is_stored() {
+        let home = make_temp_dir("ask-none");
+        for action in [
+            Action::Prompt,
+            Action::Generate,
+            Action::Stdin,
+            Action::Remove,
+        ] {
+            for can_ask in [true, false] {
+                let (result, output) = ask(&home, action, false, can_ask, "");
+                result.expect("no key to lose");
+                assert_eq!(output, "");
+            }
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_stored_key_is_replaced_only_after_a_yes() {
+        let home = make_temp_dir("ask-yes");
+        store(&home, "a long enough passphrase").expect("store");
+        let path = crypto::key_file_path(&home);
+
+        for answer in ["y\n", "Y\n", "yes\r\n", " YES \n", "y"] {
+            let (result, output) = ask(&home, Action::Generate, false, true, answer);
+            result.unwrap_or_else(|error| panic!("{answer:?}: {error}"));
+            assert!(output.contains(&path.display().to_string()), "{output}");
+            assert!(output.ends_with("Replace it? [y/N] "), "{output}");
+        }
+        // Anything else, including no answer at all, keeps the key.
+        for answer in ["", "\n", "n\n", "no\n", "yep\n", "ye\n", "please\n"] {
+            let (result, _) = ask(&home, Action::Prompt, false, true, answer);
+            let error = result.expect_err(answer);
+            assert!(error.to_string().contains("Nothing was changed"), "{error}");
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn without_anyone_to_ask_a_stored_key_needs_force() {
+        let home = make_temp_dir("ask-force");
+        store(&home, "a long enough passphrase").expect("store");
+
+        for action in [
+            Action::Prompt,
+            Action::Generate,
+            Action::Stdin,
+            Action::Remove,
+        ] {
+            // The answer on the input must not be used.
+            let (result, output) = ask(&home, action, false, false, "y\n");
+            let error = result.expect_err("refused");
+            let text = error.to_string();
+            assert!(text.contains("--force"), "{text}");
+            assert!(text.contains(&crypto::key_file_path(&home).display().to_string()));
+            assert_eq!(output, "", "nothing is asked");
+
+            let (result, output) = ask(&home, action, true, false, "");
+            result.expect("forced");
+            assert_eq!(output, "");
+            let (result, output) = ask(&home, action, true, true, "");
+            result.expect("forced, and not asked in a terminal either");
+            assert_eq!(output, "");
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn removing_the_key_says_what_it_does() {
+        let home = make_temp_dir("ask-remove");
+        store(&home, "a long enough passphrase").expect("store");
+        let (result, output) = ask(&home, Action::Remove, false, true, "n\n");
+        assert!(result.is_err());
+        assert!(output.contains("plain files again"), "{output}");
+        assert!(output.ends_with("Remove it? [y/N] "), "{output}");
+
+        let (_, output) = ask(&home, Action::Generate, false, true, "n\n");
+        assert!(output.contains("same passphrase"), "{output}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn only_a_terminal_can_answer_and_stdin_cannot() {
+        assert!(can_ask(Action::Prompt, true));
+        assert!(can_ask(Action::Generate, true));
+        assert!(can_ask(Action::Remove, true));
+        assert!(
+            !can_ask(Action::Stdin, true),
+            "the pipe holds the passphrase"
+        );
+        for action in [
+            Action::Prompt,
+            Action::Generate,
+            Action::Stdin,
+            Action::Remove,
+        ] {
+            assert!(!can_ask(action, false));
+        }
     }
 
     #[test]

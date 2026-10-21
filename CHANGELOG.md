@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.12
+
+- `llmon sync passphrase` now asks `[y/N]` before it replaces or removes a key
+  that is already stored (the default is no), after `--generate` was run a
+  second time by mistake and the old key, which cannot be shown again, was
+  lost. Without a terminal, and with `--stdin`, it refuses unless `--force`
+  is given. With no key stored nothing changes.
+
 ## 0.5.11
 
 - Claude limits: the `claude -p /usage` fallback now passes `--verbose`.

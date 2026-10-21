@@ -181,6 +181,9 @@ same layout; differences are noted per module.
   file layout, breaks every PC that has not updated, so the pinned tests in
   `crypto.rs` must stay. The key is llmon's own secret, not another tool's
   credential, and is the only secret llmon stores (never in `config.json`).
+  Setting, replacing, or removing a stored key asks `[y/N]` first (`--force`
+  skips it; without a terminal it is required), because only the derived key
+  is kept and it cannot be shown again.
   The usage part is the per-project sum of the two maps the scan cache keeps
   per log file (`usage::ExportGroup`, built by `compute_snapshot_with` when
   `SyncOptions::export` is set), so it needs no new aggregation. The export
