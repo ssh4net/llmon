@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.11
+
+- Claude limits: the `claude -p /usage` fallback now passes `--verbose`.
+  Without it, Claude Code prints the structured limits only when its own
+  `verbose` setting is on; with the default setting the output was just the
+  text, which 0.5.10 had to parse (reset times to the minute, no extra usage,
+  no active limit). With `--verbose` llmon gets the full report on every
+  setup. The text reader stays as a fallback.
+
 ## 0.5.10
 
 - Claude limits: the `claude -p /usage` fallback now also works with Claude

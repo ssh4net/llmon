@@ -58,11 +58,18 @@ credits summary; `seven_day_breakdown` is a new "by surface" row.
 
 ## S6. `claude -p /usage` (undocumented; fallback of S5)
 
-`claude -p "/usage" --output-format json --no-session-persistence --safe-mode`
+`claude -p "/usage" --output-format json --verbose --no-session-persistence --safe-mode`
 runs the `/usage` screen as a local command: no model call (zero tokens, zero
 cost, about 3 s), and Claude Code makes the usage request with its own login.
 Observed 2026-10-21 with Claude Code 2.1.304 on a subscription account.
 
+- `--verbose` makes the output the full event list. Without it, the `verbose`
+  setting of the user's Claude Code decides, and it is off by default: the
+  output is then only the `result` event (see below). Seen on 2.1.304 with
+  the setting off (macOS: one object) and on (Linux: array). On 2.1.306 with
+  the setting forced off for one call (`--settings '{"verbose":false}'`) the
+  output is one object, and the array again once `--verbose` is added. Not
+  yet seen on the macOS build with `--verbose`.
 - `--no-session-persistence` leaves no transcript (without it every call
   writes a session file that the usage scan and HISTORY would count).
 - `--safe-mode` skips hooks, MCP servers, and plugins; versions that do not
@@ -76,9 +83,10 @@ Observed 2026-10-21 with Claude Code 2.1.304 on a subscription account.
 - `rate_limits.limits[]` has the same entries as S1 (`kind`, `group`,
   `percent`, `resets_at` as RFC 3339, `scope`, `severity`, `is_active`), so it
   goes through the same parser. Per-model weekly limits are included.
-- Some builds print only the `result` event, one JSON object whose `result`
-  is the text and which has no `usage_report` (seen on macOS; the build was
-  not recorded). llmon then reads the text lines
+- Without verbose mode the output is only the `result` event, one JSON
+  object whose `result` is the text and which has no `usage_report` (the
+  default setting; seen on macOS with 2.1.304). If a build prints no report
+  even with `--verbose`, llmon reads the text lines
   `Current session: 6% used - resets Oct 21 at 8:20pm (Region/City)` and
   `Current week (all models)` / `Current week (<model>)` (the separator is a
   middle dot). The date is `Oct 21 at 8:20pm` in one build and

@@ -7,14 +7,17 @@
 //! tokens, and Claude Code makes the one request to Anthropic with its own
 //! login, so llmon reads no credentials.
 //!
-//! In print mode with `--output-format json`, Claude Code emits the events of
-//! the run; the `/usage` one carries a `usage_report` with a `rate_limits`
-//! object in the same `limits[]` shape as the OAuth endpoint (field notes in
-//! `docs/sources.md`). The report is undocumented, so a missing field is an
-//! error, not a panic. Some Claude Code builds print only the result event,
-//! with the text of the command and no report; then the `Current session` and
-//! `Current week` lines of that text are read instead (`parse_text`). The
-//! report always wins when both are there.
+//! In print mode with `--output-format json --verbose`, Claude Code emits the
+//! events of the run; the `/usage` one carries a `usage_report` with a
+//! `rate_limits` object in the same `limits[]` shape as the OAuth endpoint
+//! (field notes in `docs/sources.md`). The report is undocumented, so a
+//! missing field is an error, not a panic. Without verbose mode, which is the
+//! `verbose` setting of the user's Claude Code and off by default, the output
+//! is only the result event: the text of the command and no report. llmon asks
+//! for `--verbose` so the setting does not matter; a build that prints no
+//! report even so gets the `Current session` and `Current week` lines of that
+//! text read instead (`parse_text`). The report always wins when both are
+//! there.
 //!
 //! Flags keep the call light and free of side effects: `--no-session-persistence`
 //! leaves no transcript for the usage scan to count, and `--safe-mode` skips
@@ -222,6 +225,7 @@ fn run(
         "/usage",
         "--output-format",
         "json",
+        "--verbose",
         "--no-session-persistence",
     ]);
     if safe_mode {
@@ -965,7 +969,9 @@ mod tests {
             assert_eq!(limits.primary.expect("session").used_percent, Some(12.0));
             assert_eq!(
                 calls(&dir),
-                vec!["-p /usage --output-format json --no-session-persistence --safe-mode"]
+                vec![
+                    "-p /usage --output-format json --verbose --no-session-persistence --safe-mode"
+                ]
             );
             let _ = std::fs::remove_dir_all(dir);
         }
