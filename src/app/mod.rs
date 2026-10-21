@@ -22,6 +22,11 @@ use tokio::sync::{mpsc, watch};
 pub struct Config {
     pub claude_dir: Option<std::path::PathBuf>,
     pub claude_limits_mode: ClaudeLimitsMode,
+    /// The `claude` command the status-line fallback runs.
+    pub claude_bin: String,
+    /// How often the status-line fallback asks Claude Code for the limits
+    /// while the snapshot is stale; `None` turns the fallback off.
+    pub claude_usage_poll: Option<Duration>,
     pub codex_bin: Option<String>,
     pub app_server_bin: Option<std::path::PathBuf>,
     pub live_limits_mode: LiveLimitsMode,
@@ -245,6 +250,18 @@ pub enum ClaudeLimitsMode {
     Off,
 }
 
+/// The event for one read of the status-line snapshot.
+fn status_line_event(result: Result<Option<ClaudeLimits>>) -> AppEvent {
+    match result {
+        Ok(Some(limits)) => AppEvent::ClaudeLimitsUpdated(Ok(limits)),
+        Ok(None) => AppEvent::ClaudeLimitsUnavailable {
+            message: "Not set up".to_string(),
+            is_error: false,
+        },
+        Err(err) => AppEvent::ClaudeLimitsUpdated(Err(err)),
+    }
+}
+
 /// Days the MODELS and COST screens cover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DayRange {
@@ -441,6 +458,8 @@ enum RangeScreenCommand {
 enum AppEvent {
     UsageUpdated(crate::harness::Harness, Result<LocalUsageSnapshot>),
     ClaudeLimitsUpdated(Result<ClaudeLimits>),
+    /// The `claude -p /usage` fallback failed (`Some`) or recovered (`None`).
+    ClaudeLimitsPollError(Option<String>),
     ClaudeLimitsUnavailable {
         message: String,
         is_error: bool,
@@ -811,6 +830,7 @@ pub(crate) struct AppState {
     pub(crate) claude_limits_updated_at: Option<Instant>,
     pub(crate) claude_limits_error: Option<String>,
     pub(crate) claude_limits_notice: Option<String>,
+    pub(crate) claude_limits_poll_error: Option<String>,
     pub(crate) claude_limits_mode: ClaudeLimitsMode,
 
     pub(crate) limits: Option<AccountRateLimits>,
@@ -1410,6 +1430,19 @@ async fn run_inner(
         let llmon_home = config.llmon_home.clone();
         let claude_dir = config.claude_dir.clone();
         let refresh = Duration::from_secs(config.refresh_limits_secs);
+        // The status-line snapshot only changes while Claude Code runs. Once
+        // it is stale, `claude -p /usage` is asked now and then; a fresh
+        // snapshot pauses that again.
+        let mut fallback = config
+            .claude_usage_poll
+            .filter(|_| mode == ClaudeLimitsMode::StatusLine)
+            .map(|interval| {
+                crate::providers::claude::limits::usage_cmd::Fallback::new(
+                    config.claude_bin.clone(),
+                    config.llmon_home.clone(),
+                    interval,
+                )
+            });
         let mut shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             let interval = match mode {
@@ -1430,41 +1463,74 @@ async fn run_inner(
                     crate::providers::claude::limits::oauth::MIN_REFRESH_SECS,
                 )),
             };
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             loop {
                 let llmon_home = llmon_home.clone();
                 let claude_dir = claude_dir.clone();
-                let event = tokio::task::spawn_blocking(move || match mode {
-                    ClaudeLimitsMode::StatusLine => {
-                        match crate::providers::claude::limits::statusline::load(
-                            &llmon_home,
-                            crate::providers::claude::limits::unix_now(),
-                        ) {
-                            Ok(Some(limits)) => AppEvent::ClaudeLimitsUpdated(Ok(limits)),
-                            Ok(None) => AppEvent::ClaudeLimitsUnavailable {
-                                message: "Not set up".to_string(),
-                                is_error: false,
-                            },
-                            Err(err) => AppEvent::ClaudeLimitsUpdated(Err(err)),
+                let mut poller = fallback.take();
+                let cancel_poll = cancel.clone();
+                let mut task = tokio::task::spawn_blocking(move || {
+                    let events = match mode {
+                        ClaudeLimitsMode::StatusLine => {
+                            let now_unix = crate::providers::claude::limits::unix_now();
+                            let status = crate::providers::claude::limits::statusline::load(
+                                &llmon_home,
+                                now_unix,
+                            );
+                            match poller.as_mut() {
+                                Some(poller) => {
+                                    let tick = poller.tick(
+                                        status,
+                                        now_unix,
+                                        Instant::now(),
+                                        |bin, cwd| {
+                                            crate::providers::claude::limits::usage_cmd::fetch(
+                                                bin,
+                                                cwd,
+                                                &cancel_poll,
+                                            )
+                                        },
+                                    );
+                                    let mut events = Vec::new();
+                                    if let Some(error) = tick.error {
+                                        events.push(AppEvent::ClaudeLimitsPollError(error));
+                                    }
+                                    events.push(status_line_event(tick.limits));
+                                    events
+                                }
+                                None => vec![status_line_event(status)],
+                            }
                         }
+                        ClaudeLimitsMode::OAuth => vec![match claude_dir {
+                            Some(claude_dir) => AppEvent::ClaudeLimitsUpdated(
+                                crate::providers::claude::limits::oauth::fetch(&claude_dir),
+                            ),
+                            None => AppEvent::ClaudeLimitsUnavailable {
+                                message: "Claude Code config directory not found.".to_string(),
+                                is_error: true,
+                            },
+                        }],
+                        ClaudeLimitsMode::Off => vec![AppEvent::ClaudeLimitsUnavailable {
+                            message: String::new(),
+                            is_error: false,
+                        }],
+                    };
+                    (events, poller)
+                });
+                let result = tokio::select! {
+                    result = &mut task => result,
+                    _ = shutdown_rx.changed() => {
+                        // A running `claude` is stopped, so quitting never waits for it.
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return;
                     }
-                    ClaudeLimitsMode::OAuth => match claude_dir {
-                        Some(claude_dir) => AppEvent::ClaudeLimitsUpdated(
-                            crate::providers::claude::limits::oauth::fetch(&claude_dir),
-                        ),
-                        None => AppEvent::ClaudeLimitsUnavailable {
-                            message: "Claude Code config directory not found.".to_string(),
-                            is_error: true,
-                        },
-                    },
-                    ClaudeLimitsMode::Off => AppEvent::ClaudeLimitsUnavailable {
-                        message: String::new(),
-                        is_error: false,
-                    },
-                })
-                .await;
-                let Ok(event) = event else { return };
-                if evt_tx.send(event).await.is_err() {
-                    return;
+                };
+                let Ok((events, poller)) = result else { return };
+                fallback = poller;
+                for event in events {
+                    if evt_tx.send(event).await.is_err() {
+                        return;
+                    }
                 }
                 tokio::select! {
                     _ = shutdown_rx.changed() => return,
@@ -1708,6 +1774,7 @@ async fn run_inner(
         claude_limits_updated_at: None,
         claude_limits_error: None,
         claude_limits_notice: None,
+        claude_limits_poll_error: None,
         claude_limits_mode: config.claude_limits_mode,
         limits: None,
         limits_updated_at: None,
@@ -3119,6 +3186,10 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
             }
             true
         }
+        AppEvent::ClaudeLimitsPollError(error) => {
+            state.claude_limits_poll_error = error;
+            true
+        }
         AppEvent::ClaudeLimitsUnavailable { message, is_error } => {
             state.claude_limits = None;
             if is_error {
@@ -3682,6 +3753,7 @@ impl AppState {
             claude_limits_updated_at: None,
             claude_limits_error: None,
             claude_limits_notice: None,
+            claude_limits_poll_error: None,
             claude_limits_mode: ClaudeLimitsMode::StatusLine,
             limits: None,
             limits_updated_at: None,

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.9
+
+- Claude limits: when the status-line snapshot is more than 15 minutes old
+  (Claude Code has not run for a while, or the status line is not set up),
+  llmon asks Claude Code for the limits with `claude -p /usage` at most every
+  10 minutes, and stops as soon as the status line is live again. The call
+  costs no tokens, leaves no transcript, skips your hooks and MCP servers
+  (`--safe-mode`), and llmon still reads no credentials. The card says
+  "Via claude /usage, 4m ago" and, if a poll fails, why. New `config.json`
+  keys: `claude_usage_poll_secs` (default 600, at least 300, 0 turns it off)
+  and `claude_bin`. The config schema is now 7.
+
 ## 0.5.8
 
 - `llmon sync passphrase` sets the sync passphrase: it asks twice without

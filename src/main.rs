@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
 
-const USER_CONFIG_SCHEMA_VERSION: u32 = 6;
+const USER_CONFIG_SCHEMA_VERSION: u32 = 7;
 const USER_CONFIG_FILE_NAME: &str = "config.json";
 const DEFAULT_USAGE_DAYS: u32 = 30;
 const DEFAULT_REFRESH_USAGE_SECS: u64 = 300;
@@ -49,6 +49,11 @@ struct UserConfig {
     history_catalog_scan_budget_ms: u64,
     /// Claude Code limits source: "statusline" (default), "oauth", or "off".
     claude_limits: ClaudeLimitsArg,
+    /// Seconds between `claude -p /usage` polls while the status-line snapshot
+    /// is stale (at least 300; 0 turns the fallback off).
+    claude_usage_poll_secs: u64,
+    /// The `claude` command those polls run (default: `claude` from PATH).
+    claude_bin: Option<String>,
     /// Prices that add to or override the built-in tables, per harness:
     /// model id -> USD per million tokens.
     pricing: pricing::PricingOverrides,
@@ -79,6 +84,8 @@ impl Default for UserConfig {
             history_catalog_max_candidates: DEFAULT_HISTORY_CATALOG_MAX_CANDIDATES,
             history_catalog_scan_budget_ms: DEFAULT_HISTORY_CATALOG_SCAN_BUDGET_MS,
             claude_limits: ClaudeLimitsArg::Statusline,
+            claude_usage_poll_secs: providers::claude::limits::usage_cmd::DEFAULT_POLL_SECS,
+            claude_bin: None,
             pricing: pricing::PricingOverrides::default(),
             sync: sync::SyncConfig::default(),
         }
@@ -604,6 +611,14 @@ async fn main() -> Result<()> {
             ClaudeLimitsArg::Oauth => app::ClaudeLimitsMode::OAuth,
             ClaudeLimitsArg::Off => app::ClaudeLimitsMode::Off,
         },
+        claude_bin: user_config
+            .claude_bin
+            .clone()
+            .filter(|bin| !bin.trim().is_empty())
+            .unwrap_or_else(|| "claude".to_string()),
+        claude_usage_poll: providers::claude::limits::usage_cmd::poll_interval(
+            user_config.claude_usage_poll_secs,
+        ),
         codex_bin: args.codex_bin.clone(),
         app_server_bin: args.app_server_bin.clone(),
         live_limits_mode: args.live_limits.into(),
@@ -739,6 +754,42 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).expect("read migrated config"))
                 .expect("parse migrated config");
         assert_eq!(persisted["schema_version"], USER_CONFIG_SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn older_config_gets_the_claude_usage_fallback_defaults() {
+        let llmon_home = make_temp_dir("config-claude-usage-migration");
+        let path = llmon_home.join(USER_CONFIG_FILE_NAME);
+        let older = serde_json::json!({"schema_version": 6, "claude_limits": "statusline"});
+        crate::storage::write_private_file(
+            &path,
+            &serde_json::to_vec_pretty(&older).expect("encode config"),
+        )
+        .expect("write config");
+
+        let migrated = load_or_bootstrap_user_config(&llmon_home).expect("migrate config");
+        assert_eq!(migrated.claude_usage_poll_secs, 600);
+        assert_eq!(migrated.claude_bin, None);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read config"))
+                .expect("parse config");
+        assert_eq!(persisted["schema_version"], USER_CONFIG_SCHEMA_VERSION);
+        assert_eq!(persisted["claude_usage_poll_secs"], 600);
+        assert!(persisted["claude_bin"].is_null(), "{persisted}");
+
+        // An explicit value is kept; 0 turns the fallback off.
+        let off = serde_json::json!({"schema_version": 7, "claude_usage_poll_secs": 0});
+        crate::storage::write_private_file(
+            &path,
+            &serde_json::to_vec_pretty(&off).expect("encode config"),
+        )
+        .expect("write config");
+        let config = load_or_bootstrap_user_config(&llmon_home).expect("load config");
+        assert_eq!(
+            providers::claude::limits::usage_cmd::poll_interval(config.claude_usage_poll_secs),
+            None
+        );
         let _ = std::fs::remove_dir_all(llmon_home);
     }
 

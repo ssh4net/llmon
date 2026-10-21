@@ -267,6 +267,11 @@ The maintainer adds the rest.
 - **Status line.** The `llmon statusline [--wrap]` subcommand replaces
   `claudemon statusline`. It always exits 0 and must never break Claude
   Code's status line.
+- **Stale status line.** The snapshot only changes while Claude Code runs.
+  Once it is older than 15 minutes, the limits worker runs
+  `claude -p /usage` (JSON `usage_report`, no tokens, no transcript) every
+  10 minutes at most, and pauses when the status line is live again
+  (`docs/sources.md` S6).
 
 ## 6. Migration from comon and claudemon
 

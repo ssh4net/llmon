@@ -7,9 +7,15 @@
 //! - OAuth usage endpoint (opt-in): the endpoint behind Claude Code's
 //!   `/usage` screen, called with the user's Claude Code OAuth token. It adds
 //!   per-model weekly limits, extra usage, and the by-surface breakdown.
+//! - `claude -p /usage` (fallback of the status-line source): when the
+//!   status-line snapshot has gone stale, llmon asks Claude Code itself for
+//!   the limits now and then, and stops asking once the status line is live
+//!   again. Claude Code makes the request with its own login, so llmon reads
+//!   no credentials.
 
 pub mod oauth;
 pub mod statusline;
+pub mod usage_cmd;
 
 use chrono::DateTime;
 use serde_json::Value;
@@ -21,6 +27,7 @@ pub const SEVEN_DAY_WINDOW_MINS: f64 = 7.0 * 24.0 * 60.0;
 pub enum LimitsSourceKind {
     StatusLine,
     OAuth,
+    UsageCommand,
 }
 
 impl LimitsSourceKind {
@@ -28,6 +35,7 @@ impl LimitsSourceKind {
         match self {
             Self::StatusLine => "STATUSLINE",
             Self::OAuth => "OAUTH",
+            Self::UsageCommand => "USAGE CMD",
         }
     }
 }
@@ -39,6 +47,18 @@ pub struct RateLimitWindow {
     pub window_duration_mins: Option<f64>,
     /// Unix seconds when the window resets.
     pub resets_at: Option<i64>,
+}
+
+impl RateLimitWindow {
+    /// The window as of `now`: once its reset time has passed, the old
+    /// percentage no longer applies and the new one is unknown.
+    fn expired_as_of(mut self, now: i64) -> Self {
+        if self.resets_at.is_some_and(|reset| reset <= now) {
+            self.used_percent = None;
+            self.resets_at = None;
+        }
+        self
+    }
 }
 
 /// A limit scoped to one model or surface (for example the weekly limit of
@@ -101,6 +121,21 @@ impl AccountRateLimits {
             surfaces: Vec::new(),
             active_limit: None,
         }
+    }
+
+    /// The limits as of `now`, for data that was captured a while ago: every
+    /// window whose reset time has passed loses its percentage.
+    pub fn without_expired(mut self, now: i64) -> Self {
+        self.primary = self.primary.map(|window| window.expired_as_of(now));
+        self.secondary = self.secondary.map(|window| window.expired_as_of(now));
+        self.spend_limit = self.spend_limit.map(|window| window.expired_as_of(now));
+        for bucket in &mut self.buckets {
+            bucket.primary = bucket
+                .primary
+                .take()
+                .map(|window| window.expired_as_of(now));
+        }
+        self
     }
 }
 

@@ -109,6 +109,16 @@ undocumented and uses Claude Code's token, read per request and never stored.
 `--claude-limits off` disables Claude limits. The command never fails Claude Code's status line: on any error it
 prints a minimal line and exits 0. No credentials are read.
 
+The status line only updates while Claude Code runs. When its snapshot is more
+than 15 minutes old (or the status line is not set up), llmon asks Claude Code
+for the limits itself: it runs `claude -p /usage` at most every
+`claude_usage_poll_secs` (default 600, never less than 300; 0 turns it off)
+and stops as soon as the status line is live again. The call costs no tokens,
+leaves no transcript, and runs with `--safe-mode`, so your hooks and MCP
+servers are not started. Claude Code makes the request with its own login;
+llmon reads no credentials. The card then says "Via claude /usage, 4m ago".
+Set `claude_bin` in `config.json` if `claude` is not on the `PATH`.
+
 ## Distributed mode (opt-in)
 
 If you run llmon on several PCs, they can share their usage. This is off
@@ -268,7 +278,7 @@ Config precedence:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "usage_days": 30,
   "refresh_usage_secs": 300,
   "refresh_limits_secs": 60,
@@ -283,6 +293,8 @@ Config precedence:
   "history_deep_depth": 2,
   "history_deep_max_depth": 8,
   "claude_limits": "statusline",
+  "claude_usage_poll_secs": 600,
+  "claude_bin": null,
   "pricing": {},
   "sync": { "dir": null, "machine_name": null, "share_titles": false, "ignore": [] }
 }

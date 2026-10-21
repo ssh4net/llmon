@@ -150,6 +150,15 @@ same layout; differences are noted per module.
   - `providers/claude/limits/statusline.rs` is the `llmon statusline [--wrap]`
     subcommand. It writes `limits.json` atomically, must always exit 0, and
     must never break Claude Code's status line.
+  - `providers/claude/limits/usage_cmd.rs` is the fallback of the status
+    line: while its snapshot is older than `STALE_SNAPSHOT_SECS`, the limits
+    worker (`Fallback::tick`, at most once per `claude_usage_poll_secs`)
+    runs `claude -p /usage --output-format json --no-session-persistence
+    --safe-mode` and reads the structured `usage_report` (never the text),
+    and it stops while the snapshot is fresh. The `claude` process is
+    cancelled on quit (`fetch` takes a cancel flag), and the call must keep
+    `--no-session-persistence`, or every poll leaves a transcript that the
+    usage scan counts.
   - `providers/claude/limits/oauth.rs` reads an undocumented endpoint
     (field notes in `docs/sources.md`). It is opt-in, and the token is read
     per request and never stored or refreshed.

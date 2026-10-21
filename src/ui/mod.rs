@@ -7897,9 +7897,6 @@ fn codex_limits_card_input(state: &AppState) -> LimitsCardInput {
     }
 }
 
-/// Status-line snapshots older than this are flagged as stale.
-const CLAUDE_STALE_SNAPSHOT_SECS: i64 = 15 * 60;
-
 fn claude_limits_card_input(state: &AppState, now: i64) -> LimitsCardInput {
     let message = |head: &str, detail: &[&str]| LimitsCardInput::Message {
         head: head.to_string(),
@@ -7913,21 +7910,40 @@ fn claude_limits_card_input(state: &AppState, now: i64) -> LimitsCardInput {
             return message("Unavailable", &[error]);
         }
         if state.claude_limits_notice.is_some() {
-            return message(
-                "Not set up",
-                &[
-                    "Set the Claude Code statusLine command to:",
-                    "llmon statusline",
-                ],
-            );
+            let mut detail = vec![
+                "Set the Claude Code statusLine command to:".to_string(),
+                "llmon statusline".to_string(),
+            ];
+            if let Some(error) = state.claude_limits_poll_error.as_deref() {
+                detail.push(format!("claude /usage failed: {error}"));
+            }
+            return LimitsCardInput::Message {
+                head: "Not set up".to_string(),
+                detail,
+            };
         }
         return LimitsCardInput::Loading;
     };
+    use crate::providers::claude::limits::{usage_cmd, LimitsSourceKind};
     let age = now.saturating_sub(limits.captured_at).max(0);
+    // Where an old reading came from, and why the fallback could not renew it.
+    let origin = match limits.source {
+        LimitsSourceKind::StatusLine if age > usage_cmd::STALE_SNAPSHOT_SECS => {
+            Some(format!("Status line {} ago", format_reset_countdown(age)))
+        }
+        LimitsSourceKind::UsageCommand => Some(format!(
+            "Via claude /usage, {} ago",
+            format_reset_countdown(age)
+        )),
+        _ => None,
+    };
     let note = state.claude_limits_error.clone().or_else(|| {
-        (limits.source == crate::providers::claude::limits::LimitsSourceKind::StatusLine
-            && age > CLAUDE_STALE_SNAPSHOT_SECS)
-            .then(|| format!("Status line {} ago", format_reset_countdown(age)))
+        match (origin, state.claude_limits_poll_error.as_deref()) {
+            (Some(origin), Some(error)) => Some(format!("{origin}; poll failed: {error}")),
+            (Some(origin), None) => Some(origin),
+            (None, Some(error)) => Some(format!("claude /usage failed: {error}")),
+            (None, None) => None,
+        }
     });
     LimitsCardInput::Limits {
         limits: Box::new(claude_limits_as_codex(limits)),
@@ -8783,6 +8799,37 @@ mod tests {
         assert_eq!(
             lines(&state).last().map(String::as_str),
             Some("Status line 20m ago")
+        );
+
+        // The fallback's failure is told next to it.
+        state.claude_limits_poll_error = Some("claude was not found".to_string());
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("Status line 20m ago; poll failed: claude was not found")
+        );
+
+        // A reading from `claude /usage` says so, and how old it is.
+        state.claude_limits_poll_error = None;
+        let mut polled = synthetic_claude_limits();
+        polled.source = crate::providers::claude::limits::LimitsSourceKind::UsageCommand;
+        polled.captured_at = now - 4 * 60;
+        state.claude_limits = Some(polled);
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("Via claude /usage, 4m ago")
+        );
+        state.claude_limits_poll_error = Some("timed out".to_string());
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("Via claude /usage, 4m ago; poll failed: timed out")
+        );
+
+        // With nothing to show yet, the failure joins the setup hint.
+        state.claude_limits = None;
+        state.claude_limits_notice = Some("Not set up".to_string());
+        assert_eq!(
+            lines(&state).last().map(String::as_str),
+            Some("claude /usage failed: timed out")
         );
     }
 

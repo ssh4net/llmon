@@ -56,6 +56,34 @@ each `weekly_scoped` -> one entry in `buckets` named after
 `scope.model.display_name`. `extra_usage`/`spend` replace the Codex
 credits summary; `seven_day_breakdown` is a new "by surface" row.
 
+## S6. `claude -p /usage` (undocumented; fallback of S5)
+
+`claude -p "/usage" --output-format json --no-session-persistence --safe-mode`
+runs the `/usage` screen as a local command: no model call (zero tokens, zero
+cost, about 3 s), and Claude Code makes the usage request with its own login.
+Observed 2026-10-21 with Claude Code 2.1.304 on a subscription account.
+
+- `--no-session-persistence` leaves no transcript (without it every call
+  writes a session file that the usage scan and HISTORY would count).
+- `--safe-mode` skips hooks, MCP servers, and plugins; versions that do not
+  know the flag fail with `unknown option`, and llmon repeats the call
+  without it.
+- Output is a JSON array of events (`system` init, an `assistant` event, a
+  `result`). The `assistant` event has `local_command_source` (the text for
+  people, not parsed) and `usage_report`:
+  `{session{total_cost_usd, ...}, rate_limits{limits[], extra_usage{is_enabled,
+  monthly_limit, used_credits, utilization, currency}}}`.
+- `rate_limits.limits[]` has the same entries as S1 (`kind`, `group`,
+  `percent`, `resets_at` as RFC 3339, `scope`, `severity`, `is_active`), so it
+  goes through the same parser. Per-model weekly limits are included.
+- An account without a subscription login prints no `usage_report`; llmon
+  reports "no usage" and tries again at the next interval.
+- `/status` does not run in print mode ("isn't available in this
+  environment").
+
+llmon uses it only while the S5 snapshot is stale (older than 15 minutes) and
+at most every `claude_usage_poll_secs` (default 600, floor 300).
+
 ## S5. Status-line input (documented by Claude Code)
 
 Claude Code pipes a JSON object to the `statusLine.command` on stdin. The
@@ -74,4 +102,5 @@ reset time has not passed. The same payload also carries model, session
 cost, context-window usage, and `prompt_cache` health.
 
 S5 needs no credentials, so it is the default source; S1 is opt-in and adds
-per-model weekly limits, extra usage, and the by-surface breakdown.
+per-model weekly limits, extra usage, and the by-surface breakdown. S6 fills
+in for S5 when the snapshot is stale.
