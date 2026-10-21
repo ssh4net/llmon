@@ -267,7 +267,9 @@ that tools touched. See `history_refactoring.md` for why.
 
 - Local commits only; never push or add remotes.
 - Use the maintainer's git identity. No `Co-Authored-By` lines; the only
-  trailer is `Assisted-by: Claude Code / Claude Opus 5.5` after the body.
+  trailer is `Assisted-by: <model name>` after the body, naming the model
+  that wrote the change (for example `Assisted-by: Claude Sonnet 5.5`). Do not
+  ask the maintainer which name to use.
 - One logical change per commit, with a meaningful summary line and body.
 - Every commit bumps the patch version (0.5.1, 0.5.2, ...) in `Cargo.toml`
   and the `llmon` entry of `Cargo.lock`, and adds a line for it to

@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.13
+
+- Docs: the commit trailer rule in `CLAUDE.md` is now
+  `Assisted-by: <model name>`, the model that wrote the change.
+
 ## 0.5.12
 
 - `llmon sync passphrase` now asks `[y/N]` before it replaces or removes a key
