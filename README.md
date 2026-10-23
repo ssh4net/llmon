@@ -157,9 +157,12 @@ files are skipped, for example a second llmon on this PC that reads the same
 logs, which would otherwise count them twice.
 
 Each llmon also reads the other machines' files (every 30 seconds) and adds
-their usage to USAGE, MODELS, COST, and ACTIVITY. The header then shows two
-pills, `ALL PCS (n)` and `THIS PC`; `m` (or a click) switches between them,
-and the choice is remembered. The other machines' projects appear in COST and
+their usage to USAGE, MODELS, COST, and ACTIVITY. The header then shows the
+pills `ALL PCS (n)` and `THIS PC`, and one for each other machine, by name;
+`m` (or a click) steps through them: all PCs, this PC, then each other machine
+alone (its usage, models, projects, and sessions, and none of this PC's). The
+choice is remembered, and a machine that is gone from the folder is dropped
+from it. The other machines' projects appear in COST and
 ACTIVITY by their own paths. A machine whose local calendar is in another
 time zone is counted by its UTC days. Files from the other machines are
 untrusted input: they are size-limited, checked, and cleaned (no control

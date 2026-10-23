@@ -278,15 +278,17 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             // the machine scope is all PCs.
             let pills_extra = match state.sync.as_ref() {
                 Some(sync) => {
+                    let (sessions, show, hide_local) = sync.history_view(state.machine_scope);
                     state.read_browser.set_remote_view(
-                        &sync.remote_sessions,
-                        state.machine_scope == MachineScope::All,
+                        &sessions,
+                        show,
+                        hide_local,
                         Some(&sync.settings.machine.name),
                     );
                     if sync.peers.is_empty() {
                         0
                     } else {
-                        machine_pills_width(sync.peers.len() + 1)
+                        machine_pills_width(sync).min(MACHINE_PILLS_MAX_RESERVED)
                     }
                 }
                 None => {
@@ -484,37 +486,52 @@ fn render_harness_pills(
 }
 
 const MACHINE_THIS_LABEL: &str = "THIS PC";
+/// Longest machine name on a pill, in characters.
+const MACHINE_PILL_NAME_CHARS: usize = 14;
+/// Most columns HISTORY keeps free for the machine pills next to its title.
+const MACHINE_PILLS_MAX_RESERVED: u16 = 60;
 
 fn machine_all_label(machines: usize) -> String {
     format!("ALL PCS ({machines})")
 }
 
+/// The machine pills: ALL PCS, THIS PC, and each other machine by name.
+fn machine_pill_labels(sync: &crate::app::SyncState) -> Vec<(String, MachineScope)> {
+    let mut labels = vec![
+        (machine_all_label(sync.peers.len() + 1), MachineScope::All),
+        (MACHINE_THIS_LABEL.to_string(), MachineScope::ThisPc),
+    ];
+    for peer in sync.peers_by_name() {
+        labels.push((
+            truncate_middle(&peer.machine.name, MACHINE_PILL_NAME_CHARS),
+            MachineScope::Peer(peer.machine.key()),
+        ));
+    }
+    labels
+}
+
 /// Columns the machine pills take after the harness pills.
-fn machine_pills_width(machines: usize) -> u16 {
-    let width = 2
-        + UnicodeWidthStr::width(machine_all_label(machines).as_str())
-        + 2
-        + UnicodeWidthStr::width(MACHINE_THIS_LABEL)
-        + 2;
+fn machine_pills_width(sync: &crate::app::SyncState) -> u16 {
+    let width = 2 + machine_pill_labels(sync)
+        .iter()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()) + 2)
+        .sum::<usize>();
     u16::try_from(width).unwrap_or(u16::MAX)
 }
 
 /// In distributed mode, with other machines in the sync folder: the ALL PCS /
-/// THIS PC pills, which choose whose usage the screens show.
+/// THIS PC pills and one for each other machine, which choose whose usage the
+/// screens show.
 fn render_machine_pills(frame: &mut Frame<'_>, state: &mut AppState, x: u16, y: u16, right: u16) {
     let Some(sync) = state.sync.as_ref().filter(|sync| !sync.peers.is_empty()) else {
         return;
     };
-    let all_label = machine_all_label(sync.peers.len() + 1);
-    let pills = [
-        (all_label.as_str(), MachineScope::All),
-        (MACHINE_THIS_LABEL, MachineScope::ThisPc),
-    ];
+    let pills = machine_pill_labels(sync);
     let mut spans = vec![Span::raw("  ")];
     let mut next_x = x.saturating_add(2);
     let mut targets = Vec::new();
     for (label, scope) in pills {
-        let span = pill(label, state.machine_scope == scope);
+        let span = pill(&label, state.machine_scope == scope);
         let width =
             u16::try_from(UnicodeWidthStr::width(span.content.as_ref())).unwrap_or(u16::MAX);
         if next_x.saturating_add(width) <= right {
@@ -2230,8 +2247,14 @@ fn footer_style_text(state: &AppState) -> String {
     match state.sync.as_ref() {
         Some(_) => {
             let scope = match state.machine_scope {
-                MachineScope::All => "all",
-                MachineScope::ThisPc => "this",
+                MachineScope::All => "all".to_string(),
+                MachineScope::ThisPc => "this".to_string(),
+                MachineScope::Peer(key) => state
+                    .sync
+                    .as_ref()
+                    .and_then(|sync| sync.peers.iter().find(|peer| peer.machine.key() == key))
+                    .map(|peer| truncate_middle(&peer.machine.name, MACHINE_PILL_NAME_CHARS))
+                    .unwrap_or_else(|| "?".to_string()),
             };
             format!("{style}  PCs [m]: {scope}")
         }
@@ -9303,6 +9326,99 @@ mod tests {
     }
 
     #[test]
+    fn one_other_machine_can_be_selected() {
+        use crate::sync::PeerKey;
+        const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        state.harness_view = HarnessView::Codex;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot_with(20, true)));
+        let local_total = state
+            .codex_usage
+            .as_ref()
+            .expect("snapshot")
+            .totals
+            .last30_days_tokens;
+        let mut sync = sync_state_with_peer();
+        sync.peers
+            .push(peer_file("pc-a", ID_A, "/peer/a-project", 2_000_000));
+        state.sync = Some(sync);
+        crate::app::refresh_merged_usage(&mut state);
+        let (key_a, key_b) = (PeerKey::of(ID_A), PeerKey::of(ID_B));
+
+        let total = |state: &AppState| {
+            state
+                .usage_snapshot(Harness::Codex)
+                .expect("snapshot")
+                .totals
+                .last30_days_tokens
+        };
+        state.machine_scope = MachineScope::All;
+        assert_eq!(total(&state), local_total + 7_000_000);
+        state.machine_scope = MachineScope::ThisPc;
+        assert_eq!(total(&state), local_total);
+        // One machine alone: none of this machine's usage, and only its models.
+        state.machine_scope = MachineScope::Peer(key_b);
+        assert_eq!(total(&state), 5_000_000);
+        let models: Vec<String> = state
+            .usage_snapshot(Harness::Codex)
+            .expect("snapshot")
+            .model_daily
+            .iter()
+            .map(|series| series.model.clone())
+            .collect();
+        assert_eq!(models, vec!["peer-model".to_string()]);
+        state.machine_scope = MachineScope::Peer(key_a);
+        assert_eq!(total(&state), 2_000_000);
+        // A harness this machine has no snapshot of yet shows nothing, not
+        // this machine's usage.
+        assert!(state.usage_snapshot(Harness::Claude).is_none());
+
+        // `m` goes round: all, this PC, each machine by name, all again.
+        state.machine_scope = MachineScope::All;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            state.cycle_machine_scope();
+            seen.push(state.machine_scope);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                MachineScope::ThisPc,
+                MachineScope::Peer(key_a),
+                MachineScope::Peer(key_b),
+                MachineScope::All
+            ]
+        );
+
+        // The header offers each machine, and the footer names the one shown.
+        state.machine_scope = MachineScope::Peer(key_b);
+        let text = render_screen_text(&mut state, 200, 45);
+        for label in ["ALL PCS (3)", "THIS PC", "pc-a", "pc-b"] {
+            assert!(text.contains(label), "{label} in\n{text}");
+        }
+        assert!(text.contains("PCs [m]: pc-b"), "{text}");
+        let scopes: Vec<MachineScope> = state
+            .ui_hit_targets
+            .iter()
+            .filter_map(|target| match target.action {
+                UiClickAction::SetMachineScope(scope) => Some(scope),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                MachineScope::All,
+                MachineScope::ThisPc,
+                MachineScope::Peer(key_a),
+                MachineScope::Peer(key_b)
+            ]
+        );
+    }
+
+    #[test]
     fn top_models_cover_the_selected_range() {
         let snapshot = synthetic_codex_snapshot(10);
         let in_range =
@@ -9447,7 +9563,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(scopes, vec![MachineScope::All, MachineScope::ThisPc]);
+        assert_eq!(
+            scopes,
+            vec![
+                MachineScope::All,
+                MachineScope::ThisPc,
+                MachineScope::Peer(crate::sync::PeerKey::of("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+            ],
+            "one pill for each other machine"
+        );
 
         // COST lists the other machine's project; THIS PC leaves it out.
         state.active_screen = ActiveScreen::Cost;
@@ -9554,8 +9678,11 @@ mod tests {
                 session("remote-session-2", 2_000),
             ],
         );
-        sync.peers = vec![Arc::new(peer)];
-        sync.remote_sessions = Arc::new(crate::sync::remote_sessions(&sync.peers));
+        let key = peer.machine.key();
+        sync.apply_scan(crate::sync::PeerScan {
+            peers: vec![Arc::new(peer)],
+            problems: Vec::new(),
+        });
         state.sync = Some(sync);
         let press = |state: &mut AppState, code: KeyCode| {
             let _ = crate::read::tui::handle_event(
@@ -9619,6 +9746,12 @@ mod tests {
         let this = render_screen_text(&mut state, 160, 45);
         assert!(!this.contains("remote-s"), "{this}");
         assert!(this.contains("local title"), "{this}");
+
+        // One other machine alone lists its sessions and none of this one's.
+        state.machine_scope = MachineScope::Peer(key);
+        let only = render_screen_text(&mut state, 160, 45);
+        assert!(only.contains("remote-s"), "{only}");
+        assert!(!only.contains("local title"), "{only}");
     }
 
     #[test]

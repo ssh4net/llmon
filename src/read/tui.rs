@@ -75,6 +75,9 @@ pub(crate) struct BrowserState {
     /// shows them.
     remote_sessions: Arc<Vec<SessionSummary>>,
     show_remote: bool,
+    /// This machine's own sessions are left out (the view of one other
+    /// machine).
+    hide_local: bool,
     /// This machine's name; set while sessions of several machines can be
     /// listed, so each row names its machine.
     local_machine: Option<String>,
@@ -129,30 +132,35 @@ impl BrowserState {
             harness_filter: None,
             remote_sessions: Arc::new(Vec::new()),
             show_remote: false,
+            hide_local: false,
             local_machine: None,
             pills_extra: 0,
         }
     }
 
-    /// Sets the sessions of other machines and whether they are listed.
-    /// `local_machine` names this machine while distributed mode is on.
-    /// Returns whether the list changed.
+    /// Sets the sessions of other machines, whether they are listed, and
+    /// whether this machine's own sessions are left out. `local_machine`
+    /// names this machine while distributed mode is on. Returns whether the
+    /// list changed.
     pub(crate) fn set_remote_view(
         &mut self,
         sessions: &Arc<Vec<SessionSummary>>,
         show: bool,
+        hide_local: bool,
         local_machine: Option<&str>,
     ) -> bool {
         let show = show && !sessions.is_empty();
         let local_machine = local_machine.map(str::to_string);
         if Arc::ptr_eq(&self.remote_sessions, sessions)
             && self.show_remote == show
+            && self.hide_local == hide_local
             && self.local_machine == local_machine
         {
             return false;
         }
         self.remote_sessions = sessions.clone();
         self.show_remote = show;
+        self.hide_local = hide_local;
         self.local_machine = local_machine;
         self.rebuild_visible_catalog();
         true
@@ -160,9 +168,14 @@ impl BrowserState {
 
     /// Distributed mode is off: no remote sessions, no machine names.
     pub(crate) fn clear_remote_view(&mut self) {
-        if self.show_remote || self.local_machine.is_some() || !self.remote_sessions.is_empty() {
+        if self.show_remote
+            || self.hide_local
+            || self.local_machine.is_some()
+            || !self.remote_sessions.is_empty()
+        {
             self.remote_sessions = Arc::new(Vec::new());
             self.show_remote = false;
+            self.hide_local = false;
             self.local_machine = None;
             self.rebuild_visible_catalog();
         }
@@ -338,10 +351,14 @@ impl BrowserState {
         let selected_id = self
             .selected_project()
             .map(|project| project.stable_id.clone());
+        let mut local = self.strict_catalog.clone();
+        if self.hide_local {
+            local.projects.clear();
+        }
         let with_remote = if self.show_remote {
-            with_remote_sessions(&self.strict_catalog, &self.remote_sessions)
+            with_remote_sessions(&local, &self.remote_sessions)
         } else {
-            self.strict_catalog.clone()
+            local
         };
         let strict = match self.harness_filter {
             Some(harness) => filter_catalog(&with_remote, harness),

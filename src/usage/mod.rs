@@ -1869,12 +1869,26 @@ impl std::fmt::Debug for SnapshotParts {
 impl SnapshotParts {
     /// The snapshot of this machine alone.
     fn into_snapshot(self) -> LocalUsageSnapshot {
-        self.meta.assemble(self.acc)
+        let project_usage = self.meta.project_usage.clone();
+        self.meta.assemble(self.acc, project_usage)
     }
 
     /// A snapshot with other machines' usage added to this machine's.
     pub(crate) fn build(&self, remote: &[RemoteUsage]) -> LocalUsageSnapshot {
         let mut acc = self.acc.clone();
+        self.apply_remote(&mut acc, remote);
+        self.meta.assemble(acc, self.meta.project_usage.clone())
+    }
+
+    /// A snapshot of other machines' usage alone, on this machine's scan
+    /// state and day filters: none of this machine's usage or projects.
+    pub(crate) fn build_remote_only(&self, remote: &[RemoteUsage]) -> LocalUsageSnapshot {
+        let mut acc = UsageAccumulator::default();
+        self.apply_remote(&mut acc, remote);
+        self.meta.assemble(acc, Vec::new())
+    }
+
+    fn apply_remote(&self, acc: &mut UsageAccumulator, remote: &[RemoteUsage]) {
         let filters = UsageFilters {
             workspace_path: self.meta.workspace_path.as_deref(),
             summary_days: self.meta.summary_day_keys.iter().cloned().collect(),
@@ -1883,12 +1897,15 @@ impl SnapshotParts {
         for usage in remote {
             acc.apply(usage.usage(), &filters);
         }
-        self.meta.assemble(acc)
     }
 }
 
 impl PartsMeta {
-    fn assemble(&self, acc: UsageAccumulator) -> LocalUsageSnapshot {
+    fn assemble(
+        &self,
+        acc: UsageAccumulator,
+        project_usage: Vec<ProjectUsageSummary>,
+    ) -> LocalUsageSnapshot {
         let chart_day_keys =
             make_complete_chart_day_keys(&acc.daily, UsageZone::Local, &self.summary_day_keys);
         let utc_chart_day_keys = make_complete_chart_day_keys(
@@ -1907,7 +1924,7 @@ impl PartsMeta {
             self.activity_first_weekday,
             self.activity_day_keys.clone(),
             acc.project_activity,
-            self.project_usage.clone(),
+            project_usage,
             acc.model_daily,
             self.scan_total_files,
             self.scan_indexed_files,

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.15
+
+- Machine scope: besides ALL PCS and THIS PC, the header has a pill for each
+  other machine in the sync folder, and `m` steps through all PCs, this PC, and
+  each machine by name. One machine alone shows its usage, models, projects,
+  and sessions on USAGE, MODELS, COST, ACTIVITY, and HISTORY, and none of this
+  PC's. The choice is remembered; a machine whose file is gone is dropped from
+  it. A machine in another time zone is counted by its UTC days, as in ALL PCS.
+
 ## 0.5.14
 
 - USAGE: the TOP_MODELS label is now a MODELS switch with TODAY, 7D, 30D, and

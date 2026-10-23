@@ -158,12 +158,41 @@ pub(crate) struct MachineInfo {
     pub(crate) utc_offset_minutes: i32,
 }
 
+/// A small copyable handle on a machine: the first 16 hex digits of its id.
+/// It stands for the machine in the UI state (the selected scope), which is
+/// `Copy` and saved between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PeerKey(u64);
+
+impl PeerKey {
+    pub(crate) fn of(machine_id: &str) -> Self {
+        let digits: String = machine_id.chars().take(16).collect();
+        Self(u64::from_str_radix(&digits, 16).unwrap_or(0))
+    }
+
+    /// The text kept in `state.json`.
+    pub(crate) fn store_text(self) -> String {
+        format!("{:016x}", self.0)
+    }
+
+    pub(crate) fn from_store_text(text: &str) -> Option<Self> {
+        (text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| u64::from_str_radix(text, 16).ok())
+            .flatten()
+            .map(Self)
+    }
+}
+
 /// Offset of this machine's local calendar from UTC, in minutes.
 pub(crate) fn local_utc_offset_minutes() -> i32 {
     chrono::Local::now().offset().local_minus_utc() / 60
 }
 
 impl MachineInfo {
+    pub(crate) fn key(&self) -> PeerKey {
+        PeerKey::of(&self.id)
+    }
+
     pub(crate) fn local(llmon_home: &Path, name_override: Option<&str>) -> Result<Self> {
         let name = name_override
             .map(str::trim)
@@ -866,6 +895,27 @@ pub(crate) fn remote_usage(
 mod tests {
     use super::*;
     use crate::read::scan::{ProjectRecord, SessionSummary};
+
+    #[test]
+    fn a_machine_key_is_the_start_of_its_id() {
+        let key = PeerKey::of("0123456789abcdef0123456789abcdef");
+        assert_eq!(key, PeerKey::of("0123456789ABCDEF-ignored-tail"));
+        assert_ne!(key, PeerKey::of("1123456789abcdef0123456789abcdef"));
+        assert_eq!(key.store_text(), "0123456789abcdef");
+        assert_eq!(PeerKey::from_store_text("0123456789abcdef"), Some(key));
+        // A short id (8 digits are allowed) keeps its value.
+        assert_eq!(PeerKey::of("0000abcd").store_text(), "000000000000abcd");
+        for bad in [
+            "",
+            "abc",
+            "0123456789abcdeg",
+            "0123456789abcdef0",
+            " 123456789abcdef",
+        ] {
+            assert_eq!(PeerKey::from_store_text(bad), None, "{bad:?}");
+        }
+    }
+
     use crate::usage::TokenBreakdown;
     use std::sync::atomic::{AtomicU64, Ordering};
 

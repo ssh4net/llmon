@@ -393,20 +393,16 @@ pub(crate) enum MachineScope {
     #[default]
     All,
     ThisPc,
+    /// One of the other machines alone.
+    Peer(crate::sync::PeerKey),
 }
 
 impl MachineScope {
-    pub(crate) fn toggled(self) -> Self {
+    fn store_value(self) -> String {
         match self {
-            Self::All => Self::ThisPc,
-            Self::ThisPc => Self::All,
-        }
-    }
-
-    fn store_value(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::ThisPc => "this",
+            Self::All => "all".to_string(),
+            Self::ThisPc => "this".to_string(),
+            Self::Peer(key) => format!("peer:{}", key.store_text()),
         }
     }
 
@@ -414,7 +410,10 @@ impl MachineScope {
         match value {
             "all" => Some(Self::All),
             "this" => Some(Self::ThisPc),
-            _ => None,
+            _ => value
+                .strip_prefix("peer:")
+                .and_then(crate::sync::PeerKey::from_store_text)
+                .map(Self::Peer),
         }
     }
 }
@@ -682,6 +681,14 @@ pub(crate) struct SyncState {
     pub(crate) remote_sessions: std::sync::Arc<Vec<crate::read::scan::SessionSummary>>,
     /// Each harness's snapshot with the other machines' usage added.
     usage_all: BTreeMap<Harness, std::sync::Arc<LocalUsageSnapshot>>,
+    /// Each harness's snapshot of one other machine's usage alone.
+    usage_peers: BTreeMap<(Harness, crate::sync::PeerKey), std::sync::Arc<LocalUsageSnapshot>>,
+    /// The sessions of each other machine, for HISTORY.
+    peer_sessions:
+        BTreeMap<crate::sync::PeerKey, std::sync::Arc<Vec<crate::read::scan::SessionSummary>>>,
+    /// Stands in for a machine that has no sessions (one `Arc`, so the
+    /// browser sees no change from frame to frame).
+    no_sessions: std::sync::Arc<Vec<crate::read::scan::SessionSummary>>,
 }
 
 impl std::fmt::Debug for SyncState {
@@ -714,6 +721,54 @@ impl SyncState {
             read_error: None,
             remote_sessions: std::sync::Arc::new(Vec::new()),
             usage_all: BTreeMap::new(),
+            usage_peers: BTreeMap::new(),
+            peer_sessions: BTreeMap::new(),
+            no_sessions: std::sync::Arc::new(Vec::new()),
+        }
+    }
+
+    /// Takes the latest read of the sync folder.
+    pub(crate) fn apply_scan(&mut self, scan: crate::sync::PeerScan) {
+        self.peers = scan.peers;
+        self.problems = scan.problems;
+        self.read_error = None;
+        self.remote_sessions = std::sync::Arc::new(crate::sync::remote_sessions(&self.peers));
+        self.peer_sessions = sessions_by_machine(&self.remote_sessions);
+    }
+
+    /// The other machines, by name.
+    pub(crate) fn peers_by_name(&self) -> Vec<&std::sync::Arc<crate::sync::SyncFile>> {
+        let mut peers: Vec<_> = self.peers.iter().collect();
+        peers.sort_by_cached_key(|peer| {
+            (
+                peer.machine.name.to_lowercase(),
+                peer.machine.id.to_lowercase(),
+            )
+        });
+        peers
+    }
+
+    /// What HISTORY lists for a scope: the other machines' sessions, whether
+    /// to list them, and whether this machine's own sessions are left out.
+    pub(crate) fn history_view(
+        &self,
+        scope: MachineScope,
+    ) -> (
+        std::sync::Arc<Vec<crate::read::scan::SessionSummary>>,
+        bool,
+        bool,
+    ) {
+        match scope {
+            MachineScope::All => (self.remote_sessions.clone(), true, false),
+            MachineScope::ThisPc => (self.remote_sessions.clone(), false, false),
+            MachineScope::Peer(key) => (
+                self.peer_sessions
+                    .get(&key)
+                    .unwrap_or(&self.no_sessions)
+                    .clone(),
+                true,
+                true,
+            ),
         }
     }
 
@@ -771,6 +826,7 @@ pub(crate) fn refresh_merged_usage(state: &mut AppState) {
         return;
     };
     sync.usage_all.clear();
+    sync.usage_peers.clear();
     if sync.peers.is_empty() {
         return;
     }
@@ -784,11 +840,20 @@ pub(crate) fn refresh_merged_usage(state: &mut AppState) {
             continue;
         };
         let remote = crate::sync::remote_usage(&sync.peers, harness, local_offset);
-        if remote.is_empty() {
-            continue;
+        if !remote.is_empty() {
+            sync.usage_all
+                .insert(harness, std::sync::Arc::new(parts.build(&remote)));
         }
-        sync.usage_all
-            .insert(harness, std::sync::Arc::new(parts.build(&remote)));
+        // Each machine alone, also when it has no usage of this harness
+        // (an empty snapshot, so its scope never shows this machine's).
+        for peer in &sync.peers {
+            let remote =
+                crate::sync::remote_usage(std::slice::from_ref(peer), harness, local_offset);
+            sync.usage_peers.insert(
+                (harness, peer.machine.key()),
+                std::sync::Arc::new(parts.build_remote_only(&remote)),
+            );
+        }
     }
 }
 
@@ -2320,7 +2385,7 @@ fn handle_input_event(
                 return Ok(InputOutcome::Continue(true));
             }
             (KeyCode::Char('m'), _) | (KeyCode::Char('M'), _) if state.sync.is_some() => {
-                state.machine_scope = state.machine_scope.toggled();
+                state.cycle_machine_scope();
                 return Ok(InputOutcome::Continue(true));
             }
             (KeyCode::Char('c'), _) | (KeyCode::Char('C'), _) => {
@@ -3152,17 +3217,42 @@ fn scroll_api_stat_periods(state: &mut AppState, amount: usize, older: bool) -> 
     changed
 }
 
+/// The remote sessions of each machine.
+fn sessions_by_machine(
+    sessions: &[crate::read::scan::SessionSummary],
+) -> BTreeMap<crate::sync::PeerKey, std::sync::Arc<Vec<crate::read::scan::SessionSummary>>> {
+    let mut by_machine: BTreeMap<crate::sync::PeerKey, Vec<crate::read::scan::SessionSummary>> =
+        BTreeMap::new();
+    for session in sessions {
+        if let Some(remote) = session.remote.as_ref() {
+            by_machine
+                .entry(crate::sync::PeerKey::of(&remote.machine_id))
+                .or_default()
+                .push(session.clone());
+        }
+    }
+    by_machine
+        .into_iter()
+        .map(|(key, sessions)| (key, std::sync::Arc::new(sessions)))
+        .collect()
+}
+
 fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
     match evt {
         AppEvent::PeersUpdated(result) => {
             if let Some(sync) = state.sync.as_mut() {
                 match result {
                     Ok(scan) => {
-                        sync.peers = scan.peers;
-                        sync.problems = scan.problems;
-                        sync.read_error = None;
-                        sync.remote_sessions =
-                            std::sync::Arc::new(crate::sync::remote_sessions(&sync.peers));
+                        sync.apply_scan(scan);
+                        // A machine that is gone (its file removed, or now
+                        // ignored) cannot stay selected. Only a real read
+                        // decides this: before the first one, the saved
+                        // choice waits.
+                        if let MachineScope::Peer(key) = state.machine_scope {
+                            if !sync.peers.iter().any(|peer| peer.machine.key() == key) {
+                                state.machine_scope = MachineScope::All;
+                            }
+                        }
                     }
                     // The last machines read stay, next to the error.
                     Err(error) => sync.read_error = Some(format!("{error:#}")),
@@ -3562,7 +3652,7 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.claude_accent_theme = Some(state.harness_themes.claude.store_value().to_string());
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
     store.global.harness_view = Some(state.harness_view.store_value().to_string());
-    store.global.machine_scope = Some(state.machine_scope.store_value().to_string());
+    store.global.machine_scope = Some(state.machine_scope.store_value());
     store.global.usage_focus = Some(state.usage_focus.key().to_string());
     store.global.models_range = Some(state.models_range.store_value().to_string());
     store.global.cost_range = Some(state.cost_range.store_value().to_string());
@@ -3875,6 +3965,30 @@ impl AppState {
         self.harness_themes.get(harness).colors()
     }
 
+    /// `m`: all PCs, this PC, then each other machine by name, and round again.
+    pub(crate) fn cycle_machine_scope(&mut self) {
+        let keys: Vec<crate::sync::PeerKey> = self
+            .sync
+            .as_ref()
+            .map(|sync| {
+                sync.peers_by_name()
+                    .iter()
+                    .map(|peer| peer.machine.key())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.machine_scope = match self.machine_scope {
+            MachineScope::All => MachineScope::ThisPc,
+            MachineScope::ThisPc => keys
+                .first()
+                .map_or(MachineScope::All, |key| MachineScope::Peer(*key)),
+            MachineScope::Peer(current) => match keys.iter().position(|key| *key == current) {
+                Some(index) if index + 1 < keys.len() => MachineScope::Peer(keys[index + 1]),
+                _ => MachineScope::All,
+            },
+        };
+    }
+
     /// The usage snapshot of a harness for the selected machine scope: with
     /// the other machines' usage added when the scope is all machines and
     /// there are any, else this machine's alone.
@@ -3882,14 +3996,26 @@ impl AppState {
         &self,
         harness: Harness,
     ) -> Option<std::sync::Arc<LocalUsageSnapshot>> {
-        if self.machine_scope == MachineScope::All {
-            if let Some(all) = self
-                .sync
-                .as_ref()
-                .and_then(|sync| sync.usage_all.get(&harness))
-            {
-                return Some(all.clone());
+        match self.machine_scope {
+            MachineScope::All => {
+                if let Some(all) = self
+                    .sync
+                    .as_ref()
+                    .and_then(|sync| sync.usage_all.get(&harness))
+                {
+                    return Some(all.clone());
+                }
             }
+            // Never this machine's snapshot in place of another's: until
+            // the machine is read, there is nothing to show.
+            MachineScope::Peer(key) => {
+                return self
+                    .sync
+                    .as_ref()
+                    .and_then(|sync| sync.usage_peers.get(&(harness, key)))
+                    .cloned();
+            }
+            MachineScope::ThisPc => {}
         }
         match harness {
             Harness::Codex => self.codex_usage.clone(),
@@ -4528,6 +4654,159 @@ mod tests {
         let loaded = load_persisted_ui_state(&home, None).expect("load");
         assert_eq!(loaded.machine_scope, MachineScope::ThisPc);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn test_sync_state() -> SyncState {
+        let (tx, _rx) = tokio::sync::watch::channel(None);
+        let settings = crate::sync::SyncSettings {
+            dir: std::path::PathBuf::from("/share"),
+            machine: crate::sync::MachineInfo {
+                id: "00000000000000000000000000000000".to_string(),
+                name: "this-pc".to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.14".to_string(),
+                utc_offset_minutes: 0,
+            },
+            share_titles: false,
+            ignore: Vec::new(),
+            key: None,
+        };
+        SyncState::new(settings, tx, 1)
+    }
+
+    /// A machine's file with one Codex session.
+    fn peer_with_session(
+        name: &str,
+        id: &str,
+        session_id: &str,
+    ) -> std::sync::Arc<crate::sync::SyncFile> {
+        let session = crate::sync::ExportSession {
+            id: session_id.to_string(),
+            cwd: "/peer/project".to_string(),
+            started_at: Some("2026-09-01T10:00:00Z".to_string()),
+            started_ms: 1_788_000_000_000,
+            model: None,
+            provider: None,
+            client_version: None,
+            branch: None,
+            commit: None,
+            repo: None,
+            title: None,
+            subagents: 0,
+            tokens: Some(10),
+        };
+        std::sync::Arc::new(crate::sync::SyncFile {
+            format: crate::sync::SYNC_FORMAT.to_string(),
+            version: crate::sync::SYNC_VERSION,
+            machine: crate::sync::MachineInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                os: "Linux".to_string(),
+                llmon: "0.5.14".to_string(),
+                utc_offset_minutes: 0,
+            },
+            generated_at: 1,
+            usage: BTreeMap::new(),
+            sessions: BTreeMap::from([("codex".to_string(), vec![session])]),
+        })
+    }
+
+    #[test]
+    fn history_follows_the_machine_scope_and_a_gone_machine_is_deselected() {
+        use crate::sync::{PeerKey, PeerScan};
+        const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut state = AppState::for_tests();
+        state.sync = Some(test_sync_state());
+        let (key_a, key_b) = (PeerKey::of(ID_A), PeerKey::of(ID_B));
+
+        // A choice kept from the last run waits for the first read.
+        state.machine_scope = MachineScope::Peer(key_b);
+        assert!(handle_app_event(
+            &mut state,
+            AppEvent::PeersUpdated(Err(anyhow::anyhow!("folder not mounted")))
+        ));
+        assert_eq!(state.machine_scope, MachineScope::Peer(key_b));
+
+        let scan = PeerScan {
+            peers: vec![
+                peer_with_session("pc-a", ID_A, "session-a"),
+                peer_with_session("pc-b", ID_B, "session-b"),
+            ],
+            problems: Vec::new(),
+        };
+        handle_app_event(&mut state, AppEvent::PeersUpdated(Ok(scan)));
+        assert_eq!(
+            state.machine_scope,
+            MachineScope::Peer(key_b),
+            "still there"
+        );
+
+        let sync = state.sync.as_ref().expect("sync");
+        let titles = |sessions: &[crate::read::scan::SessionSummary]| -> Vec<String> {
+            let mut ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        let (all, show, hide_local) = sync.history_view(MachineScope::All);
+        assert_eq!(
+            (titles(&all), show, hide_local),
+            (vec!["session-a".into(), "session-b".into()], true, false)
+        );
+        let (_, show, hide_local) = sync.history_view(MachineScope::ThisPc);
+        assert_eq!((show, hide_local), (false, false));
+        let (only_b, show, hide_local) = sync.history_view(MachineScope::Peer(key_b));
+        assert_eq!(
+            (titles(&only_b), show, hide_local),
+            (vec!["session-b".into()], true, true)
+        );
+        let (only_a, _, _) = sync.history_view(MachineScope::Peer(key_a));
+        assert_eq!(titles(&only_a), vec!["session-a".to_string()]);
+        let (unknown, show, hide_local) = sync.history_view(MachineScope::Peer(PeerKey::of(
+            "cccccccccccccccccccccccccccccccc",
+        )));
+        assert_eq!((unknown.len(), show, hide_local), (0, true, true));
+
+        // pc-b's file disappears from the folder: its scope is dropped.
+        let scan = PeerScan {
+            peers: vec![peer_with_session("pc-a", ID_A, "session-a")],
+            problems: Vec::new(),
+        };
+        handle_app_event(&mut state, AppEvent::PeersUpdated(Ok(scan)));
+        assert_eq!(state.machine_scope, MachineScope::All);
+        let (only_b, _, _) = state
+            .sync
+            .as_ref()
+            .expect("sync")
+            .history_view(MachineScope::Peer(key_b));
+        assert!(only_b.is_empty());
+    }
+
+    #[test]
+    fn machine_scopes_are_stored_as_text() {
+        use crate::sync::PeerKey;
+        let key = PeerKey::of("0123456789abcdef0123456789abcdef");
+        for scope in [
+            MachineScope::All,
+            MachineScope::ThisPc,
+            MachineScope::Peer(key),
+        ] {
+            assert_eq!(MachineScope::from_store(&scope.store_value()), Some(scope));
+        }
+        assert_eq!(
+            MachineScope::Peer(key).store_value(),
+            "peer:0123456789abcdef"
+        );
+        for bad in [
+            "",
+            "peers",
+            "peer:",
+            "peer:123",
+            "peer:zzzzzzzzzzzzzzzz",
+            "peer:0123456789abcdef0",
+        ] {
+            assert_eq!(MachineScope::from_store(bad), None, "{bad}");
+        }
     }
 
     #[test]
