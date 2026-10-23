@@ -8,7 +8,8 @@ use crate::read::scan::{
     ProjectRecord, SessionDetail, SessionSummary,
 };
 use crate::usage::{
-    format_compact_kmb, format_duration, normalize_project_key, LocalUsageSnapshot,
+    format_compact_kmb, format_duration, model_display_name, normalize_project_key,
+    LocalUsageSnapshot, UsageZone,
 };
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -900,11 +901,23 @@ fn click_session_row(state: &mut BrowserState, row: u16) -> Option<BrowserClickT
     }
 }
 
+/// The usage the project detail is drawn from.
+#[derive(Clone, Copy)]
+pub(crate) struct ProjectUsageSource<'a> {
+    /// This machine's snapshots: a project's token totals and scan state.
+    pub(crate) local: &'a [&'a LocalUsageSnapshot],
+    /// The snapshots of the machine scope shown, where a project's models are
+    /// counted (so under ALL PCS the other machines' usage of it counts), in
+    /// the zone of the charts.
+    pub(crate) scoped: &'a [&'a LocalUsageSnapshot],
+    pub(crate) zone: UsageZone,
+}
+
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &mut BrowserState,
-    usages: &[&LocalUsageSnapshot],
+    usage: ProjectUsageSource<'_>,
     usage_error: Option<&str>,
     formatter: DisplayFormatter<'_>,
     accent_color: Color,
@@ -924,7 +937,7 @@ pub(crate) fn render(
             frame,
             chunks[1],
             state,
-            usages,
+            usage,
             usage_error,
             formatter,
             accent_color,
@@ -1066,7 +1079,7 @@ fn render_projects_view(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &mut BrowserState,
-    usages: &[&LocalUsageSnapshot],
+    usage: ProjectUsageSource<'_>,
     usage_error: Option<&str>,
     formatter: DisplayFormatter<'_>,
     accent_color: Color,
@@ -1132,7 +1145,7 @@ fn render_projects_view(
 
     let detail_text = render_project_detail(
         state.selected_project(),
-        usages,
+        usage,
         usage_error,
         state.local_machine.as_deref(),
         formatter,
@@ -1304,9 +1317,92 @@ fn render_sessions_view(
     }
 }
 
+/// The models a project used over all time, largest first, with tokens:
+/// summed over the project's checkouts in the snapshots of `source`.
+fn project_models(project: &ProjectRecord, usage: ProjectUsageSource<'_>) -> Vec<(String, i64)> {
+    let keys: BTreeSet<String> = project
+        .checkouts
+        .iter()
+        .map(|path| normalize_project_key(path))
+        .collect();
+    let mut totals: BTreeMap<String, i64> = BTreeMap::new();
+    for snapshot in usage.scoped {
+        for entry in snapshot.project_model_daily_for_zone(usage.zone) {
+            if !keys.contains(&normalize_project_key(&entry.project)) {
+                continue;
+            }
+            for series in &entry.models {
+                let tokens = series.total_since(None).total();
+                if tokens > 0 {
+                    let total = totals.entry(series.model.clone()).or_default();
+                    *total = total.saturating_add(tokens);
+                }
+            }
+        }
+    }
+    let mut models: Vec<(String, i64)> = totals.into_iter().collect();
+    models.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    models
+}
+
+/// Most models listed in the project detail; the rest are counted.
+const PROJECT_MODEL_ROWS: usize = 8;
+
+/// The MODELS block of the project detail, with a blank line after it.
+fn project_model_lines(
+    project: &ProjectRecord,
+    usage: ProjectUsageSource<'_>,
+    formatter: DisplayFormatter<'_>,
+) -> Vec<Line<'static>> {
+    let models = project_models(project, usage);
+    let indexing = usage
+        .scoped
+        .iter()
+        .any(|snapshot| snapshot.scan_pending_files > 0);
+    let heading = |note: &str| {
+        let mut spans = vec![Span::styled(
+            "MODELS",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if !note.is_empty() {
+            spans.push(Span::raw(format!("  {note}")));
+        }
+        Line::from(spans)
+    };
+    if models.is_empty() {
+        let note = if indexing { "indexing..." } else { "--" };
+        return vec![heading(note), Line::from("")];
+    }
+    let total: i64 = models.iter().map(|(_, tokens)| *tokens).sum();
+    let mut lines = vec![heading(if indexing { "indexing..." } else { "" })];
+    for (model, tokens) in models.iter().take(PROJECT_MODEL_ROWS) {
+        let share = if total > 0 {
+            ((*tokens as f64) / (total as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        lines.push(Line::from(format!(
+            "  {:<20} {:>16}  {:>6}%",
+            truncate_single_line(&model_display_name(model), 20),
+            format_project_count(*tokens, formatter),
+            formatter.format_one_decimal(share)
+        )));
+    }
+    if models.len() > PROJECT_MODEL_ROWS {
+        lines.push(Line::from(format!(
+            "  ... and {} more",
+            formatter.format_usize(models.len() - PROJECT_MODEL_ROWS)
+        )));
+    }
+    lines.push(Line::from(""));
+    lines
+}
+
 fn render_project_detail(
     project: Option<&ProjectRecord>,
-    usages: &[&LocalUsageSnapshot],
+    usage: ProjectUsageSource<'_>,
     usage_error: Option<&str>,
     local_machine: Option<&str>,
     formatter: DisplayFormatter<'_>,
@@ -1314,6 +1410,7 @@ fn render_project_detail(
     let Some(project) = project else {
         return Text::from("No projects found.");
     };
+    let usages = usage.local;
 
     let latest = project
         .sessions
@@ -1507,6 +1604,13 @@ fn render_project_detail(
             );
         }
     }
+
+    // The models of the project, before its checkouts.
+    let models_at = lines.len().saturating_sub(1);
+    lines.splice(
+        models_at..models_at,
+        project_model_lines(project, usage, formatter),
+    );
 
     for checkout in &project.checkouts {
         lines.push(Line::from(format!("- {checkout}")));

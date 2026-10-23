@@ -379,7 +379,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 - `?` Help overlay
 - `q` Quit (with confirmation)
 - `Enter` / `y` Continue past "no sessions found" warning (when shown)
-- Session history: `Up` / `Down` / mouse wheel navigate, `Enter` / `Right` open project sessions, `Backspace` / `Left` / `Esc` go back
+- Session history: `Up` / `Down` / mouse wheel navigate, `Enter` / `Right` open project sessions, `Backspace` / `Left` / `Esc` go back. The project detail lists the models the project used over all time, with tokens and share, counted for the machines selected with `m`
 
 ## Build from source
 

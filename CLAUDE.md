@@ -142,7 +142,10 @@ same layout; differences are noted per module.
   Claude `tool_use` blocks), never from prose or tool output. `catalog.rs` does
   Strict/Deep/Full discovery. Deep and Full crawl only the roots listed in
   `history_project_roots`, and only after the user confirms. `tui.rs` holds
-  the browser state.
+  the browser state. Its project detail adds up a project's models (all
+  time) from `project_model_daily` of the snapshots of the machine scope
+  (`ProjectUsageSource`), while its token totals still come from this
+  machine's `project_usage`.
 - Live limits feed `AccountRateLimits`:
   - `providers/codex/rpc.rs` spawns Codex App Server and calls
     `account/rateLimits/read` over stdio JSON-RPC, with line-size,

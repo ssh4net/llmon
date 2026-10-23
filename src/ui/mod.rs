@@ -309,6 +309,15 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                     .collect();
             let usages: Vec<&crate::usage::LocalUsageSnapshot> =
                 usage_snapshots.iter().map(Arc::as_ref).collect();
+            // A project's models are counted in the snapshots of the machine
+            // scope, so they include the other machines' usage of it.
+            let model_snapshots: Vec<Arc<crate::usage::LocalUsageSnapshot>> =
+                view_harnesses(state.harness_view)
+                    .iter()
+                    .filter_map(|harness| state.usage_snapshot(*harness))
+                    .collect();
+            let model_refs: Vec<&crate::usage::LocalUsageSnapshot> =
+                model_snapshots.iter().map(Arc::as_ref).collect();
             let system_locale = state.system_locale.clone();
             let formatter = DisplayFormatter::new(state.display_style, &system_locale);
             let accent_text_color = state.accent_text_color();
@@ -316,7 +325,11 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
                 frame,
                 inner,
                 &mut state.read_browser,
-                &usages,
+                crate::read::tui::ProjectUsageSource {
+                    local: &usages,
+                    scoped: &model_refs,
+                    zone: state.usage_zone,
+                },
                 state
                     .codex_usage_error
                     .as_deref()
@@ -9323,6 +9336,166 @@ mod tests {
             5_000_000,
         )];
         sync
+    }
+
+    /// A HISTORY catalog with one project that has `checkout` and one session.
+    fn catalog_with_project(checkout: &str) -> crate::read::scan::Catalog {
+        let session = crate::read::scan::SessionSummary {
+            harness: Harness::Codex,
+            file_path: std::path::PathBuf::from("/logs/session.jsonl"),
+            session_id: "session".to_string(),
+            cwd: checkout.to_string(),
+            title: "a session".to_string(),
+            started_at_raw: None,
+            started_at_label: "2026-09-01 10:00".to_string(),
+            started_at_sort_key_ms: 1_000,
+            git_branch: None,
+            git_commit: None,
+            repo_url: None,
+            model_provider: None,
+            client_version: None,
+            model: None,
+            subagent_files: Vec::new(),
+            remote: None,
+        };
+        crate::read::scan::Catalog {
+            sessions_dir: std::path::PathBuf::from("/logs"),
+            projects: vec![crate::read::scan::ProjectRecord {
+                stable_id: format!("path:{checkout}"),
+                logical_name: "project".to_string(),
+                display_path: checkout.to_string(),
+                checkouts: vec![checkout.to_string()],
+                sessions: vec![session],
+                owner_session_count: 1,
+                confidence: 100,
+                source_flags: crate::read::catalog::SOURCE_OWNER,
+                missing: false,
+            }],
+            files_scanned: 0,
+            files_skipped: 0,
+        }
+    }
+
+    /// The rows of the MODELS block in the project detail, from its heading
+    /// to the blank line after it.
+    fn project_models_block(text: &str) -> Vec<String> {
+        let mut block = Vec::new();
+        let mut inside = false;
+        for line in text.lines() {
+            // The detail pane is the text after the border between the panes.
+            let cell = line.rsplit("\u{2502}\u{2502}").next().unwrap_or("");
+            let cell = cell
+                .trim_matches(|c: char| c == '\u{2502}' || c == ' ')
+                .to_string();
+            if cell.starts_with("MODELS") {
+                inside = true;
+            }
+            if inside {
+                if cell.is_empty() || cell.starts_with("CHECKOUTS") {
+                    break;
+                }
+                block.push(cell);
+            }
+        }
+        block
+    }
+
+    #[test]
+    fn history_project_detail_lists_the_projects_models() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Read;
+        state.harness_view = HarnessView::Codex;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot_with(10, true)));
+        let mut detail_of = |checkout: &str| -> String {
+            state.read_browser =
+                crate::read::tui::BrowserState::new(catalog_with_project(checkout));
+            render_screen_text(&mut state, 160, 45)
+        };
+
+        // The synthetic sessions of /work/project-0 used both models.
+        let text = detail_of("/work/project-0");
+        let block = project_models_block(&text);
+        assert_eq!(block[0], "MODELS", "{text}");
+        let row = |name: &str| block.iter().find(|row| row.starts_with(name)).cloned();
+        assert!(row("gpt-test-mini").is_some(), "{block:?}");
+        assert!(
+            row("gpt-test ").is_some_and(|row| row.ends_with('%')),
+            "{block:?}"
+        );
+        let shares: f64 = block[1..]
+            .iter()
+            .filter_map(|row| {
+                row.trim_end_matches('%')
+                    .rsplit(' ')
+                    .next()?
+                    .parse::<f64>()
+                    .ok()
+            })
+            .sum();
+        assert!((shares - 100.0).abs() < 0.2, "{shares} {block:?}");
+
+        // A project that no log mentions has no models.
+        let text = detail_of("/work/other");
+        assert_eq!(
+            project_models_block(&text),
+            vec!["MODELS  --".to_string()],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn history_project_models_follow_the_machine_scope() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Read;
+        state.harness_view = HarnessView::Codex;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot_with(10, true)));
+        let mut sync = sync_state_with_peer();
+        // The machine has a session in the project, so its scope lists it.
+        let mut peer = (*sync.peers[0]).clone();
+        peer.sessions.insert(
+            "codex".to_string(),
+            vec![crate::sync::ExportSession {
+                id: "peer-session".to_string(),
+                cwd: "/peer/only-project".to_string(),
+                started_at: Some("2026-09-02T10:00:00Z".to_string()),
+                started_ms: 2_000,
+                model: None,
+                provider: None,
+                client_version: None,
+                branch: None,
+                commit: None,
+                repo: None,
+                title: None,
+                subagents: 0,
+                tokens: Some(5_000_000),
+            }],
+        );
+        sync.apply_scan(crate::sync::PeerScan {
+            peers: vec![Arc::new(peer)],
+            problems: Vec::new(),
+        });
+        state.sync = Some(sync);
+        crate::app::refresh_merged_usage(&mut state);
+        state.read_browser =
+            crate::read::tui::BrowserState::new(catalog_with_project("/peer/only-project"));
+
+        // Another machine's project: its model shows under ALL PCS and under
+        // that machine, and not under THIS PC.
+        let peer_key = crate::sync::PeerKey::of("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        for (scope, expected) in [
+            (MachineScope::All, true),
+            (MachineScope::Peer(peer_key), true),
+            (MachineScope::ThisPc, false),
+        ] {
+            state.machine_scope = scope;
+            let text = render_screen_text(&mut state, 160, 45);
+            let block = project_models_block(&text);
+            assert_eq!(
+                block.iter().any(|row| row.starts_with("peer-model")),
+                expected,
+                "{scope:?} {block:?}\n{text}"
+            );
+        }
     }
 
     #[test]

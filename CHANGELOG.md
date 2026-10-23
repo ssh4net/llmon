@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.16
+
+- HISTORY: the project detail has a MODELS block with the models the project
+  used over all time, largest first, with tokens and share (up to eight, then
+  a count of the rest). They are counted from the snapshots of the selected
+  machine scope, so under ALL PCS they include other machines' usage of the
+  same project path, and with one machine selected they are that machine's.
+  The block says "indexing..." while the logs are still being scanned.
+
 ## 0.5.15
 
 - Machine scope: besides ALL PCS and THIS PC, the header has a pill for each
