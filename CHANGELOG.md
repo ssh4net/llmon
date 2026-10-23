@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.14
+
+- USAGE: the TOP_MODELS label is now a MODELS switch with TODAY, 7D, 30D, and
+  ALL (key `d`, or click). The models and their shares are counted over that
+  range in the chart's zone (local or UTC), from the per-day model usage, so
+  the other machines' usage is included under ALL PCS. The choice is
+  remembered. On a narrow terminal the switch shows the current range, and a
+  click selects the next. The default is 30D, as before.
+
 ## 0.5.13
 
 - Docs: the commit trailer rule in `CLAUDE.md` is now

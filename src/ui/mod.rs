@@ -2172,7 +2172,7 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: View [h] (combined/codex/claude), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: View [h] (combined/codex/claude), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Models [d] (today/7d/30d/all), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Models => {
             "Models: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -6007,6 +6007,46 @@ fn format_minutes_hhmm(total_minutes: u64) -> String {
     format!("{:02}:{:02}", hours, minutes)
 }
 
+/// The strip shows every range of the top models switch from this width.
+const TOP_MODELS_FULL_SWITCH_WIDTH: u16 = 96;
+
+/// The models used in `range` on `harness`'s snapshot, largest first, at most
+/// four, with their share of everything used in it. Built from the per-day
+/// model series, so any range works and the other machines' usage in an
+/// all-PCs snapshot is counted.
+fn top_models_in_range(
+    snapshot: &crate::usage::LocalUsageSnapshot,
+    harness: Harness,
+    zone: UsageZone,
+    range: DayRange,
+) -> Vec<crate::usage::LocalUsageModel> {
+    let pairs = [(harness, snapshot)];
+    let days = range_days(&pairs, zone, range);
+    let first_day = match range {
+        DayRange::AllTime => None,
+        _ => days.first().map(String::as_str),
+    };
+    let models = models::models_in_range(&pairs, zone, first_day);
+    let total: i64 = models.iter().map(|usage| usage.total.total()).sum();
+    models
+        .iter()
+        .filter(|usage| usage.series.model != "unknown")
+        .take(4)
+        .map(|usage| {
+            let tokens = usage.total.total();
+            crate::usage::LocalUsageModel {
+                model: usage.series.model.clone(),
+                tokens,
+                share_percent: if total > 0 {
+                    ((tokens as f64) / (total as f64) * 1000.0).round() / 10.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect()
+}
+
 fn render_top_models(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -6019,14 +6059,59 @@ fn render_top_models(
         .snapshot
         .as_deref()
         .filter(|snapshot| snapshot.scan_pending_files == 0);
+    let range = state.top_models_range;
     let models = snapshot
-        .map(|s| s.top_models_for_zone(state.usage_zone).to_vec())
+        .map(|s| top_models_in_range(s, panel.harness, state.usage_zone, range))
         .unwrap_or_default();
 
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(
-        "TOP_MODELS  ",
-        Style::default().fg(Color::Gray),
-    )];
+    let mode_selector_width = 2u16;
+    let swatch_width = 2u16;
+    let selector_width = mode_selector_width.saturating_add(
+        u16::try_from(AccentTheme::ALL.len())
+            .unwrap_or(u16::MAX)
+            .saturating_mul(swatch_width),
+    );
+    let selector_visible = show_style_selector && area.width > selector_width;
+    let models_area = Rect {
+        width: area.width.saturating_sub(if selector_visible {
+            selector_width.saturating_add(1)
+        } else {
+            0
+        }),
+        ..area
+    };
+
+    let accent = state.harness_themes.get(panel.harness).text_color();
+    let mut spans: Vec<Span<'static>> = vec![control_group_label("MODELS", accent), Span::raw(" ")];
+    // All the ranges when there is room, else the current one, which a click
+    // replaces with the next.
+    let options: Vec<(DayRange, DayRange)> = if area.width >= TOP_MODELS_FULL_SWITCH_WIDTH {
+        DayRange::WITH_TODAY
+            .iter()
+            .map(|option| (*option, *option))
+            .collect()
+    } else {
+        vec![(range, range.cycled_with_today())]
+    };
+    let mut next_x = models_area.x.saturating_add(
+        u16::try_from(UnicodeWidthStr::width(spans[0].content.as_ref()) + 1).unwrap_or(u16::MAX),
+    );
+    let right = models_area.x.saturating_add(models_area.width);
+    let mut switch_targets = Vec::new();
+    for (shown, clicked) in options {
+        let span = pill(shown.short_label(), shown == range);
+        let width =
+            u16::try_from(UnicodeWidthStr::width(span.content.as_ref())).unwrap_or(u16::MAX);
+        if next_x.saturating_add(width) <= right {
+            switch_targets.push(UiHitTarget {
+                area: Rect::new(next_x, models_area.y, width, 1),
+                action: UiClickAction::SetTopModelsRange(clicked),
+            });
+        }
+        next_x = next_x.saturating_add(width);
+        spans.push(span);
+    }
+    spans.push(Span::raw("  "));
     if models.is_empty() {
         if panel
             .snapshot
@@ -6052,22 +6137,7 @@ fn render_top_models(
             ));
         }
     }
-    let mode_selector_width = 2u16;
-    let swatch_width = 2u16;
-    let selector_width = mode_selector_width.saturating_add(
-        u16::try_from(AccentTheme::ALL.len())
-            .unwrap_or(u16::MAX)
-            .saturating_mul(swatch_width),
-    );
-    let selector_visible = show_style_selector && area.width > selector_width;
-    let models_area = Rect {
-        width: area.width.saturating_sub(if selector_visible {
-            selector_width.saturating_add(1)
-        } else {
-            0
-        }),
-        ..area
-    };
+    state.ui_hit_targets.extend(switch_targets);
     frame.render_widget(Paragraph::new(Line::from(spans)), models_area);
 
     if selector_visible {
@@ -6137,6 +6207,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, screen: ActiveScreen, 
             Line::from("  x    - select Codex/Claude (or click its chart or cards)"),
             Line::from("  Tab  - toggle statistic (Tokens/Time/Runs)"),
             Line::from("  g/w  - group by day/ISO week/month"),
+            Line::from("  d    - top models of today/7 days/30 days/all time"),
             Line::from("  f    - toggle layout (Horz/Vert)"),
             Line::from("  z/F6 - toggle calendar zone (Local/UTC)"),
             Line::from("  Wheel/arrows/PgUp/PgDn/Home/End - scroll periods"),
@@ -9229,6 +9300,108 @@ mod tests {
             5_000_000,
         )];
         sync
+    }
+
+    #[test]
+    fn top_models_cover_the_selected_range() {
+        let snapshot = synthetic_codex_snapshot(10);
+        let in_range =
+            |range| top_models_in_range(&snapshot, Harness::Codex, UsageZone::Local, range);
+
+        let today = in_range(DayRange::Today);
+        // The newest synthetic session is half an hour old, so it is today's
+        // unless the test runs just after midnight.
+        assert!(today.len() <= 1, "{today:?}");
+        if let Some(model) = today.first() {
+            assert_eq!(model.model, "gpt-test-mini");
+            assert_eq!(model.share_percent, 100.0);
+        }
+
+        let tokens = |models: &[crate::usage::LocalUsageModel]| -> i64 {
+            models.iter().map(|model| model.tokens).sum()
+        };
+        let (week, month, all) = (
+            in_range(DayRange::Last7Days),
+            in_range(DayRange::Last30Days),
+            in_range(DayRange::AllTime),
+        );
+        let names: Vec<&str> = week.iter().map(|model| model.model.as_str()).collect();
+        assert!(
+            names.contains(&"gpt-test") && names.contains(&"gpt-test-mini"),
+            "{names:?}"
+        );
+        assert!(tokens(&today) <= tokens(&week), "{today:?} {week:?}");
+        assert!(tokens(&week) <= tokens(&month), "{week:?} {month:?}");
+        let pairs = |models: &[crate::usage::LocalUsageModel]| -> Vec<(String, i64)> {
+            models
+                .iter()
+                .map(|model| (model.model.clone(), model.tokens))
+                .collect()
+        };
+        assert_eq!(
+            pairs(&month),
+            pairs(&all),
+            "ten days of logs fit both ranges"
+        );
+        assert!(week.windows(2).all(|pair| pair[0].tokens >= pair[1].tokens));
+        let share: f64 = week.iter().map(|model| model.share_percent).sum();
+        assert!((share - 100.0).abs() < 0.2, "{share}");
+
+        // Days are counted in the zone of the chart.
+        assert!(
+            !top_models_in_range(&snapshot, Harness::Codex, UsageZone::Utc, DayRange::AllTime)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_models_strip_has_a_range_switch() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        state.harness_view = HarnessView::Codex;
+        state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(10)));
+        let actions = |state: &AppState| -> Vec<DayRange> {
+            state
+                .ui_hit_targets
+                .iter()
+                .filter_map(|target| match target.action {
+                    UiClickAction::SetTopModelsRange(range) => Some(range),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Room for every range: one click target for each.
+        state.top_models_range = DayRange::Last7Days;
+        let text = render_screen_text(&mut state, 160, 45);
+        assert!(!text.contains("TOP_MODELS"), "{text}");
+        let strip = text
+            .lines()
+            .find(|line| line.contains("MODELS") && line.contains("TODAY"))
+            .unwrap_or_else(|| panic!("no switch in\n{text}"));
+        for label in ["TODAY", "7D", "30D", "ALL"] {
+            assert!(strip.contains(label), "{strip}");
+        }
+        assert_eq!(
+            actions(&state),
+            vec![
+                DayRange::Today,
+                DayRange::Last7Days,
+                DayRange::Last30Days,
+                DayRange::AllTime
+            ]
+        );
+
+        // A narrow strip shows the current range, and a click selects the next.
+        state.top_models_range = DayRange::Today;
+        state.ui_hit_targets.clear();
+        let text = render_screen_text(&mut state, 80, 40);
+        let strip = text
+            .lines()
+            .find(|line| line.contains("MODELS") && line.contains("TODAY"))
+            .unwrap_or_else(|| panic!("no switch in\n{text}"));
+        assert!(!strip.contains("30D"), "{strip}");
+        assert_eq!(actions(&state), vec![DayRange::Last7Days]);
     }
 
     #[test]

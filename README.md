@@ -11,7 +11,7 @@ design and phases, and `CHANGELOG.md` for release history.
 
 Status: early development. The TUI currently shows Codex only:
 
-- Local Codex usage stats (last 7/30 days, chart, top models) by scanning `CODEX_HOME/sessions`.
+- Local Codex usage stats (last 7/30 days, chart, top models of today, 7 or 30 days, or all time) by scanning `CODEX_HOME/sessions`.
 - Local session-history browser grouped by project path, with session titles and prompt previews.
 - Live account limits/credits by spawning Codex App Server and calling `account/rateLimits/read` when an App Server executable is available.
 
@@ -260,7 +260,7 @@ Common flags:
 - `--live-limits <auto|on|off>`: `auto` tries App Server if found, `on` requires it, `off` disables live limits (default: `auto`)
 - `--cwd <path>`: directory to launch Codex App Server in (default: current directory; does not change usage scope)
 - `--project <path>` / `--workspace <path>`: filter usage stats by session working directory path (also becomes default `--cwd` if `--cwd` not set)
-- `--usage-days <n>`: summary/model-share window (clamped 1..=90; default from config); charts index the complete local history
+- `--usage-days <n>`: summary window (clamped 1..=90; default from config); the top models of the USAGE screen follow the `d` switch instead, and charts index the complete local history
 - `--refresh-usage-secs <n>`: usage refresh interval in seconds (default from config)
 - `--refresh-limits-secs <n>`: limits refresh interval in seconds (default from config)
 - `--max-session-file-mib <n>`: per-file planning weight (MiB) for scan budget (default from config)
@@ -359,7 +359,7 @@ llmon --scan-time-budget-ms 1500 --max-jsonl-line-kib 512
 ## Key bindings
 
 - `h` Switch the USAGE, MODELS, COST, ACTIVITY, and HISTORY view: Combined, Codex, or Claude Code (or click the pills in the header)
-- `d` Cycle the dates on MODELS and COST (all time, 7 days, 30 days)
+- `d` On the USAGE screen, cycle the range of the top models (today, 7 days, 30 days, all time; or click the pills next to MODELS, which shrink to the current one on a narrow terminal). On MODELS and COST, cycle the dates (all time, 7 days, 30 days)
 - `Up` / `Down` (or `j` / `k`, `PgUp` / `PgDn`, `Home` / `End`, the mouse wheel, a click) Select a row of the COST screen's BY PROJECT list
 - `Tab` Toggle data (Tokens/Time/Runs)
 - `g` / `w` Toggle grouping (Day/Week/Month)

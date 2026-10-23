@@ -426,13 +426,6 @@ impl LocalUsageSnapshot {
         }
     }
 
-    pub fn top_models_for_zone(&self, zone: UsageZone) -> &[LocalUsageModel] {
-        match zone {
-            UsageZone::Local => &self.top_models,
-            UsageZone::Utc => &self.utc_top_models,
-        }
-    }
-
     pub fn last7_days_for_zone(&self, zone: UsageZone) -> Vec<UsageDay> {
         self.last_n_days_for_zone(zone, 7)
     }

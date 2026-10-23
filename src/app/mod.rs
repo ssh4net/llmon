@@ -262,28 +262,47 @@ fn status_line_event(result: Result<Option<ClaudeLimits>>) -> AppEvent {
     }
 }
 
-/// Days the MODELS and COST screens cover.
+/// Days the MODELS and COST screens cover, and (with today) the top models
+/// of the USAGE screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DayRange {
+    Today,
     AllTime,
     Last7Days,
     Last30Days,
 }
 
 impl DayRange {
+    /// The ranges of the MODELS and COST screens, whose charts need more
+    /// than one day.
     pub(crate) const ALL: [Self; 3] = [Self::AllTime, Self::Last7Days, Self::Last30Days];
+    /// The ranges of the top models on the USAGE screen.
+    pub(crate) const WITH_TODAY: [Self; 4] = [
+        Self::Today,
+        Self::Last7Days,
+        Self::Last30Days,
+        Self::AllTime,
+    ];
 
+    /// The next of `ALL`.
     fn cycled(self) -> Self {
         match self {
-            Self::AllTime => Self::Last7Days,
+            Self::Today | Self::AllTime => Self::Last7Days,
             Self::Last7Days => Self::Last30Days,
             Self::Last30Days => Self::AllTime,
         }
     }
 
+    /// The next of `WITH_TODAY`.
+    pub(crate) fn cycled_with_today(self) -> Self {
+        let position = Self::WITH_TODAY.iter().position(|range| *range == self);
+        Self::WITH_TODAY[position.map_or(0, |index| (index + 1) % Self::WITH_TODAY.len())]
+    }
+
     /// Number of trailing days, or `None` for all indexed history.
     pub(crate) fn days(self) -> Option<usize> {
         match self {
+            Self::Today => Some(1),
             Self::AllTime => None,
             Self::Last7Days => Some(7),
             Self::Last30Days => Some(30),
@@ -292,6 +311,7 @@ impl DayRange {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Today => "Today",
             Self::AllTime => "All time",
             Self::Last7Days => "Last 7 days",
             Self::Last30Days => "Last 30 days",
@@ -300,6 +320,7 @@ impl DayRange {
 
     pub(crate) fn short_label(self) -> &'static str {
         match self {
+            Self::Today => "TODAY",
             Self::AllTime => "ALL",
             Self::Last7Days => "7D",
             Self::Last30Days => "30D",
@@ -308,6 +329,7 @@ impl DayRange {
 
     fn store_value(self) -> &'static str {
         match self {
+            Self::Today => "today",
             Self::AllTime => "all",
             Self::Last7Days => "7d",
             Self::Last30Days => "30d",
@@ -316,6 +338,12 @@ impl DayRange {
 
     fn from_store(value: &str) -> Option<Self> {
         Self::ALL
+            .into_iter()
+            .find(|range| range.store_value() == value)
+    }
+
+    fn from_store_with_today(value: &str) -> Option<Self> {
+        Self::WITH_TODAY
             .into_iter()
             .find(|range| range.store_value() == value)
     }
@@ -427,6 +455,8 @@ enum UsageCommand {
     RefreshAll,
     ToggleMetric,
     ToggleRange,
+    /// The window of the top models (today, 7 days, 30 days, all).
+    CycleTopModelsRange,
     ToggleZone,
     ToggleOrientation,
     ScrollOlder,
@@ -506,6 +536,8 @@ pub(crate) enum UiClickAction {
     SetUsageFocus(Harness),
     SetModelsRange(DayRange),
     SetCostRange(DayRange),
+    /// The window of the top models on the USAGE screen.
+    SetTopModelsRange(DayRange),
     SelectCostProject(usize),
     SetMachineScope(MachineScope),
     ToggleBarFillMode,
@@ -817,6 +849,7 @@ pub(crate) struct AppState {
     pub(crate) usage_focus: Harness,
     pub(crate) models_range: DayRange,
     pub(crate) cost_range: DayRange,
+    pub(crate) top_models_range: DayRange,
     pub(crate) pricing: crate::pricing::Pricing,
 
     pub(crate) codex_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
@@ -896,6 +929,7 @@ struct PersistedUiState {
     usage_focus: Harness,
     models_range: DayRange,
     cost_range: DayRange,
+    top_models_range: DayRange,
     metric: UsageMetric,
     range: ChartRange,
     usage_zone: UsageZone,
@@ -926,6 +960,7 @@ impl PersistedUiState {
             usage_focus: Harness::Codex,
             models_range: DayRange::Last30Days,
             cost_range: DayRange::Last30Days,
+            top_models_range: DayRange::Last30Days,
             metric: UsageMetric::Tokens,
             range: ChartRange::Day,
             usage_zone: UsageZone::Local,
@@ -956,6 +991,7 @@ impl PersistedUiState {
             usage_focus: state.usage_focus,
             models_range: state.models_range,
             cost_range: state.cost_range,
+            top_models_range: state.top_models_range,
             metric: state.metric,
             range: state.range,
             usage_zone: state.usage_zone,
@@ -1012,6 +1048,7 @@ struct StoredGlobalState {
     usage_focus: Option<String>,
     models_range: Option<String>,
     cost_range: Option<String>,
+    top_models_range: Option<String>,
     metric: Option<String>,
     range: Option<String>,
     usage_zone: Option<String>,
@@ -1763,6 +1800,7 @@ async fn run_inner(
         usage_focus: restored_ui_state.usage_focus,
         models_range: restored_ui_state.models_range,
         cost_range: restored_ui_state.cost_range,
+        top_models_range: restored_ui_state.top_models_range,
         pricing: config.pricing.clone(),
         codex_usage: None,
         codex_usage_updated_at: None,
@@ -2443,6 +2481,11 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
             state.cost_range = range;
             changed
         }
+        UiClickAction::SetTopModelsRange(range) => {
+            let changed = state.top_models_range != range;
+            state.top_models_range = range;
+            changed
+        }
         UiClickAction::SetMachineScope(scope) => {
             let changed = state.machine_scope != scope;
             state.machine_scope = scope;
@@ -2628,6 +2671,9 @@ fn map_event_to_usage_cmd(event: Event) -> Option<UsageCommand> {
                 | (KeyCode::Char('G'), _)
                 | (KeyCode::Char('w'), _)
                 | (KeyCode::Char('W'), _) => Some(UsageCommand::ToggleRange),
+                (KeyCode::Char('d'), _) | (KeyCode::Char('D'), _) => {
+                    Some(UsageCommand::CycleTopModelsRange)
+                }
                 (KeyCode::Char('z'), _) | (KeyCode::Char('Z'), _) | (KeyCode::F(6), _) => {
                     Some(UsageCommand::ToggleZone)
                 }
@@ -2763,6 +2809,10 @@ fn handle_usage_command(
         UsageCommand::ToggleRange => {
             state.range = state.range.toggled();
             state.usage_period_offset = 0;
+            true
+        }
+        UsageCommand::CycleTopModelsRange => {
+            state.top_models_range = state.top_models_range.cycled_with_today();
             true
         }
         UsageCommand::ToggleZone => {
@@ -3435,6 +3485,14 @@ fn load_persisted_ui_state_with_history_depth(
     {
         state.cost_range = range;
     }
+    if let Some(range) = store
+        .global
+        .top_models_range
+        .as_deref()
+        .and_then(DayRange::from_store_with_today)
+    {
+        state.top_models_range = range;
+    }
     state.skip_quit_confirmation = store.global.skip_quit_confirmation;
     state.limit_reset_cooldown_until = store
         .global
@@ -3508,6 +3566,7 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.usage_focus = Some(state.usage_focus.key().to_string());
     store.global.models_range = Some(state.models_range.store_value().to_string());
     store.global.cost_range = Some(state.cost_range.store_value().to_string());
+    store.global.top_models_range = Some(state.top_models_range.store_value().to_string());
     store.global.skip_quit_confirmation = state.skip_quit_confirmation;
     store.global.limit_reset_cooldown_until = state
         .limit_reset_cooldown_until
@@ -3742,6 +3801,7 @@ impl AppState {
             usage_focus: defaults.usage_focus,
             models_range: defaults.models_range,
             cost_range: defaults.cost_range,
+            top_models_range: defaults.top_models_range,
             pricing: crate::pricing::Pricing::default(),
             codex_usage: None,
             codex_usage_updated_at: None,
@@ -4467,6 +4527,69 @@ mod tests {
         save_persisted_ui_state(&home, &persisted).expect("save");
         let loaded = load_persisted_ui_state(&home, None).expect("load");
         assert_eq!(loaded.machine_scope, MachineScope::ThisPc);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_top_models_range_cycles_with_d_and_is_remembered() {
+        let (usage_tx, _usage_rx) = mpsc::channel::<()>(1);
+        let (limits_tx, _limits_rx) = mpsc::channel::<()>(1);
+        let (reset_tx, _reset_rx) = mpsc::channel::<String>(1);
+        let (catalog_tx, _catalog_rx) = mpsc::channel::<()>(1);
+        let home = make_temp_dir("top-models-range");
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        assert_eq!(state.top_models_range, DayRange::Last30Days, "as it was");
+
+        let press_d = |state: &mut AppState| {
+            handle_input_event(
+                state,
+                Event::Key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char('d'),
+                    KeyModifiers::NONE,
+                )),
+                &usage_tx,
+                &limits_tx,
+                &reset_tx,
+                &catalog_tx,
+                &home,
+            )
+            .expect("handle key");
+            state.top_models_range
+        };
+        let seen: Vec<DayRange> = (0..5).map(|_| press_d(&mut state)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                DayRange::AllTime,
+                DayRange::Today,
+                DayRange::Last7Days,
+                DayRange::Last30Days,
+                DayRange::AllTime
+            ]
+        );
+        assert_eq!(
+            state.models_range,
+            DayRange::Last30Days,
+            "MODELS is separate"
+        );
+
+        assert!(apply_ui_click_action(
+            &mut state,
+            UiClickAction::SetTopModelsRange(DayRange::Today)
+        ));
+        assert!(!apply_ui_click_action(
+            &mut state,
+            UiClickAction::SetTopModelsRange(DayRange::Today)
+        ));
+
+        // The choice survives a restart; MODELS and COST never take today.
+        let persisted = PersistedUiState::from_app_state(&state);
+        save_persisted_ui_state(&home, &persisted).expect("save");
+        let loaded = load_persisted_ui_state(&home, None).expect("load");
+        assert_eq!(loaded.top_models_range, DayRange::Today);
+        assert_eq!(DayRange::from_store("today"), None);
+        assert_eq!(DayRange::Today.cycled(), DayRange::Last7Days);
         let _ = std::fs::remove_dir_all(home);
     }
 
