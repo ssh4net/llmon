@@ -7449,11 +7449,14 @@ fn format_limits_compact_card_lines(
     let (rolling_first, rolling_second) =
         format_rolling_limit_lines(short_window, weekly_window, compact, formatter);
     if let Some((monthly, used)) = format_individual_limit_compact_lines(l, compact, formatter) {
+        // Without any rolling window (usage credits only) those lines would
+        // both read "--".
+        let rolling = short_window.is_some() || weekly_window.is_some();
         return (
             monthly,
             Some(used),
-            Some(rolling_first),
-            Some(rolling_second),
+            rolling.then_some(rolling_first),
+            rolling.then_some(rolling_second),
         );
     }
 
@@ -8077,6 +8080,10 @@ fn pacing_window(
 /// Claude Code limits in the Codex App Server shape: the 5-hour window as
 /// `primary`, the 7-day window as `secondary`, and the per-model and spend
 /// windows as named buckets.
+///
+/// An account with usage credits and no 5-hour or weekly meters has only a
+/// monthly spend limit, which is what Codex calls an individual limit: the
+/// card shows it as the monthly line, the credits spent, and the monthly gauge.
 fn claude_limits_as_codex(
     limits: &crate::providers::claude::limits::AccountRateLimits,
 ) -> crate::providers::codex::rpc::AccountRateLimits {
@@ -8107,10 +8114,39 @@ fn claude_limits_as_codex(
                 .map(|window| bucket("Spend", window)),
         )
         .collect();
+    let individual_limit = (!limits.has_windows())
+        .then(|| {
+            limits
+                .extra_usage
+                .as_ref()
+                .filter(|extra| extra.has_figures())
+        })
+        .flatten()
+        .map(|extra| {
+            let used_percent = extra
+                .used_percent
+                .or_else(|| match (extra.used_amount, extra.limit_amount) {
+                    (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
+                    _ => None,
+                })
+                .filter(|value| value.is_finite());
+            let amount = |value: f64| format!("{value:.2}");
+            crate::providers::codex::rpc::SpendControlLimitSnapshot {
+                limit: extra
+                    .limit_amount
+                    .map(|limit| match extra.currency.as_deref() {
+                        Some(currency) => format!("{} {currency}", amount(limit)),
+                        None => amount(limit),
+                    }),
+                remaining_percent: used_percent.map(|used| (100.0 - used).clamp(0.0, 100.0)),
+                resets_at: extra.resets_at,
+                used: extra.used_amount.map(amount),
+            }
+        });
     crate::providers::codex::rpc::AccountRateLimits {
         limit_id: Some("claude".to_string()),
         limit_name: None,
-        individual_limit: None,
+        individual_limit,
         primary: limits.primary.as_ref().map(pacing_window),
         secondary: limits.secondary.as_ref().map(pacing_window),
         credits: None,
@@ -8323,14 +8359,22 @@ fn format_individual_limit_compact_lines(
         .filter(|v| v.is_finite())
         .map(|v| format!("{}%", v.round() as i64))
         .unwrap_or_else(|| "--%".to_string());
-    let resets = if compact {
-        reset_compact_label(individual_limit.resets_at, formatter)
+    // A monthly period that starts over at midnight (the credits of a Claude
+    // account) is told by its date alone.
+    let whole_day = individual_limit
+        .resets_at
+        .and_then(|reset| Local.timestamp_opt(reset, 0).single())
+        .filter(|reset| reset.time() == chrono::NaiveTime::MIN)
+        .map(|reset| formatter.format_reset_date(reset.date_naive()));
+    let resets = match (compact, whole_day) {
+        (true, Some(day)) => format!(" | {day}"),
+        (false, Some(day)) => format!(" (resets {day})"),
+        (true, None) => reset_compact_label(individual_limit.resets_at, formatter)
             .map(|value| format!(" | {value}"))
-            .unwrap_or_default()
-    } else {
-        resets_label(individual_limit.resets_at, formatter)
+            .unwrap_or_default(),
+        (false, None) => resets_label(individual_limit.resets_at, formatter)
             .map(|value| format!(" ({value})"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
     };
     let monthly = format!("{:<LABEL_W$}{remaining}{resets}", "Monthly:");
 
@@ -8389,13 +8433,30 @@ fn compact_bucket_label(bucket: &crate::providers::codex::rpc::RateLimitSnapshot
     format!("{}:", truncate_middle(cleaned, 9))
 }
 
+/// A credit amount from the server as text: a whole count (`1000`), an amount
+/// with decimals (`81.94`), either one followed by a currency code
+/// (`800.00 USD`). Anything else is shown as it came.
 fn format_credit_amount(raw: &str, formatter: DisplayFormatter<'_>) -> String {
     let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
     let cleaned = cleaned.trim();
-    let number = cleaned.parse::<f64>().ok().filter(|v| v.is_finite());
-    number
-        .map(|v| format_count(v.round() as i64, formatter))
-        .unwrap_or_else(|| truncate_middle(cleaned, 12))
+    let (number_text, code) = match cleaned.split_once(' ') {
+        Some((number, code)) if code.chars().all(|c| c.is_ascii_alphabetic()) => {
+            (number, Some(code))
+        }
+        _ => (cleaned, None),
+    };
+    let Some(number) = number_text.parse::<f64>().ok().filter(|v| v.is_finite()) else {
+        return truncate_middle(cleaned, 12);
+    };
+    let text = if number_text.contains('.') {
+        formatter.format_two_decimals(number)
+    } else {
+        format_count(number.round() as i64, formatter)
+    };
+    match code {
+        Some(code) => format!("{text} {code}"),
+        None => text,
+    }
 }
 
 fn format_credits_compact_line(
@@ -8795,6 +8856,7 @@ mod tests {
             limit_amount: Some(50.0),
             currency: Some("USD".to_string()),
             used_percent: Some(6.4),
+            resets_at: None,
         });
         limits
     }
@@ -8938,6 +9000,77 @@ mod tests {
             lines(&state).last().map(String::as_str),
             Some("claude /usage failed: timed out")
         );
+    }
+
+    #[test]
+    fn claude_limits_card_of_a_credits_only_account_shows_the_monthly_credits() {
+        let system_locale = crate::locale::SystemLocale::default();
+        let formatter = DisplayFormatter::new(crate::locale::DisplayStyle::Classic, &system_locale);
+        let now = now_unix_secs();
+        let lines = |state: &AppState, compact: bool| {
+            let (value, captions) =
+                limits_card_lines(&claude_limits_card_input(state, now), compact, formatter);
+            std::iter::once(value).chain(captions).collect::<Vec<_>>()
+        };
+        let first_of_next_month = {
+            let today = Local::now().date_naive();
+            let (year, month) = if today.month() == 12 {
+                (today.year() + 1, 1)
+            } else {
+                (today.year(), today.month() + 1)
+            };
+            Local
+                .with_ymd_and_hms(year, month, 1, 0, 0, 0)
+                .single()
+                .expect("local midnight")
+        };
+        let mut credits = crate::providers::claude::limits::AccountRateLimits::empty(
+            crate::providers::claude::limits::LimitsSourceKind::UsageCommand,
+            now - 120,
+        );
+        credits.extra_usage = Some(crate::providers::claude::limits::ExtraUsage {
+            enabled: true,
+            used_amount: Some(81.94),
+            limit_amount: Some(800.0),
+            currency: Some("USD".to_string()),
+            used_percent: Some(10.24),
+            resets_at: Some(first_of_next_month.timestamp()),
+        });
+        let mut state = AppState::for_tests();
+        state.claude_limits_mode = crate::app::ClaudeLimitsMode::StatusLine;
+        state.claude_limits = Some(credits);
+        let day = formatter.format_reset_date(first_of_next_month.date_naive());
+
+        // The Codex monthly card: 90% left, the credits, no "Weekly: --" and
+        // "5h limit: --" lines, and the reset as a date.
+        let texts = lines(&state, false);
+        assert_eq!(
+            texts[0],
+            format!("Monthly:  90% (resets {day})"),
+            "{texts:?}"
+        );
+        assert_eq!(texts[1], "Credits:  81.94/800.00 USD used");
+        assert_eq!(texts[2], "Via claude /usage, 2m ago");
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        let compact = lines(&state, true);
+        assert_eq!(compact[0], format!("Monthly:  90% | {day}"), "{compact:?}");
+
+        // Without the percentage it is worked out from the amounts.
+        if let Some(extra) = state
+            .claude_limits
+            .as_mut()
+            .and_then(|limits| limits.extra_usage.as_mut())
+        {
+            extra.used_percent = None;
+            extra.resets_at = None;
+        }
+        let texts = lines(&state, false);
+        assert_eq!(texts[0], "Monthly:  90%", "{texts:?}");
+
+        // A plan with windows keeps its own card; the extra usage line stays.
+        state.claude_limits = Some(synthetic_claude_limits());
+        let texts = lines(&state, false);
+        assert!(texts[0].starts_with("Weekly:"), "{texts:?}");
     }
 
     #[test]

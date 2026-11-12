@@ -44,7 +44,9 @@ switches them):
   and a LIMITS card laid out like the Codex one: the weekly limit (used /
   remaining, colored by pace), the 5-hour limit (used / remaining), the per-model limit,
   extra usage in place of credits, and the weekly gauge. An old status-line
-  snapshot is noted on the card.
+  snapshot is noted on the card. An account with usage credits and no
+  5-hour or weekly limits shows its monthly credits instead (share left,
+  spent of the limit, reset date, gauge).
 
 The same switch applies to the MODELS, COST, ACTIVITY, and HISTORY screens:
 

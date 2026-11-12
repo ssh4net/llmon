@@ -69,7 +69,8 @@ pub struct RateLimitSnapshot {
     pub primary: Option<RateLimitWindow>,
 }
 
-/// Paid usage beyond the subscription limits.
+/// Paid usage beyond the subscription limits. On an account that has only
+/// usage credits (no 5-hour or weekly meters) this is the whole reading.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtraUsage {
     pub enabled: bool,
@@ -77,6 +78,30 @@ pub struct ExtraUsage {
     pub limit_amount: Option<f64>,
     pub currency: Option<String>,
     pub used_percent: Option<f64>,
+    /// Unix seconds when the billing period ends and the spend starts over.
+    pub resets_at: Option<i64>,
+}
+
+impl ExtraUsage {
+    /// Whether this says anything about the credits: a switched-off account
+    /// with no amounts is just the absence of the feature.
+    pub fn has_figures(&self) -> bool {
+        self.enabled
+            || self.used_amount.is_some()
+            || self.limit_amount.is_some()
+            || self.used_percent.is_some()
+    }
+
+    /// The spend as of `now`: once the period has ended, the old amount no
+    /// longer applies.
+    fn expired_as_of(mut self, now: i64) -> Self {
+        if self.resets_at.is_some_and(|reset| reset <= now) {
+            self.used_amount = None;
+            self.used_percent = None;
+            self.resets_at = None;
+        }
+        self
+    }
 }
 
 /// Share of the weekly usage by surface (Claude Code, chat, ...).
@@ -123,12 +148,22 @@ impl AccountRateLimits {
         }
     }
 
+    /// Whether there is any rolling window to show: an account with usage
+    /// credits only has none.
+    pub fn has_windows(&self) -> bool {
+        self.primary.is_some()
+            || self.secondary.is_some()
+            || self.spend_limit.is_some()
+            || !self.buckets.is_empty()
+    }
+
     /// The limits as of `now`, for data that was captured a while ago: every
     /// window whose reset time has passed loses its percentage.
     pub fn without_expired(mut self, now: i64) -> Self {
         self.primary = self.primary.map(|window| window.expired_as_of(now));
         self.secondary = self.secondary.map(|window| window.expired_as_of(now));
         self.spend_limit = self.spend_limit.map(|window| window.expired_as_of(now));
+        self.extra_usage = self.extra_usage.map(|extra| extra.expired_as_of(now));
         for bucket in &mut self.buckets {
             bucket.primary = bucket
                 .primary
@@ -165,6 +200,7 @@ pub fn limits_dump_json(limits: &AccountRateLimits) -> Value {
             "limit_amount": extra.limit_amount,
             "currency": extra.currency,
             "used_percent": extra.used_percent,
+            "resets_at": extra.resets_at,
         })),
         "surfaces": limits.surfaces.iter().map(|surface| serde_json::json!({
             "name": surface.name,

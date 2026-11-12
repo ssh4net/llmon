@@ -24,8 +24,8 @@
 //! the user's hooks, MCP servers, and plugins.
 
 use super::{
-    oauth, unix_now, AccountRateLimits, LimitsSourceKind, RateLimitSnapshot, RateLimitWindow,
-    FIVE_HOUR_WINDOW_MINS, SEVEN_DAY_WINDOW_MINS,
+    oauth, unix_now, AccountRateLimits, ExtraUsage, LimitsSourceKind, RateLimitSnapshot,
+    RateLimitWindow, FIVE_HOUR_WINDOW_MINS, SEVEN_DAY_WINDOW_MINS,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local, TimeZone};
@@ -297,8 +297,10 @@ fn drain(mut reader: impl Read, cap: usize) -> Vec<u8> {
 
 /// The limits in the output of `claude -p /usage --output-format json`: a
 /// JSON array of events (a single event object and one event per line are
-/// accepted too). The first `usage_report` is used; without one, the text of
-/// the command.
+/// accepted too). The first `usage_report` is used, and the text of the
+/// command fills in what the report lacks: the windows for a build that prints
+/// no report, and the spend of an account that has usage credits instead of
+/// 5-hour and weekly limits (the report has no reset date for it).
 pub(crate) fn parse_output(text: &str, now: i64) -> Result<AccountRateLimits> {
     let events = match serde_json::from_str::<Value>(text) {
         Ok(Value::Array(events)) => events,
@@ -311,50 +313,172 @@ pub(crate) fn parse_output(text: &str, now: i64) -> Result<AccountRateLimits> {
     if events.is_empty() {
         bail!("claude printed no JSON events");
     }
-    let mut limits = match events.iter().find_map(|event| event.get("usage_report")) {
-        Some(report) => parse_report(report, now)?,
-        None => parse_text(&events, now).context(
-            "claude's output has no usage report or limits (a subscription login is needed)",
-        )?,
-    };
+    let report = events.iter().find_map(|event| event.get("usage_report"));
+    let mut limits = AccountRateLimits::empty(LimitsSourceKind::UsageCommand, now);
+    let mut problem =
+        "claude's output has no usage report or limits (a subscription login is needed)";
+    if let Some(report) = report {
+        match report
+            .get("rate_limits")
+            .filter(|rate_limits| rate_limits.is_object())
+        {
+            Some(rate_limits) => {
+                limits = oauth::parse_usage(rate_limits, now)?;
+                problem = "claude's usage report lists no limits";
+            }
+            None => problem = "claude's usage report has no rate limits",
+        }
+    }
+    if let Some(text) = command_text(&events) {
+        let from_text = parse_text(text, now);
+        if !limits.has_windows() {
+            limits.primary = from_text.primary;
+            limits.secondary = from_text.secondary;
+            limits.buckets = from_text.buckets;
+        }
+        limits.extra_usage = merge_credits(limits.extra_usage.take(), from_text.extra_usage);
+    }
+    let has_credits = limits
+        .extra_usage
+        .as_ref()
+        .is_some_and(|extra| extra.has_figures());
+    if !limits.has_windows() && !has_credits {
+        bail!(problem);
+    }
     limits.source = LimitsSourceKind::UsageCommand;
     Ok(limits)
 }
 
-fn parse_report(report: &Value, now: i64) -> Result<AccountRateLimits> {
-    let rate_limits = report
-        .get("rate_limits")
-        .filter(|rate_limits| rate_limits.is_object())
-        .context("claude's usage report has no rate limits")?;
-    let limits = oauth::parse_usage(rate_limits, now)?;
-    if limits.primary.is_none() && limits.secondary.is_none() && limits.buckets.is_empty() {
-        bail!("claude's usage report lists no limits");
-    }
-    Ok(limits)
-}
-
-/// The limits from the text of the command, for builds whose JSON has no
-/// `usage_report`. Its limit lines read
-/// `Current session: 6% used - resets Oct 21 at 8:20pm (Region/City)` and
-/// `Current week (all models): ...` or `Current week (<model>): ...`; the date
-/// is written `Oct 21 at 8:20pm` or `Oct 21, 8:20pm` depending on the version.
-/// Lines that do not fit are skipped, and the text carries no extra usage or
-/// active limit.
-fn parse_text(events: &[Value], now: i64) -> Option<AccountRateLimits> {
-    let text = events
+/// The text people read: the `result` of the run, or what the local command
+/// wrote, whichever shows limits or credits.
+fn command_text(events: &[Value]) -> Option<&str> {
+    events
         .iter()
         .flat_map(|event| {
             ["result", "local_command_source"]
                 .into_iter()
                 .filter_map(move |key| event.get(key)?.as_str())
         })
-        .find(|text| text.lines().any(|line| line.trim().starts_with("Current ")))?;
+        .find(|text| {
+            text.lines().any(|line| {
+                let line = line.trim();
+                line.starts_with("Current ") || line.contains(" spent")
+            })
+        })
+}
+
+/// The limits and credits written in the text of the command, for builds
+/// whose JSON has no `usage_report` and for the credits' reset date. Its limit
+/// lines read `Current session: 6% used - resets Oct 21 at 8:20pm (Region/City)`
+/// and `Current week (all models): ...` or `Current week (<model>): ...`; the
+/// date is written `Oct 21 at 8:20pm` or `Oct 21, 8:20pm` depending on the
+/// version. Lines that do not fit are skipped, and the text carries no active
+/// limit.
+fn parse_text(text: &str, now: i64) -> AccountRateLimits {
     let mut limits = AccountRateLimits::empty(LimitsSourceKind::UsageCommand, now);
-    for line in text.lines() {
-        add_text_limit(&mut limits, line.trim(), now);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    for line in &lines {
+        add_text_limit(&mut limits, line, now);
     }
-    (limits.primary.is_some() || limits.secondary.is_some() || !limits.buckets.is_empty())
-        .then_some(limits)
+    limits.extra_usage = parse_credits_text(&lines, now);
+    limits
+}
+
+/// The spend of an account with usage credits: a `$81.94 / $800.00 spent`
+/// line, with `10% used` and `resets Dec 1 (Region/City)` on it or on the
+/// lines next to it (the screen draws them on separate lines):
+/// `Spend limit: $81.94 / $800.00 spent - 10% used - resets Dec 1 (Region/City)`.
+fn parse_credits_text(lines: &[&str], now: i64) -> Option<ExtraUsage> {
+    let index = lines
+        .iter()
+        .position(|line| !line.starts_with("Current ") && credit_amounts(line).is_some())?;
+    let (used, limit, currency) = credit_amounts(lines[index])?;
+    // The percentage and the reset sit on the amounts' line or beside it,
+    // never on a limit line of the Current block.
+    let near = |pick: fn(&str) -> Option<f64>| -> Option<f64> {
+        [Some(index), index.checked_sub(1), index.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|at| lines.get(at))
+            .filter(|line| !line.starts_with("Current "))
+            .find_map(|line| pick(line))
+    };
+    let reset = [Some(index), index.checked_sub(1), index.checked_add(1)]
+        .into_iter()
+        .flatten()
+        .filter_map(|at| lines.get(at))
+        .filter(|line| !line.starts_with("Current "))
+        .find_map(|line| {
+            let (_, when) = line
+                .split_once("resets ")
+                .or_else(|| line.split_once("Resets "))?;
+            parse_reset(when, now)
+        });
+    Some(ExtraUsage {
+        enabled: true,
+        used_amount: Some(used),
+        limit_amount: Some(limit),
+        currency,
+        used_percent: near(percent_used).or_else(|| (limit > 0.0).then(|| used / limit * 100.0)),
+        resets_at: reset,
+    })
+}
+
+/// `10% used` anywhere in a line.
+fn percent_used(line: &str) -> Option<f64> {
+    let (before, _) = line.split_once("% used")?;
+    let digits: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
+/// `$81.94 / $800.00 spent` as (used, limit, currency code).
+fn credit_amounts(line: &str) -> Option<(f64, f64, Option<String>)> {
+    let (before, _) = line.split_once(" spent")?;
+    let (used, limit) = before.rsplit_once(" / ")?;
+    let used = money(
+        used.rsplit(|c: char| c.is_whitespace() || c == ':')
+            .next()?,
+    )?;
+    let limit = money(limit.split_whitespace().next()?)?;
+    Some((used.0, limit.0, used.1.or(limit.1)))
+}
+
+/// `$81.94`, `EUR 1,200.00` is not read; only a symbol in front of the number.
+fn money(text: &str) -> Option<(f64, Option<String>)> {
+    let symbol_len = text.chars().take_while(|c| !c.is_ascii_digit()).count();
+    let (symbol, number) = text.split_at(text.char_indices().nth(symbol_len)?.0);
+    let number: f64 = number.replace(',', "").parse().ok()?;
+    let currency = match symbol {
+        "$" => Some("USD"),
+        "\u{20ac}" => Some("EUR"),
+        "\u{a3}" => Some("GBP"),
+        "\u{a5}" => Some("JPY"),
+        _ => None,
+    };
+    Some((number, currency.map(str::to_string)))
+}
+
+/// The text's figures win over the report's for the amounts (the report gives
+/// minor units without an exponent), and the report's flag stays.
+fn merge_credits(report: Option<ExtraUsage>, text: Option<ExtraUsage>) -> Option<ExtraUsage> {
+    match (report, text) {
+        (Some(report), Some(text)) => Some(ExtraUsage {
+            enabled: report.enabled || text.enabled,
+            used_amount: text.used_amount.or(report.used_amount),
+            limit_amount: text.limit_amount.or(report.limit_amount),
+            currency: text.currency.or(report.currency),
+            used_percent: report.used_percent.or(text.used_percent),
+            resets_at: text.resets_at.or(report.resets_at),
+        }),
+        (report, text) => report.or(text),
+    }
 }
 
 fn add_text_limit(limits: &mut AccountRateLimits, line: &str, now: i64) -> Option<()> {
@@ -394,23 +518,26 @@ fn add_text_limit(limits: &mut AccountRateLimits, line: &str, now: i64) -> Optio
 
 /// Unix seconds of a reset written in local time, as Claude Code prints it in
 /// the time zone of this machine: `Oct 21 at 8:20pm (Region/City)`,
-/// `Oct 21, 8:20pm`, or just `8:20pm` for the next time the clock shows it.
-/// The zone name is not needed: llmon starts Claude Code with its own
-/// environment, so both use the same zone.
+/// `Oct 21, 8:20pm`, just `8:20pm` for the next time the clock shows it, or
+/// `Dec 1` (the start of that day) for a monthly reset. The zone name is not
+/// needed: llmon starts Claude Code with its own environment, so both use the
+/// same zone.
 fn parse_reset(when: &str, now: i64) -> Option<i64> {
     let when = when.split(" (").next()?.replace(',', " ");
-    let mut words = when
+    let words: Vec<&str> = when
         .split_whitespace()
-        .filter(|word| !word.eq_ignore_ascii_case("at"));
-    let first = words.next()?;
-    let (date, clock) = match words.next() {
-        Some(day) => (Some((first, day)), words.next()?),
-        None => (None, first),
+        .filter(|word| !word.eq_ignore_ascii_case("at"))
+        .collect();
+    let (date, clock) = match words.as_slice() {
+        [clock] => (None, Some(*clock)),
+        [month, day] => (Some((*month, *day)), None),
+        [month, day, clock] => (Some((*month, *day)), Some(*clock)),
+        _ => return None,
     };
-    if words.next().is_some() {
-        return None;
-    }
-    let (hour, minute) = parse_clock(clock)?;
+    let (hour, minute) = match clock {
+        Some(clock) => parse_clock(clock)?,
+        None => (0, 0),
+    };
     let today = Local.timestamp_opt(now, 0).single()?;
     let at = |year: i32, month: u32, day: u32| {
         Local
@@ -910,6 +1037,163 @@ mod tests {
         assert!(message.ends_with("..."));
         assert!(!message.contains("second"));
         assert_eq!(short_message(&anyhow::anyhow!("short")), "short");
+    }
+
+    /// Synthetic output of an account with usage credits and no 5-hour or
+    /// weekly meters: `limits` is empty, and the spend is in minor units.
+    fn credits_report(text: Option<&str>) -> Value {
+        let mut events = vec![serde_json::json!({
+            "type": "assistant",
+            "usage_report": {
+                "session": {"total_cost_usd": 0},
+                "rate_limits": {
+                    "limits": [],
+                    "extra_usage": {"is_enabled": true, "monthly_limit": 80000,
+                                    "used_credits": 8194.0, "utilization": 10.24,
+                                    "currency": "USD"}
+                }
+            }
+        })];
+        if let Some(text) = text {
+            events[0]["local_command_source"] = Value::String(text.to_string());
+        }
+        Value::Array(events)
+    }
+
+    fn credits_text() -> String {
+        "<local-command-stdout>You are currently using your overages to power your \
+         Claude Code usage\n\nSpend limit: $81.94 / $800.00 spent \u{b7} 10% used \
+         \u{b7} resets Dec 1 (Region/City)\n\nWhat's contributing to your usage?"
+            .to_string()
+    }
+
+    #[test]
+    fn spent_credits_are_forgotten_once_the_month_has_turned() {
+        let output = credits_report(Some(&credits_text())).to_string();
+        let now = local_unix(2026, 11, 12, 9, 0);
+        let limits = parse_output(&output, now).expect("credits only");
+        let later = local_unix(2026, 12, 2, 9, 0);
+        let extra = limits.without_expired(later).extra_usage.expect("credits");
+        assert_eq!(
+            extra.used_amount, None,
+            "last month's spend no longer applies"
+        );
+        assert_eq!(extra.used_percent, None);
+        assert_eq!(extra.limit_amount, Some(800.0), "the limit stays");
+    }
+
+    #[test]
+    fn an_account_with_usage_credits_only_is_a_reading() {
+        let now = local_unix(2026, 11, 12, 9, 0);
+        let output = credits_report(Some(&credits_text())).to_string();
+        let limits = parse_output(&output, now).expect("credits only");
+        assert!(!limits.has_windows());
+        assert_eq!(limits.source, LimitsSourceKind::UsageCommand);
+        let extra = limits.extra_usage.expect("credits");
+        assert!(extra.enabled);
+        assert_eq!(extra.used_amount, Some(81.94));
+        assert_eq!(extra.limit_amount, Some(800.0));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.used_percent, Some(10.24));
+        assert_eq!(extra.resets_at, Some(local_unix(2026, 12, 1, 0, 0)));
+    }
+
+    #[test]
+    fn the_report_alone_gives_the_amounts_in_major_units() {
+        let output = credits_report(None).to_string();
+        let limits = parse_output(&output, NOW).expect("credits only");
+        let extra = limits.extra_usage.expect("credits");
+        assert_eq!(extra.used_amount, Some(81.94));
+        assert_eq!(extra.limit_amount, Some(800.0));
+        assert_eq!(extra.resets_at, None, "the report has no reset date");
+    }
+
+    #[test]
+    fn the_credits_are_read_from_the_text_when_there_is_no_report() {
+        let now = local_unix(2026, 11, 12, 9, 0);
+        // The one-line form of the printed text and the three-line form of
+        // the screen; a plan with windows keeps them next to the credits.
+        let texts = [
+            credits_text(),
+            "Usage credits\n\u{2588}\u{2588}\u{2588}\u{2588}\u{2588} 10% used\n\
+             $81.94 / $800.00 spent \u{b7} Resets Dec 1 (Region/City)\n"
+                .to_string(),
+            format!(
+                "{}\n{}",
+                sample_text(" at "),
+                "Spend limit: $81.94 / $800.00 spent \u{b7} 10% used \u{b7} resets Dec 1"
+            ),
+        ];
+        for (index, text) in texts.iter().enumerate() {
+            let output = serde_json::json!({"type": "result", "result": text}).to_string();
+            let limits = parse_output(&output, now).expect("credits");
+            let extra = limits.extra_usage.clone().expect("credits");
+            assert_eq!(extra.used_amount, Some(81.94), "{index}");
+            assert_eq!(extra.limit_amount, Some(800.0), "{index}");
+            assert_eq!(extra.used_percent, Some(10.0), "{index}");
+            assert_eq!(
+                extra.resets_at,
+                Some(local_unix(2026, 12, 1, 0, 0)),
+                "{index}"
+            );
+            assert_eq!(limits.has_windows(), index == 2, "{index}");
+        }
+    }
+
+    #[test]
+    fn a_report_with_no_rate_limits_still_gets_the_credits_text() {
+        let output = serde_json::json!([{
+            "type": "assistant",
+            "local_command_source": credits_text(),
+            "usage_report": {"session": {"total_cost_usd": 0}, "rate_limits": null}
+        }])
+        .to_string();
+        let limits = parse_output(&output, NOW).expect("credits");
+        assert_eq!(
+            limits.extra_usage.expect("credits").used_amount,
+            Some(81.94)
+        );
+    }
+
+    #[test]
+    fn credits_that_are_off_and_empty_are_not_a_reading() {
+        let output = serde_json::json!([{"usage_report": {"rate_limits": {
+            "limits": [],
+            "extra_usage": {"is_enabled": false, "monthly_limit": null,
+                            "used_credits": null, "utilization": null, "currency": null}
+        }}}])
+        .to_string();
+        let error = parse_output(&output, NOW).expect_err("nothing to show");
+        assert!(error.to_string().contains("lists no limits"), "{error}");
+    }
+
+    #[test]
+    fn money_is_read_with_its_symbol() {
+        assert_eq!(money("$81.94"), Some((81.94, Some("USD".to_string()))));
+        assert_eq!(money("$1,200.50"), Some((1200.5, Some("USD".to_string()))));
+        assert_eq!(money("\u{20ac}5"), Some((5.0, Some("EUR".to_string()))));
+        assert_eq!(money("12.50"), Some((12.5, None)));
+        assert_eq!(money("$"), None);
+        assert_eq!(money("abc"), None);
+    }
+
+    #[test]
+    fn a_monthly_reset_without_a_clock_is_the_start_of_the_day() {
+        let now = local_unix(2026, 11, 12, 9, 0);
+        assert_eq!(
+            parse_reset("Dec 1", now),
+            Some(local_unix(2026, 12, 1, 0, 0))
+        );
+        assert_eq!(
+            parse_reset("Dec 1 (Asia/Tokyo)", now),
+            Some(local_unix(2026, 12, 1, 0, 0))
+        );
+        // Next year when the date is already behind.
+        assert_eq!(
+            parse_reset("Jan 1", now),
+            Some(local_unix(2027, 1, 1, 0, 0))
+        );
+        assert_eq!(parse_reset("Dec", now), None);
     }
 
     #[cfg(unix)]

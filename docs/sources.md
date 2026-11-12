@@ -95,6 +95,21 @@ Observed 2026-10-21 with Claude Code 2.1.304 on a subscription account.
   The text has no extra usage and no active limit. A reset that does not
   parse leaves the percentage without a countdown. The report wins when both
   are there.
+- An account with usage credits and no 5-hour or weekly meters (pay-as-you-go
+  with a monthly spend limit) has `rate_limits.limits[]` empty, and
+  `rate_limits.extra_usage` holds the spend: `is_enabled`, `monthly_limit`,
+  `used_credits`, `utilization` (percent), `currency`, with the amounts in
+  minor units of the currency (cents for USD). Claude Code's own schema notes
+  (strings in 2.1.322) say `limits[]` is empty when the server reported no
+  meters, and `rate_limits` is null when the usage fetch fails or the login has
+  no plan. The report has no reset date. The text carries it, on a line that
+  reads `Spend limit: $81.94 / $800.00 spent - 10% used - resets Dec 1
+  (Region/City)` (the /usage screen draws it as a bar, `10% used`, and
+  `$81.94 / $800.00 spent - Resets Dec 1 (Region/City)` on three lines;
+  llmon reads either). The layout of the printed line is taken from the strings
+  of the binary and the screen of a real account, not from a captured run, so
+  `parse_credits_text` accepts the pieces in any order on neighbouring lines.
+  The date has no clock: it is the start of that day in local time.
 - An account without a subscription login prints neither; llmon reports "no
   usage report or limits" and tries again at the next interval.
 - `/status` does not run in print mode ("isn't available in this

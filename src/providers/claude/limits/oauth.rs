@@ -247,7 +247,10 @@ fn scope_name(scope: Option<&Value>) -> Option<String> {
 }
 
 /// Extra usage from `spend` (amounts in minor units with an exponent), with
-/// the enabled flag from `extra_usage`.
+/// the enabled flag from `extra_usage`. Without `spend`, the amounts come from
+/// `extra_usage` itself (`used_credits` and `monthly_limit`, minor units of
+/// `currency`, `decimal_places` digits): that is all the report of
+/// `claude -p /usage` carries, and the only spend a credits-only account has.
 fn parse_extra_usage(value: &Value) -> Option<ExtraUsage> {
     let spend = value.get("spend").filter(|spend| spend.is_object());
     let extra = value.get("extra_usage").filter(|extra| extra.is_object());
@@ -264,8 +267,23 @@ fn parse_extra_usage(value: &Value) -> Option<ExtraUsage> {
             .map(str::to_string);
         Some((minor / 10f64.powi(exponent.clamp(0, 9) as i32), currency))
     };
-    let used = amount(spend.and_then(|spend| spend.get("used")));
-    let limit = amount(spend.and_then(|spend| spend.get("limit")));
+    let flat_amount = |key: &str| -> Option<(f64, Option<String>)> {
+        let extra = extra?;
+        let minor = extra.get(key).and_then(as_f64)?;
+        let exponent = extra
+            .get("decimal_places")
+            .and_then(Value::as_i64)
+            .unwrap_or(2);
+        let currency = extra
+            .get("currency")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Some((minor / 10f64.powi(exponent.clamp(0, 9) as i32), currency))
+    };
+    let used =
+        amount(spend.and_then(|spend| spend.get("used"))).or_else(|| flat_amount("used_credits"));
+    let limit =
+        amount(spend.and_then(|spend| spend.get("limit"))).or_else(|| flat_amount("monthly_limit"));
     let enabled = spend
         .and_then(|spend| spend.get("enabled"))
         .and_then(Value::as_bool)
@@ -284,7 +302,13 @@ fn parse_extra_usage(value: &Value) -> Option<ExtraUsage> {
             .or_else(|| limit.and_then(|(_, currency)| currency)),
         used_percent: spend
             .and_then(|spend| spend.get("percent"))
-            .and_then(as_f64),
+            .and_then(as_f64)
+            .or_else(|| {
+                extra
+                    .and_then(|extra| extra.get("utilization"))
+                    .and_then(as_f64)
+            }),
+        resets_at: None,
     })
 }
 
@@ -362,6 +386,39 @@ mod tests {
         assert_eq!(limits.secondary, None);
         assert_eq!(limits.buckets[0].limit_name.as_deref(), Some("Opus"));
         assert_eq!(limits.extra_usage, None);
+    }
+
+    #[test]
+    fn extra_usage_amounts_are_minor_units_of_the_currency() {
+        // The report of `claude -p /usage` has no `spend`: the amounts sit in
+        // `extra_usage` in cents (two decimal places unless it says so).
+        let value = serde_json::json!({
+            "limits": [],
+            "extra_usage": {"is_enabled": true, "monthly_limit": 80000,
+                            "used_credits": 8194.0, "utilization": 10.24,
+                            "currency": "USD"}
+        });
+        let extra = parse_usage(&value, 1)
+            .expect("parse")
+            .extra_usage
+            .expect("extra");
+        assert!(extra.enabled);
+        assert_eq!(extra.used_amount, Some(81.94));
+        assert_eq!(extra.limit_amount, Some(800.0));
+        assert_eq!(extra.used_percent, Some(10.24));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.resets_at, None);
+
+        let yen = serde_json::json!({
+            "extra_usage": {"is_enabled": true, "monthly_limit": 50000,
+                            "used_credits": 1200, "decimal_places": 0, "currency": "JPY"}
+        });
+        let extra = parse_usage(&yen, 1)
+            .expect("parse")
+            .extra_usage
+            .expect("extra");
+        assert_eq!(extra.limit_amount, Some(50000.0));
+        assert_eq!(extra.used_amount, Some(1200.0));
     }
 
     #[test]

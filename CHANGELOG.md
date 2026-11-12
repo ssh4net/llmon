@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.17
+
+- Claude limits: an account with usage credits and no 5-hour or weekly meters
+  now shows its credits instead of "poll failed". `claude -p /usage` reports
+  such an account with an empty `limits[]` and only `extra_usage` (amounts in
+  cents); llmon took that for an error and dropped the credits. The CLAUDE
+  LIMITS card now shows them like the Codex monthly limit: the share left, the
+  credits spent of the limit with its currency, the date the month starts
+  over, and the monthly gauge, without the empty "Weekly" and "5h limit"
+  lines. The spend and its reset date are also read from the text of the
+  command (`Spend limit: $81.94 / $800.00 spent ... resets Dec 1`), which is
+  the only source of the date and covers a build whose report has no
+  `rate_limits`. Last month's spend is forgotten once the reset passes. The
+  OAuth source reads the same `extra_usage` amounts.
+
 ## 0.5.16
 
 - HISTORY: the project detail has a MODELS block with the models the project

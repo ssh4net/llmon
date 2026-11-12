@@ -160,7 +160,11 @@ same layout; differences are noted per module.
     --no-session-persistence --safe-mode` and reads the structured
     `usage_report` (`--verbose` is needed: with the user's `verbose` setting
     off, the output is only the text, and a build that prints no report even
-    so gets its `Current session` / `Current week` lines read, `parse_text`),
+    so gets its `Current session` / `Current week` lines read, `parse_text`;
+    an account with usage credits and no meters has an empty `limits[]`,
+    and its `extra_usage` (cents) plus the `Spend limit: ... spent` line,
+    which alone has the reset date, are the reading, drawn as the Codex
+    monthly card),
     and it stops while the snapshot is fresh. The `claude` process is
     cancelled on quit (`fetch` takes a cancel flag), and the call must keep
     `--no-session-persistence`, or every poll leaves a transcript that the
