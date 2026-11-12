@@ -1756,6 +1756,8 @@ fn render_session_detail(
     let resume = match session.harness {
         Harness::Codex => format!("codex resume {}", session.session_id),
         Harness::Claude => format!("claude --resume {}", session.session_id),
+        Harness::Antigravity => format!("agy --resume {}", session.session_id),
+        Harness::Grok => format!("grok -r {}", session.session_id),
     };
     let resume = match remote {
         Some(remote) => format!("on {}: {resume}", remote.machine_name),
@@ -1866,7 +1868,7 @@ fn render_session_detail(
                         Span::raw(formatter.format_count(usage.output)),
                     ]));
                 }
-                Harness::Claude => {
+                Harness::Claude | Harness::Antigravity | Harness::Grok => {
                     lines.push(Line::from(vec![
                         Span::styled("IN/CW/CR/OUT", Style::default().fg(Color::Gray)),
                         Span::raw("  "),

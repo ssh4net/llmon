@@ -1,5 +1,5 @@
 use crate::harness::Harness;
-use crate::providers::{claude, codex};
+use crate::providers::{antigravity, claude, codex, grok};
 use crate::usage::{normalize_project_key, TokenBreakdown};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
@@ -108,7 +108,7 @@ pub(crate) fn build_catalog(harness: Harness, sessions_dir: &Path) -> Result<Cat
     // Claude Code subagent transcripts are attached to their parent session
     // instead of being listed on their own.
     let (top_level, mut subagents) = match harness {
-        Harness::Codex => (candidates, BTreeMap::new()),
+        Harness::Codex | Harness::Antigravity | Harness::Grok => (candidates, BTreeMap::new()),
         Harness::Claude => claude::history::split_subagent_files(candidates),
     };
 
@@ -254,6 +254,8 @@ fn scan_session_summary(harness: Harness, path: &Path) -> Result<SessionSummary>
     match harness {
         Harness::Codex => codex::history::scan_session_summary(path),
         Harness::Claude => claude::history::scan_session_summary(path),
+        Harness::Antigravity => antigravity::history::scan_session_summary(path),
+        Harness::Grok => grok::history::scan_session_summary(path),
     }
 }
 
@@ -261,6 +263,8 @@ pub(crate) fn load_session_detail(harness: Harness, path: &Path) -> Result<Sessi
     match harness {
         Harness::Codex => codex::history::load_session_detail(path),
         Harness::Claude => claude::history::load_session_detail(path),
+        Harness::Antigravity => antigravity::history::load_session_detail(path),
+        Harness::Grok => grok::history::load_session_detail(path),
     }
 }
 

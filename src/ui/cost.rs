@@ -303,6 +303,12 @@ fn source_line(harness: Harness, table: &PriceTable) -> String {
             "Claude: API-equivalent at Anthropic list prices (table {}{overrides}).",
             table.updated
         ),
+        Harness::Antigravity => {
+            format!("Antigravity: no price table yet{overrides}; usage is listed unpriced.")
+        }
+        Harness::Grok => {
+            format!("Grok: no price table yet{overrides}; usage is listed unpriced.")
+        }
     }
 }
 
@@ -340,13 +346,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     let machines = match state.sync.as_ref() {
         Some(sync) if state.machine_scope == MachineScope::All && !sync.peers.is_empty() => {
             let local: Vec<(Harness, Arc<LocalUsageSnapshot>)> =
-                super::view_harnesses(state.harness_view)
+                super::view_harnesses(state.harness_view, state.harness_page)
                     .iter()
                     .filter_map(|harness| {
-                        let snapshot = match harness {
-                            Harness::Codex => state.codex_usage.clone(),
-                            Harness::Claude => state.claude_usage.clone(),
-                        };
+                        let snapshot = state.local_usage_snapshot(*harness);
                         snapshot.map(|snapshot| (*harness, snapshot))
                     })
                     .collect();
@@ -475,6 +478,8 @@ fn harness_label(harness: Harness) -> &'static str {
     match harness {
         Harness::Codex => "CODEX",
         Harness::Claude => "CLAUDE",
+        Harness::Antigravity => "ANTIGRAVITY",
+        Harness::Grok => "GROK",
     }
 }
 
@@ -562,7 +567,9 @@ fn render_models(
     // Codex logs have no cache writes.
     let cache_write = |model: &ModelCost| match model.harness {
         Harness::Codex => "--".to_string(),
-        Harness::Claude => format_usd(model.cost.cache_write, formatter),
+        Harness::Claude | Harness::Antigravity | Harness::Grok => {
+            format_usd(model.cost.cache_write, formatter)
+        }
     };
     let rows: Vec<[String; 7]> = view
         .models

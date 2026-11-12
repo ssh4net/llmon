@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.18
+
+- A second page of screens for more tools. Keys `1` and `2` (or F3, or the 1
+  and 2 pills in the header) switch between page 1 (Codex and Claude Code, as
+  before) and page 2 (Antigravity and Grok). Page 2 has the same USAGE,
+  MODELS, COST, ACTIVITY, and HISTORY screens and its own COMBINED / left /
+  right view switch (`h`); APISTAT and LIMITS, which are Codex account
+  screens, are only on page 1. The page, the view, and the theme of each tool
+  are remembered. The two tools are found by their folders
+  (`~/.gemini/antigravity-cli`, `$GROK_HOME` or `~/.grok`; `--antigravity-dir`,
+  `--grok-dir`) and have no data yet: this version is the framework, and their
+  logs are read in the next ones.
+- A LIMITS card that only has a message (not available, loading) no longer has
+  the empty gauge drawn over its first line.
+
 ## 0.5.17
 
 - Claude limits: an account with usage credits and no 5-hour or weekly meters

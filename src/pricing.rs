@@ -103,6 +103,10 @@ impl PriceOverride {
 pub struct PricingOverrides {
     pub codex: BTreeMap<String, PriceOverride>,
     pub claude: BTreeMap<String, PriceOverride>,
+    #[serde(default)]
+    pub antigravity: BTreeMap<String, PriceOverride>,
+    #[serde(default)]
+    pub grok: BTreeMap<String, PriceOverride>,
 }
 
 /// Cost in USD split by token category.
@@ -152,6 +156,8 @@ impl PriceTable {
         let (prices, updated) = match harness {
             Harness::Codex => (codex_prices(), CODEX_PRICES_UPDATED),
             Harness::Claude => (claude_prices(), CLAUDE_PRICES_UPDATED),
+            // No built-in prices yet: such usage is listed as unpriced.
+            Harness::Antigravity | Harness::Grok => (Vec::new(), "none"),
         };
         Self {
             prices: prices
@@ -220,6 +226,8 @@ impl PriceTable {
 pub struct Pricing {
     pub codex: PriceTable,
     pub claude: PriceTable,
+    pub antigravity: PriceTable,
+    pub grok: PriceTable,
 }
 
 impl Default for Pricing {
@@ -233,6 +241,9 @@ impl Pricing {
         Self {
             codex: PriceTable::built_in(Harness::Codex).with_overrides(&overrides.codex),
             claude: PriceTable::built_in(Harness::Claude).with_overrides(&overrides.claude),
+            antigravity: PriceTable::built_in(Harness::Antigravity)
+                .with_overrides(&overrides.antigravity),
+            grok: PriceTable::built_in(Harness::Grok).with_overrides(&overrides.grok),
         }
     }
 
@@ -240,6 +251,8 @@ impl Pricing {
         match harness {
             Harness::Codex => &self.codex,
             Harness::Claude => &self.claude,
+            Harness::Antigravity => &self.antigravity,
+            Harness::Grok => &self.grok,
         }
     }
 }

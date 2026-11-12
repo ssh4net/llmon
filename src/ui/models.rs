@@ -278,7 +278,7 @@ fn render_cards(
         // Codex logs have no cache writes.
         let cache = match usage.harness {
             Harness::Codex => format!("   Cache: {} read", tokens(usage.total.cache_read)),
-            Harness::Claude => format!(
+            Harness::Claude | Harness::Antigravity | Harness::Grok => format!(
                 "   Cache: {} read {MIDDLE_DOT} {} write",
                 tokens(usage.total.cache_read),
                 tokens(usage.total.cache_write)

@@ -3,7 +3,7 @@ pub(crate) mod scan;
 pub(crate) mod tui;
 
 use crate::harness::Harness;
-use crate::providers::{claude, codex};
+use crate::providers::{antigravity, claude, codex, grok};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,14 @@ pub(crate) fn build_config(
             Harness::Claude => claude::projects_root(
                 &claude::resolve_claude_dir(harness_home)
                     .context("Unable to resolve the Claude Code config directory")?,
+            ),
+            Harness::Antigravity => antigravity::sessions_root(
+                &antigravity::resolve_antigravity_dir(harness_home)
+                    .context("Unable to resolve the Antigravity CLI directory")?,
+            ),
+            Harness::Grok => grok::sessions_root(
+                &grok::resolve_grok_dir(harness_home)
+                    .context("Unable to resolve the Grok directory")?,
             ),
         },
     };

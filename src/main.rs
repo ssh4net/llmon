@@ -179,6 +179,8 @@ fn load_or_bootstrap_user_config(llmon_home: &Path) -> Result<UserConfig> {
 enum HarnessArg {
     Codex,
     Claude,
+    Antigravity,
+    Grok,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -284,6 +286,14 @@ struct Args {
     /// Override the Claude Code config directory (default: $CLAUDE_CONFIG_DIR or ~/.claude).
     #[arg(long)]
     claude_dir: Option<PathBuf>,
+
+    /// Override the Antigravity CLI directory (default: ~/.gemini/antigravity-cli).
+    #[arg(long)]
+    antigravity_dir: Option<PathBuf>,
+
+    /// Override the Grok CLI directory (default: $GROK_HOME or ~/.grok).
+    #[arg(long)]
+    grok_dir: Option<PathBuf>,
 
     /// Override LLMON_HOME for llmon-owned state/cache files (default: $LLMON_HOME or ~/.llmon).
     #[arg(long)]
@@ -462,10 +472,14 @@ async fn main() -> Result<()> {
     let selected_harness = match args.harness {
         HarnessArg::Codex => harness::Harness::Codex,
         HarnessArg::Claude => harness::Harness::Claude,
+        HarnessArg::Antigravity => harness::Harness::Antigravity,
+        HarnessArg::Grok => harness::Harness::Grok,
     };
     let selected_home = match selected_harness {
         harness::Harness::Codex => args.codex_home.clone(),
         harness::Harness::Claude => args.claude_dir.clone(),
+        harness::Harness::Antigravity => args.antigravity_dir.clone(),
+        harness::Harness::Grok => args.grok_dir.clone(),
     };
     if args.print_sessions_dir {
         read::print_sessions_dir(selected_harness, selected_home, args.sessions_dir.clone())?;
@@ -584,6 +598,16 @@ async fn main() -> Result<()> {
                 providers::claude::resolve_claude_dir(args.claude_dir.clone())
                     .context("Unable to resolve the Claude Code config directory")?,
             ),
+            HarnessArg::Antigravity => (
+                harness::Harness::Antigravity,
+                providers::antigravity::resolve_antigravity_dir(args.antigravity_dir.clone())
+                    .context("Unable to resolve the Antigravity CLI directory")?,
+            ),
+            HarnessArg::Grok => (
+                harness::Harness::Grok,
+                providers::grok::resolve_grok_dir(args.grok_dir.clone())
+                    .context("Unable to resolve the Grok directory")?,
+            ),
         };
         let snapshot = usage::compute_snapshot(
             harness,
@@ -602,6 +626,12 @@ async fn main() -> Result<()> {
 
     let sync = sync::SyncSettings::resolve(&user_config.sync, args.sync_dir.clone(), &llmon_home)?;
     let claude_dir = providers::claude::resolve_claude_dir(args.claude_dir.clone());
+    // The other tools are read only where they have left data.
+    let antigravity_dir =
+        providers::antigravity::resolve_antigravity_dir(args.antigravity_dir.clone())
+            .filter(|dir| dir.is_dir());
+    let grok_dir =
+        providers::grok::resolve_grok_dir(args.grok_dir.clone()).filter(|dir| dir.is_dir());
     let mut history_sources = vec![(harness::Harness::Codex, read_config.sessions_dir)];
     if let Some(claude_dir) = claude_dir.as_deref() {
         history_sources.push((
@@ -609,8 +639,19 @@ async fn main() -> Result<()> {
             providers::claude::projects_root(claude_dir),
         ));
     }
+    if let Some(dir) = antigravity_dir.as_deref() {
+        history_sources.push((
+            harness::Harness::Antigravity,
+            providers::antigravity::sessions_root(dir),
+        ));
+    }
+    if let Some(dir) = grok_dir.as_deref() {
+        history_sources.push((harness::Harness::Grok, providers::grok::sessions_root(dir)));
+    }
     let config = app::Config {
         claude_dir,
+        antigravity_dir,
+        grok_dir,
         claude_limits_mode: match args.claude_limits.unwrap_or(user_config.claude_limits) {
             ClaudeLimitsArg::Statusline => app::ClaudeLimitsMode::StatusLine,
             ClaudeLimitsArg::Oauth => app::ClaudeLimitsMode::OAuth,

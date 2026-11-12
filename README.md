@@ -29,6 +29,15 @@ generated tokens. Bar lengths and summary-card totals use input plus output.
   - Debian/Ubuntu: `sudo apt install musl-tools`
   - Required tool for x86_64 musl builds: `x86_64-linux-musl-gcc`
 
+**Pages.** The screens come in two pages of two tools each: page 1 has Codex
+and Claude Code, page 2 has Antigravity and Grok. Keys `1` and `2` (or F3, or
+the pills next to the title) switch the page. Each page has the same USAGE,
+MODELS, COST, ACTIVITY, and HISTORY screens and its own COMBINED / left /
+right view switch; APISTAT and LIMITS (Codex account screens) are on page 1
+only. Page 2 is being built: the tools are found by their folders
+(`~/.gemini/antigravity-cli`, `~/.grok`), and their logs are read in later
+versions.
+
 Claude Code support is being added. The USAGE screen has three views (`h`
 switches them):
 

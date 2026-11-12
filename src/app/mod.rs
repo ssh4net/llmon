@@ -1,4 +1,4 @@
-use crate::harness::Harness;
+use crate::harness::{Harness, HarnessPage};
 use crate::locale::{DisplayFormatter, DisplayStyle, SystemLocale};
 use crate::providers::claude::limits::AccountRateLimits as ClaudeLimits;
 use crate::providers::codex::rpc::{AccountRateLimits, AccountUsage, CodexRpc, ResetCreditOutcome};
@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, watch};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub claude_dir: Option<std::path::PathBuf>,
+    /// The Antigravity CLI and Grok CLI directories, when they exist.
+    pub antigravity_dir: Option<std::path::PathBuf>,
+    pub grok_dir: Option<std::path::PathBuf>,
     pub claude_limits_mode: ClaudeLimitsMode,
     /// The `claude` command the status-line fallback runs.
     pub claude_bin: String,
@@ -209,6 +212,8 @@ impl AccentTheme {
 pub(crate) struct HarnessThemes {
     pub(crate) codex: AccentTheme,
     pub(crate) claude: AccentTheme,
+    pub(crate) antigravity: AccentTheme,
+    pub(crate) grok: AccentTheme,
 }
 
 impl Default for HarnessThemes {
@@ -216,6 +221,8 @@ impl Default for HarnessThemes {
         Self {
             codex: AccentTheme::Cyan,
             claude: AccentTheme::Orange,
+            antigravity: AccentTheme::Violet,
+            grok: AccentTheme::Green,
         }
     }
 }
@@ -225,6 +232,8 @@ impl HarnessThemes {
         match harness {
             Harness::Codex => self.codex,
             Harness::Claude => self.claude,
+            Harness::Antigravity => self.antigravity,
+            Harness::Grok => self.grok,
         }
     }
 
@@ -233,6 +242,8 @@ impl HarnessThemes {
         let slot = match harness {
             Harness::Codex => &mut self.codex,
             Harness::Claude => &mut self.claude,
+            Harness::Antigravity => &mut self.antigravity,
+            Harness::Grok => &mut self.grok,
         };
         let changed = *slot != theme;
         *slot = theme;
@@ -352,36 +363,70 @@ impl DayRange {
 /// Which harness the USAGE screen shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum HarnessView {
-    /// Codex and Claude Code side by side.
+    /// The two harnesses of the page side by side.
     #[default]
     Combined,
     Codex,
     Claude,
+    Antigravity,
+    Grok,
 }
 
 impl HarnessView {
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Combined => Self::Codex,
-            Self::Codex => Self::Claude,
-            Self::Claude => Self::Combined,
+    pub(crate) fn single(harness: Harness) -> Self {
+        match harness {
+            Harness::Codex => Self::Codex,
+            Harness::Claude => Self::Claude,
+            Harness::Antigravity => Self::Antigravity,
+            Harness::Grok => Self::Grok,
         }
     }
 
-    fn store_value(self) -> &'static str {
+    /// The harness of a single view; `None` for the combined one.
+    pub(crate) fn harness(self) -> Option<Harness> {
         match self {
-            Self::Combined => "combined",
-            Self::Codex => "codex",
-            Self::Claude => "claude",
+            Self::Combined => None,
+            Self::Codex => Some(Harness::Codex),
+            Self::Claude => Some(Harness::Claude),
+            Self::Antigravity => Some(Harness::Antigravity),
+            Self::Grok => Some(Harness::Grok),
+        }
+    }
+
+    /// The next view of a page: combined, its first harness, its second.
+    pub(crate) fn next(self, page: HarnessPage) -> Self {
+        let [left, right] = page.harnesses();
+        match self.harness() {
+            None => Self::single(left),
+            Some(harness) if harness == left => Self::single(right),
+            Some(_) => Self::Combined,
+        }
+    }
+
+    /// The same view on another page: the harness in the same position.
+    pub(crate) fn on_page(self, page: HarnessPage) -> Self {
+        let Some(harness) = self.harness() else {
+            return Self::Combined;
+        };
+        if harness.page() == page {
+            return self;
+        }
+        let from = harness.page().harnesses();
+        let to = page.harnesses();
+        Self::single(if harness == from[0] { to[0] } else { to[1] })
+    }
+
+    fn store_value(self) -> &'static str {
+        match self.harness() {
+            None => "combined",
+            Some(harness) => harness.key(),
         }
     }
 
     fn from_store(value: &str) -> Option<Self> {
         match value {
             "combined" => Some(Self::Combined),
-            "codex" => Some(Self::Codex),
-            "claude" => Some(Self::Claude),
-            _ => None,
+            _ => Harness::from_key(value).map(Self::single),
         }
     }
 }
@@ -528,6 +573,7 @@ pub(crate) enum ActiveScreen {
 pub(crate) enum UiClickAction {
     SetScreen(ActiveScreen),
     SetHarnessView(HarnessView),
+    SetHarnessPage(HarnessPage),
     SetDisplayStyle(DisplayStyle),
     SetAccentTheme(AccentTheme),
     /// Selects the chart of the combined USAGE view that the color theme
@@ -654,6 +700,22 @@ fn next_active_screen(screen: ActiveScreen) -> ActiveScreen {
         ActiveScreen::LimitResets => ActiveScreen::Read,
         ActiveScreen::Read => ActiveScreen::Usage,
     }
+}
+
+/// Whether a page has the screen: APISTAT and LIMITS are Codex account
+/// screens, so only the first page.
+fn page_has_screen(page: HarnessPage, screen: ActiveScreen) -> bool {
+    page == HarnessPage::First
+        || !matches!(screen, ActiveScreen::ApiStat | ActiveScreen::LimitResets)
+}
+
+/// The screen after `screen` on `page`.
+fn next_screen_on_page(screen: ActiveScreen, page: HarnessPage) -> ActiveScreen {
+    let mut next = next_active_screen(screen);
+    while !page_has_screen(page, next) {
+        next = next_active_screen(next);
+    }
+    next
 }
 
 /// Distributed mode state. `AppState::sync` is `None` unless the user opted
@@ -835,6 +897,8 @@ pub(crate) fn refresh_merged_usage(state: &mut AppState) {
         let local = match harness {
             Harness::Codex => state.codex_usage.as_ref(),
             Harness::Claude => state.claude_usage.as_ref(),
+            Harness::Antigravity => state.antigravity_usage.as_ref(),
+            Harness::Grok => state.grok_usage.as_ref(),
         };
         let Some(parts) = local.and_then(|snapshot| snapshot.parts.as_ref()) else {
             continue;
@@ -907,6 +971,8 @@ pub(crate) struct AppState {
     pub(crate) ui_hit_targets: Vec<UiHitTarget>,
 
     pub(crate) harness_view: HarnessView,
+    /// Which pair of harnesses the screens show (keys `1` and `2`, F3).
+    pub(crate) harness_page: HarnessPage,
     /// Distributed mode; `None` unless the user opted in.
     pub(crate) sync: Option<SyncState>,
     pub(crate) machine_scope: MachineScope,
@@ -923,6 +989,12 @@ pub(crate) struct AppState {
     pub(crate) claude_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
     pub(crate) claude_usage_updated_at: Option<Instant>,
     pub(crate) claude_usage_error: Option<String>,
+    pub(crate) antigravity_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
+    pub(crate) antigravity_usage_updated_at: Option<Instant>,
+    pub(crate) antigravity_usage_error: Option<String>,
+    pub(crate) grok_usage: Option<std::sync::Arc<LocalUsageSnapshot>>,
+    pub(crate) grok_usage_updated_at: Option<Instant>,
+    pub(crate) grok_usage_error: Option<String>,
 
     pub(crate) claude_limits: Option<ClaudeLimits>,
     pub(crate) claude_limits_updated_at: Option<Instant>,
@@ -990,6 +1062,7 @@ pub(crate) enum LimitResetButtonState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedUiState {
     harness_view: HarnessView,
+    harness_page: HarnessPage,
     machine_scope: MachineScope,
     usage_focus: Harness,
     models_range: DayRange,
@@ -1021,6 +1094,7 @@ impl PersistedUiState {
     fn default_for_workspace(workspace_path: Option<PathBuf>) -> Self {
         Self {
             harness_view: HarnessView::default(),
+            harness_page: HarnessPage::default(),
             machine_scope: MachineScope::default(),
             usage_focus: Harness::Codex,
             models_range: DayRange::Last30Days,
@@ -1052,6 +1126,7 @@ impl PersistedUiState {
     fn from_app_state(state: &AppState) -> Self {
         Self {
             harness_view: state.harness_view,
+            harness_page: state.harness_page,
             machine_scope: state.machine_scope,
             usage_focus: state.usage_focus,
             models_range: state.models_range,
@@ -1109,6 +1184,7 @@ impl Default for StateStore {
 struct StoredGlobalState {
     #[serde(default)]
     harness_view: Option<String>,
+    harness_page: Option<String>,
     machine_scope: Option<String>,
     usage_focus: Option<String>,
     models_range: Option<String>,
@@ -1128,6 +1204,8 @@ struct StoredGlobalState {
     accent_theme: Option<String>,
     codex_accent_theme: Option<String>,
     claude_accent_theme: Option<String>,
+    antigravity_accent_theme: Option<String>,
+    grok_accent_theme: Option<String>,
     bar_fill_mode: Option<String>,
     #[serde(default)]
     skip_quit_confirmation: bool,
@@ -1339,6 +1417,12 @@ async fn run_inner(
         if let Some(claude_dir) = config.claude_dir.clone() {
             harness_homes.push((crate::harness::Harness::Claude, claude_dir));
         }
+        if let Some(dir) = config.antigravity_dir.clone() {
+            harness_homes.push((crate::harness::Harness::Antigravity, dir));
+        }
+        if let Some(dir) = config.grok_dir.clone() {
+            harness_homes.push((crate::harness::Harness::Grok, dir));
+        }
         let workspace_path = restored_ui_state.workspace_path.clone();
         let scan_cache_db_path = scan_cache_db_path.clone();
         let usage_days = config.usage_days;
@@ -1461,7 +1545,10 @@ async fn run_inner(
                 }
             }
         });
-        let expected_harnesses = 1 + usize::from(config.claude_dir.is_some());
+        let expected_harnesses = 1
+            + usize::from(config.claude_dir.is_some())
+            + usize::from(config.antigravity_dir.is_some())
+            + usize::from(config.grok_dir.is_some());
         SyncState::new(settings, tx, expected_harnesses)
     });
 
@@ -1860,6 +1947,7 @@ async fn run_inner(
         mouse_position: None,
         ui_hit_targets: Vec::new(),
         harness_view: restored_ui_state.harness_view,
+        harness_page: restored_ui_state.harness_page,
         sync: sync_state,
         machine_scope: restored_ui_state.machine_scope,
         usage_focus: restored_ui_state.usage_focus,
@@ -1873,6 +1961,12 @@ async fn run_inner(
         claude_usage: None,
         claude_usage_updated_at: None,
         claude_usage_error: None,
+        antigravity_usage: None,
+        antigravity_usage_updated_at: None,
+        antigravity_usage_error: None,
+        grok_usage: None,
+        grok_usage_updated_at: None,
+        grok_usage_error: None,
         claude_limits: None,
         claude_limits_updated_at: None,
         claude_limits_error: None,
@@ -2377,8 +2471,16 @@ fn handle_input_event(
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(InputOutcome::Quit),
             (KeyCode::Char('s'), _) | (KeyCode::Char('S'), _) | (KeyCode::F(2), _) => {
-                state.active_screen = next_active_screen(state.active_screen);
+                state.active_screen = next_screen_on_page(state.active_screen, state.harness_page);
                 return Ok(InputOutcome::Continue(true));
+            }
+            (KeyCode::Char('1'), _) | (KeyCode::Char('2'), _) | (KeyCode::F(3), _) => {
+                let page = match key.code {
+                    KeyCode::Char('1') => HarnessPage::First,
+                    KeyCode::Char('2') => HarnessPage::Second,
+                    _ => state.harness_page.other(),
+                };
+                return Ok(InputOutcome::Continue(state.set_harness_page(page)));
             }
             (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => {
                 state.display_style = state.display_style.toggled();
@@ -2402,7 +2504,7 @@ fn handle_input_event(
             (KeyCode::Char('h'), _) | (KeyCode::Char('H'), _)
                 if state.active_screen == ActiveScreen::Read =>
             {
-                state.harness_view = state.harness_view.next();
+                state.harness_view = state.harness_view.next(state.harness_page);
                 return Ok(InputOutcome::Continue(true));
             }
             _ => {}
@@ -2517,6 +2619,7 @@ fn apply_ui_click_action(state: &mut AppState, action: UiClickAction) -> bool {
             state.active_screen = screen;
             changed
         }
+        UiClickAction::SetHarnessPage(page) => state.set_harness_page(page),
         UiClickAction::SetHarnessView(view) => {
             let changed = state.harness_view != view;
             state.harness_view = view;
@@ -2915,16 +3018,18 @@ fn handle_usage_command(
             changed
         }
         UsageCommand::CycleHarnessView => {
-            state.harness_view = state.harness_view.next();
+            state.harness_view = state.harness_view.next(state.harness_page);
             true
         }
         UsageCommand::SwitchUsageFocus => {
             if state.harness_view != HarnessView::Combined {
                 return false;
             }
-            state.usage_focus = match state.usage_focus {
-                Harness::Codex => Harness::Claude,
-                Harness::Claude => Harness::Codex,
+            let [left, right] = state.harness_page.harnesses();
+            state.usage_focus = if state.usage_focus == left {
+                right
+            } else {
+                left
             };
             true
         }
@@ -3019,7 +3124,7 @@ fn handle_range_screen_command(
             true
         }
         RangeScreenCommand::CycleHarnessView => {
-            state.harness_view = state.harness_view.next();
+            state.harness_view = state.harness_view.next(state.harness_page);
             true
         }
         RangeScreenCommand::ToggleHelp => {
@@ -3046,7 +3151,7 @@ fn handle_activity_command(
             true
         }
         ActivityCommand::CycleHarnessView => {
-            state.harness_view = state.harness_view.next();
+            state.harness_view = state.harness_view.next(state.harness_page);
             state.activity_week_offset = 0;
             true
         }
@@ -3313,6 +3418,35 @@ fn handle_app_event(state: &mut AppState, evt: AppEvent) -> bool {
             }
             true
         }
+        AppEvent::UsageUpdated(harness @ (Harness::Antigravity | Harness::Grok), res) => {
+            match res {
+                Ok(snapshot) => {
+                    if let Some(sync) = state.sync.as_mut() {
+                        sync.note_usage(harness, snapshot.export.clone());
+                    }
+                    let snapshot = Some(std::sync::Arc::new(snapshot));
+                    let now = Some(Instant::now());
+                    if harness == Harness::Grok {
+                        state.grok_usage = snapshot;
+                        state.grok_usage_error = None;
+                        state.grok_usage_updated_at = now;
+                    } else {
+                        state.antigravity_usage = snapshot;
+                        state.antigravity_usage_error = None;
+                        state.antigravity_usage_updated_at = now;
+                    }
+                    refresh_merged_usage(state);
+                }
+                Err(err) => {
+                    if harness == Harness::Grok {
+                        state.grok_usage_error = Some(err.to_string());
+                    } else {
+                        state.antigravity_usage_error = Some(err.to_string());
+                    }
+                }
+            }
+            true
+        }
         AppEvent::ClaudeLimitsUpdated(res) => {
             match res {
                 Ok(limits) => {
@@ -3533,6 +3667,22 @@ fn load_persisted_ui_state_with_history_depth(
             state.harness_themes.claude = theme;
         }
     }
+    if let Some(theme) = store
+        .global
+        .antigravity_accent_theme
+        .as_deref()
+        .and_then(AccentTheme::from_store)
+    {
+        state.harness_themes.antigravity = theme;
+    }
+    if let Some(theme) = store
+        .global
+        .grok_accent_theme
+        .as_deref()
+        .and_then(AccentTheme::from_store)
+    {
+        state.harness_themes.grok = theme;
+    }
     if let Some(mode_text) = store.global.bar_fill_mode.as_deref() {
         if let Some(mode) = BarFillMode::from_store(mode_text) {
             state.bar_fill_mode = mode;
@@ -3546,9 +3696,18 @@ fn load_persisted_ui_state_with_history_depth(
     {
         state.machine_scope = scope;
     }
+    if let Some(page) = store
+        .global
+        .harness_page
+        .as_deref()
+        .and_then(HarnessPage::from_store)
+    {
+        state.harness_page = page;
+    }
     if let Some(view_text) = store.global.harness_view.as_deref() {
         if let Some(view) = HarnessView::from_store(view_text) {
-            state.harness_view = view;
+            // A saved view of the other page would show nothing.
+            state.harness_view = view.on_page(state.harness_page);
         }
     }
     if let Some(harness) = store
@@ -3557,7 +3716,16 @@ fn load_persisted_ui_state_with_history_depth(
         .as_deref()
         .and_then(Harness::from_key)
     {
-        state.usage_focus = harness;
+        // A chart of the other page is moved to the same position here.
+        let from = harness.page().harnesses();
+        let to = state.harness_page.harnesses();
+        state.usage_focus = if harness.page() == state.harness_page {
+            harness
+        } else if harness == from[0] {
+            to[0]
+        } else {
+            to[1]
+        };
     }
     if let Some(range) = store
         .global
@@ -3650,8 +3818,12 @@ fn save_persisted_ui_state(llmon_home: &Path, state: &PersistedUiState) -> Resul
     store.global.display_style = Some(state.display_style.store_value().to_string());
     store.global.codex_accent_theme = Some(state.harness_themes.codex.store_value().to_string());
     store.global.claude_accent_theme = Some(state.harness_themes.claude.store_value().to_string());
+    store.global.antigravity_accent_theme =
+        Some(state.harness_themes.antigravity.store_value().to_string());
+    store.global.grok_accent_theme = Some(state.harness_themes.grok.store_value().to_string());
     store.global.bar_fill_mode = Some(state.bar_fill_mode.store_value().to_string());
     store.global.harness_view = Some(state.harness_view.store_value().to_string());
+    store.global.harness_page = Some(state.harness_page.store_value().to_string());
     store.global.machine_scope = Some(state.machine_scope.store_value());
     store.global.usage_focus = Some(state.usage_focus.key().to_string());
     store.global.models_range = Some(state.models_range.store_value().to_string());
@@ -3886,6 +4058,7 @@ impl AppState {
             mouse_position: None,
             ui_hit_targets: Vec::new(),
             harness_view: defaults.harness_view,
+            harness_page: defaults.harness_page,
             sync: None,
             machine_scope: defaults.machine_scope,
             usage_focus: defaults.usage_focus,
@@ -3899,6 +4072,12 @@ impl AppState {
             claude_usage: None,
             claude_usage_updated_at: None,
             claude_usage_error: None,
+            antigravity_usage: None,
+            antigravity_usage_updated_at: None,
+            antigravity_usage_error: None,
+            grok_usage: None,
+            grok_usage_updated_at: None,
+            grok_usage_error: None,
             claude_limits: None,
             claude_limits_updated_at: None,
             claude_limits_error: None,
@@ -3944,12 +4123,11 @@ impl AppState {
                 | ActiveScreen::Activity
                 | ActiveScreen::Read
         ) {
-            return Harness::Codex;
+            return self.harness_page.harnesses()[0];
         }
-        match self.harness_view {
-            HarnessView::Combined => self.usage_focus,
-            HarnessView::Codex => Harness::Codex,
-            HarnessView::Claude => Harness::Claude,
+        match self.harness_view.harness() {
+            None => self.usage_focus,
+            Some(harness) => harness,
         }
     }
 
@@ -3963,6 +4141,27 @@ impl AppState {
 
     pub(crate) fn harness_colors(&self, harness: Harness) -> (Color, Color) {
         self.harness_themes.get(harness).colors()
+    }
+
+    /// Shows the other pair of harnesses. The view and the selected chart move
+    /// to the harness in the same position. Returns whether anything changed.
+    pub(crate) fn set_harness_page(&mut self, page: HarnessPage) -> bool {
+        if self.harness_page == page {
+            return false;
+        }
+        self.harness_page = page;
+        self.harness_view = self.harness_view.on_page(page);
+        if !page_has_screen(page, self.active_screen) {
+            self.active_screen = ActiveScreen::Usage;
+        }
+        let [left, right] = page.harnesses();
+        let from = self.usage_focus.page().harnesses();
+        self.usage_focus = if self.usage_focus == from[0] {
+            left
+        } else {
+            right
+        };
+        true
     }
 
     /// `m`: all PCs, this PC, then each other machine by name, and round again.
@@ -4017,9 +4216,28 @@ impl AppState {
             }
             MachineScope::ThisPc => {}
         }
+        self.local_usage_snapshot(harness)
+    }
+
+    /// This machine's snapshot of a harness, whatever the machine scope.
+    pub(crate) fn local_usage_snapshot(
+        &self,
+        harness: Harness,
+    ) -> Option<std::sync::Arc<LocalUsageSnapshot>> {
         match harness {
             Harness::Codex => self.codex_usage.clone(),
             Harness::Claude => self.claude_usage.clone(),
+            Harness::Antigravity => self.antigravity_usage.clone(),
+            Harness::Grok => self.grok_usage.clone(),
+        }
+    }
+
+    pub(crate) fn usage_updated_at(&self, harness: Harness) -> Option<Instant> {
+        match harness {
+            Harness::Codex => self.codex_usage_updated_at,
+            Harness::Claude => self.claude_usage_updated_at,
+            Harness::Antigravity => self.antigravity_usage_updated_at,
+            Harness::Grok => self.grok_usage_updated_at,
         }
     }
 
@@ -4027,6 +4245,8 @@ impl AppState {
         let updated_at = match harness {
             crate::harness::Harness::Codex => self.codex_usage_updated_at,
             crate::harness::Harness::Claude => self.claude_usage_updated_at,
+            crate::harness::Harness::Antigravity => self.antigravity_usage_updated_at,
+            crate::harness::Harness::Grok => self.grok_usage_updated_at,
         }?;
         Some(crate::ui::format_updated_label(updated_at))
     }
@@ -4440,9 +4660,56 @@ mod tests {
         save_persisted_ui_state(&llmon_home, &state).expect("save persisted ui state");
         let loaded = load_persisted_ui_state(&llmon_home, None).expect("load persisted ui state");
         assert_eq!(loaded.harness_view, HarnessView::Claude);
-        assert_eq!(HarnessView::Claude.next(), HarnessView::Combined);
-        assert_eq!(HarnessView::Combined.next(), HarnessView::Codex);
+        assert_eq!(
+            HarnessView::Claude.next(HarnessPage::First),
+            HarnessView::Combined
+        );
+        assert_eq!(
+            HarnessView::Combined.next(HarnessPage::First),
+            HarnessView::Codex
+        );
 
+        let _ = std::fs::remove_dir_all(llmon_home);
+    }
+
+    #[test]
+    fn the_second_page_has_its_own_views_and_is_remembered() {
+        // The views of a page cycle through its two harnesses.
+        let second = HarnessPage::Second;
+        assert_eq!(HarnessView::Combined.next(second), HarnessView::Antigravity);
+        assert_eq!(HarnessView::Antigravity.next(second), HarnessView::Grok);
+        assert_eq!(HarnessView::Grok.next(second), HarnessView::Combined);
+
+        // Another page keeps the position: the right harness stays right.
+        assert_eq!(HarnessView::Claude.on_page(second), HarnessView::Grok);
+        assert_eq!(
+            HarnessView::Antigravity.on_page(HarnessPage::First),
+            HarnessView::Codex
+        );
+        assert_eq!(HarnessView::Combined.on_page(second), HarnessView::Combined);
+        assert_eq!(HarnessView::Grok.on_page(second), HarnessView::Grok);
+
+        let mut state = AppState::for_tests();
+        state.harness_view = HarnessView::Claude;
+        state.usage_focus = Harness::Claude;
+        assert!(state.set_harness_page(second));
+        assert_eq!(state.harness_view, HarnessView::Grok);
+        assert_eq!(state.usage_focus, Harness::Grok);
+        assert!(!state.set_harness_page(second), "already there");
+        assert!(state.set_harness_page(HarnessPage::First));
+        assert_eq!(state.harness_view, HarnessView::Claude);
+        assert_eq!(state.usage_focus, Harness::Claude);
+
+        // The page and its view survive a restart; a view saved for the other
+        // page is moved to this one.
+        let llmon_home = make_temp_dir("harness-page");
+        let mut persisted = PersistedUiState::default_for_workspace(None);
+        persisted.harness_page = second;
+        persisted.harness_view = HarnessView::Antigravity;
+        save_persisted_ui_state(&llmon_home, &persisted).expect("save");
+        let loaded = load_persisted_ui_state(&llmon_home, None).expect("load");
+        assert_eq!(loaded.harness_page, second);
+        assert_eq!(loaded.harness_view, HarnessView::Antigravity);
         let _ = std::fs::remove_dir_all(llmon_home);
     }
 
@@ -4453,6 +4720,8 @@ mod tests {
         state.harness_themes = HarnessThemes {
             codex: AccentTheme::Magenta,
             claude: AccentTheme::Blue,
+            antigravity: AccentTheme::Rose,
+            grok: AccentTheme::Yellow,
         };
         state.usage_focus = Harness::Claude;
         state.bar_fill_mode = BarFillMode::DualColorBackground;

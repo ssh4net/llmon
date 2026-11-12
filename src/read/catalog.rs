@@ -721,6 +721,8 @@ fn extract_structured_evidence_from_cancellable(
         match harness {
             Harness::Codex => codex_tool_call_evidence(&value, &mut evidence),
             Harness::Claude => claude_tool_call_evidence(&value, &mut evidence),
+            // No structured tool calls are read for these yet.
+            Harness::Antigravity | Harness::Grok => {}
         }
         if evidence.len() >= MAX_RELATED_PROJECTS_PER_SESSION.saturating_mul(8) {
             break;
@@ -829,6 +831,7 @@ fn extract_argument_evidence(
             let lower_name = name.to_ascii_lowercase();
             lower_name.contains("write") || lower_name.contains("edit")
         }
+        Harness::Antigravity | Harness::Grok => false,
     };
     for key in ["path", "file_path", "notebook_path", "target_path"] {
         if let Some(raw) = object.get(key).and_then(Value::as_str) {
@@ -946,6 +949,7 @@ fn is_evidence_tool(harness: Harness, name: &str) -> bool {
             "ls",
         ]
         .contains(&name.as_str()),
+        Harness::Antigravity | Harness::Grok => false,
     }
 }
 

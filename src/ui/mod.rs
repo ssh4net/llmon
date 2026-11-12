@@ -6,7 +6,7 @@ use crate::app::{
     AccentTheme, ActiveScreen, ApiStatGraph, ApiStatGrouping, AppState, BarFillMode,
     ChartOrientation, DayRange, LimitResetButtonState, MachineScope, UiClickAction, UiHitTarget,
 };
-use crate::harness::Harness;
+use crate::harness::{Harness, HarnessPage};
 use crate::locale::{DisplayFormatter, DisplayStyle};
 use crate::usage::{
     format_compact_kmb, format_count, format_duration_compact, format_tokens_compact,
@@ -158,7 +158,8 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
     state.activity_scroll_area = None;
     state.api_stat_scroll_area = None;
     let area = frame.area();
-    let (navigation, navigation_targets) = navigation_title(area, state.active_screen);
+    let (navigation, navigation_targets) =
+        navigation_title(area, state.active_screen, state.harness_page);
     state.ui_hit_targets.extend(navigation_targets);
     let (quit, quit_targets) =
         quit_title(area, state.quit_confirm_open, state.skip_quit_confirmation);
@@ -300,19 +301,16 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState) {
             // Project totals come from this machine's snapshots of the
             // harnesses shown.
             let usage_snapshots: Vec<Arc<crate::usage::LocalUsageSnapshot>> =
-                view_harnesses(state.harness_view)
+                view_harnesses(state.harness_view, state.harness_page)
                     .iter()
-                    .filter_map(|harness| match harness {
-                        Harness::Codex => state.codex_usage.clone(),
-                        Harness::Claude => state.claude_usage.clone(),
-                    })
+                    .filter_map(|harness| state.local_usage_snapshot(*harness))
                     .collect();
             let usages: Vec<&crate::usage::LocalUsageSnapshot> =
                 usage_snapshots.iter().map(Arc::as_ref).collect();
             // A project's models are counted in the snapshots of the machine
             // scope, so they include the other machines' usage of it.
             let model_snapshots: Vec<Arc<crate::usage::LocalUsageSnapshot>> =
-                view_harnesses(state.harness_view)
+                view_harnesses(state.harness_view, state.harness_page)
                     .iter()
                     .filter_map(|harness| state.usage_snapshot(*harness))
                     .collect();
@@ -371,14 +369,20 @@ fn usage_screen_layout(area: Rect, footer_height: u16) -> [Rect; 3] {
     [chunks[0], chunks[1], chunks[2]]
 }
 
-fn navigation_title(area: Rect, active_screen: ActiveScreen) -> (Line<'static>, Vec<UiHitTarget>) {
+fn navigation_title(
+    area: Rect,
+    active_screen: ActiveScreen,
+    page: HarnessPage,
+) -> (Line<'static>, Vec<UiHitTarget>) {
     let title_area = Rect::new(
         area.x.saturating_add(1),
         area.y,
         area.width.saturating_sub(2),
         1,
     );
-    let segments = [
+    // APISTAT and LIMITS are Codex account screens: only on the first page.
+    let account_screens = page == HarnessPage::First;
+    let mut segments = vec![
         (" ", None),
         (
             " USAGE ",
@@ -406,6 +410,9 @@ fn navigation_title(area: Rect, active_screen: ActiveScreen) -> (Line<'static>, 
             Some(UiClickAction::SetScreen(ActiveScreen::Read)),
         ),
     ];
+    if !account_screens {
+        segments.retain(|(text, _)| *text != " APISTAT " && *text != " LIMITS ");
+    }
     let app_title_width = UnicodeWidthStr::width(app_title().as_str());
     let navigation_width = segments
         .iter()
@@ -419,17 +426,24 @@ fn navigation_title(area: Rect, active_screen: ActiveScreen) -> (Line<'static>, 
         return (Line::default(), Vec::new());
     }
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::raw(" "),
         pill("USAGE", active_screen == ActiveScreen::Usage),
         pill("MODELS", active_screen == ActiveScreen::Models),
         pill("COST", active_screen == ActiveScreen::Cost),
-        pill("APISTAT", active_screen == ActiveScreen::ApiStat),
-        pill("ACTIVITY", active_screen == ActiveScreen::Activity),
-        pill("LIMITS", active_screen == ActiveScreen::LimitResets),
-        pill("HISTORY", active_screen == ActiveScreen::Read),
-    ]);
-    (line, right_aligned_targets(title_area, &segments))
+    ];
+    if account_screens {
+        spans.push(pill("APISTAT", active_screen == ActiveScreen::ApiStat));
+    }
+    spans.push(pill("ACTIVITY", active_screen == ActiveScreen::Activity));
+    if account_screens {
+        spans.push(pill("LIMITS", active_screen == ActiveScreen::LimitResets));
+    }
+    spans.push(pill("HISTORY", active_screen == ActiveScreen::Read));
+    (
+        Line::from(spans),
+        right_aligned_targets(title_area, &segments),
+    )
 }
 
 fn quit_title(
@@ -464,8 +478,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     render_harness_header(frame, area, state, "USAGE_SNAPSHOT :: ");
 }
 
-/// The clickable COMBINED / CODEX / CLAUDE pills from column `x` of row
-/// `y`; pills that would pass `right` get no click target.
+/// The clickable page pills (1 and 2) and the COMBINED / left / right harness
+/// pills of the page from column `x` of row `y`; pills that would pass
+/// `right` get no click target.
 fn render_harness_pills(
     frame: &mut Frame<'_>,
     state: &mut AppState,
@@ -473,21 +488,49 @@ fn render_harness_pills(
     y: u16,
     right: u16,
 ) -> u16 {
-    let views = [
-        ("COMBINED", HarnessView::Combined),
-        ("CODEX", HarnessView::Codex),
-        ("CLAUDE", HarnessView::Claude),
-    ];
-    let mut spans = Vec::with_capacity(views.len());
+    let [left_harness, right_harness] = state.harness_page.harnesses();
+    let mut pills: Vec<(String, bool, Option<UiClickAction>)> = Vec::new();
+    for page in [HarnessPage::First, HarnessPage::Second] {
+        pills.push((
+            page.number().to_string(),
+            state.harness_page == page,
+            Some(UiClickAction::SetHarnessPage(page)),
+        ));
+    }
+    pills.push((String::new(), false, None));
+    for (label, view) in [
+        ("COMBINED".to_string(), HarnessView::Combined),
+        (
+            harness_pill_label(left_harness).to_string(),
+            HarnessView::single(left_harness),
+        ),
+        (
+            harness_pill_label(right_harness).to_string(),
+            HarnessView::single(right_harness),
+        ),
+    ] {
+        pills.push((
+            label,
+            state.harness_view == view,
+            Some(UiClickAction::SetHarnessView(view)),
+        ));
+    }
+    let mut spans = Vec::with_capacity(pills.len());
     let mut next_x = x;
-    for (label, view) in views {
-        let pill_span = pill(label, state.harness_view == view);
+    for (label, active, action) in pills {
+        let Some(action) = action else {
+            // A gap between the page pills and the harness pills.
+            spans.push(Span::raw("  "));
+            next_x = next_x.saturating_add(2);
+            continue;
+        };
+        let pill_span = pill(&label, active);
         let width =
             u16::try_from(UnicodeWidthStr::width(pill_span.content.as_ref())).unwrap_or(u16::MAX);
         if next_x.saturating_add(width) <= right {
             state.ui_hit_targets.push(UiHitTarget {
                 area: Rect::new(next_x, y, width, 1),
-                action: UiClickAction::SetHarnessView(view),
+                action,
             });
         }
         next_x = next_x.saturating_add(width);
@@ -496,6 +539,15 @@ fn render_harness_pills(
     let area = Rect::new(x, y, right.saturating_sub(x), 1);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     next_x
+}
+
+fn harness_pill_label(harness: Harness) -> &'static str {
+    match harness {
+        Harness::Codex => "CODEX",
+        Harness::Claude => "CLAUDE",
+        Harness::Antigravity => "ANTIGRAVITY",
+        Harness::Grok => "GROK",
+    }
 }
 
 const MACHINE_THIS_LABEL: &str = "THIS PC";
@@ -615,17 +667,21 @@ fn inset_header_area(area: Rect) -> Rect {
 /// Header status of the combined view: the latest refresh, and indexing
 /// progress over both harnesses.
 fn combined_scan_status_label(state: &AppState) -> Option<String> {
-    let updated_at = [state.codex_usage_updated_at, state.claude_usage_updated_at]
-        .into_iter()
-        .flatten()
+    let updated_at = state
+        .harness_page
+        .slice()
+        .iter()
+        .filter_map(|harness| state.usage_updated_at(*harness))
         .max()?;
     let updated = format_updated_label(updated_at);
     let mut indexed = 0_usize;
     let mut total = 0_usize;
     let mut pending = 0_usize;
-    for snapshot in [state.codex_usage.as_deref(), state.claude_usage.as_deref()]
-        .into_iter()
-        .flatten()
+    for snapshot in state
+        .harness_page
+        .slice()
+        .iter()
+        .filter_map(|harness| state.local_usage_snapshot(*harness))
     {
         indexed = indexed.saturating_add(snapshot.scan_indexed_files);
         total = total.saturating_add(snapshot.scan_total_files);
@@ -641,12 +697,10 @@ fn usage_scan_status_label(state: &AppState, harness: Harness) -> Option<String>
         .or_else(|| match harness {
             Harness::Codex => state.limits_updated_label(),
             Harness::Claude => state.claude_limits_updated_label(),
+            Harness::Antigravity | Harness::Grok => None,
         })?;
-    let snapshot = match harness {
-        Harness::Codex => state.codex_usage.as_deref(),
-        Harness::Claude => state.claude_usage.as_deref(),
-    };
-    let Some(snapshot) = snapshot else {
+    let snapshot = state.local_usage_snapshot(harness);
+    let Some(snapshot) = snapshot.as_deref() else {
         return Some(updated);
     };
     let status = if snapshot.scan_pending_files == 0 {
@@ -2202,16 +2256,16 @@ fn render_api_daily_chart(
 fn footer_hint(screen: ActiveScreen) -> &'static str {
     match screen {
         ActiveScreen::Usage => {
-            "Usage: View [h] (combined/codex/claude), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Models [d] (today/7d/30d/all), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Usage: Page [1/2/F3], View [h] (combined/left/right), Select [x] (combined), Statistic [tab] (tokens/time/runs), Group [g/w] (day/week/month), Models [d] (today/7d/30d/all), Layout [f] (horizontal/vertical), Zone [z/F6] (local/UTC), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Models => {
-            "Models: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Models: Page [1/2/F3], View [h] (combined/left/right), Dates [d] (all/7d/30d), Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Cost => {
-            "Cost: View [h] (combined/codex/claude), Dates [d] (all/7d/30d), Project [up/down/wheel], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Cost: Page [1/2/F3], View [h] (combined/left/right), Dates [d] (all/7d/30d), Project [up/down/wheel], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::Activity => {
-            "Activity: View [h] (combined/codex/claude), Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
+            "Activity: Page [1/2/F3], View [h] (combined/left/right), Statistic [tab] (tokens/time/runs), Projects [+/-], Scroll [wheel/left/right/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
         }
         ActiveScreen::ApiStat => {
             "Codex API stats: View [b] (bars/heat), Group [g] (day/week/month), Layout [f] (vertical/horizontal), Zone: UTC (server), Scroll [wheel/arrows/PgUp/PgDn/Home/End], Refresh [r/F5], Switch [s/F2], Help [?], Quit [q]"
@@ -2314,12 +2368,20 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
 }
 
+/// The limit reset line of the controls: Codex has it, so only page one.
+fn reset_summary_for_page(state: &AppState) -> Option<String> {
+    if state.harness_page != crate::harness::HarnessPage::First {
+        return None;
+    }
+    reset_summary_text(state)
+}
+
 fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, harness: Harness) {
     let panel = usage_panel(state, harness);
     let cards_height = usage_cards_height(state, &panel, area.width);
     // Limit reset credits exist only for Codex, but the Claude view keeps
     // the same controls height so the two views line up.
-    let codex_reset_summary = reset_summary_text(state);
+    let codex_reset_summary = reset_summary_for_page(state);
     let codex_reset_button = codex_reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
@@ -2330,7 +2392,7 @@ fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, 
     );
     let (reset_summary, reset_button) = match panel.harness {
         Harness::Codex => (codex_reset_summary, codex_reset_button),
-        Harness::Claude => (None, None),
+        Harness::Claude | Harness::Antigravity | Harness::Grok => (None, None),
     };
     let chunks = usage_layout(area, controls_height, cards_height);
 
@@ -2381,11 +2443,12 @@ fn equal_halves(area: Rect) -> (Rect, Rect) {
 /// Codex cards, Claude cards, then the Codex chart on the left and the
 /// Claude chart on the right with the same days in the same rows.
 fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
-    let codex = labeled_usage_panel(state, Harness::Codex);
-    let claude = labeled_usage_panel(state, Harness::Claude);
-    let codex_cards_height = usage_cards_height(state, &codex, area.width);
-    let claude_cards_height = usage_cards_height(state, &claude, area.width);
-    let reset_summary = reset_summary_text(state);
+    let [left_harness, right_harness] = state.harness_page.harnesses();
+    let left = labeled_usage_panel(state, left_harness);
+    let right = labeled_usage_panel(state, right_harness);
+    let left_cards_height = usage_cards_height(state, &left, area.width);
+    let right_cards_height = usage_cards_height(state, &right, area.width);
+    let reset_summary = reset_summary_for_page(state);
     let reset_button = reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
@@ -2398,8 +2461,8 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(controls_height),
-            Constraint::Length(codex_cards_height),
-            Constraint::Length(claude_cards_height),
+            Constraint::Length(left_cards_height),
+            Constraint::Length(right_cards_height),
             // As in `usage_layout`: the cards keep their height and the
             // charts take what is left.
             Constraint::Fill(1),
@@ -2414,20 +2477,21 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         reset_summary.as_deref(),
         reset_button.as_ref(),
     );
-    let codex_hover = render_usage_cards(frame, chunks[1], state, &codex);
-    let claude_hover = render_usage_cards(frame, chunks[2], state, &claude);
+    let left_hover = render_usage_cards(frame, chunks[1], state, &left);
+    let right_hover = render_usage_cards(frame, chunks[2], state, &right);
     // The selected harness's cards share its chart's outline color, and a
     // click on either card group selects that harness.
-    let selected_cards = match state.usage_focus {
-        Harness::Codex => chunks[1],
-        Harness::Claude => chunks[2],
+    let selected_cards = if state.usage_focus == left_harness {
+        chunks[1]
+    } else {
+        chunks[2]
     };
     color_card_outlines(
         frame,
         selected_cards,
         state.harness_colors(state.usage_focus).1,
     );
-    for (area, harness) in [(chunks[1], Harness::Codex), (chunks[2], Harness::Claude)] {
+    for (area, harness) in [(chunks[1], left_harness), (chunks[2], right_harness)] {
         state.ui_hit_targets.push(UiHitTarget {
             area,
             action: UiClickAction::SetUsageFocus(harness),
@@ -2435,56 +2499,55 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
     }
 
     let zone = state.usage_zone;
-    let (codex_days, claude_days) = aligned_usage_days(
-        codex
-            .snapshot
+    let (left_days, right_days) = aligned_usage_days(
+        left.snapshot
             .as_deref()
             .map_or(&[][..], |snapshot| snapshot.days_for_zone(zone)),
-        claude
+        right
             .snapshot
             .as_deref()
             .map_or(&[][..], |snapshot| snapshot.days_for_zone(zone)),
     );
-    let codex_periods = aggregate_usage_days(&codex_days, state.range);
-    let claude_periods = aggregate_usage_days(&claude_days, state.range);
-    let (codex_area, claude_area) = equal_halves(chunks[3]);
+    let left_periods = aggregate_usage_days(&left_days, state.range);
+    let right_periods = aggregate_usage_days(&right_days, state.range);
+    let (left_area, right_area) = equal_halves(chunks[3]);
     let focus = state.usage_focus;
     render_usage_chart(
         frame,
-        codex_area,
+        left_area,
         state,
-        &codex,
+        &left,
         UsageChartInput {
-            days: &codex_periods,
+            days: &left_periods,
             owns_viewport: false,
-            selected: focus == Harness::Codex,
+            selected: focus == left_harness,
         },
     );
     render_usage_chart(
         frame,
-        claude_area,
+        right_area,
         state,
-        &claude,
+        &right,
         UsageChartInput {
-            days: &claude_periods,
+            days: &right_periods,
             owns_viewport: false,
-            selected: focus == Harness::Claude,
+            selected: focus == right_harness,
         },
     );
     // Both charts scroll together; the wheel works over either one. A click
     // selects the chart that the color theme control edits.
     state.usage_scroll_area = Some(chunks[3]);
-    for (area, harness) in [(codex_area, Harness::Codex), (claude_area, Harness::Claude)] {
+    for (area, harness) in [(left_area, left_harness), (right_area, right_harness)] {
         state.ui_hit_targets.push(UiHitTarget {
             area,
             action: UiClickAction::SetUsageFocus(harness),
         });
     }
 
-    let (codex_models, claude_models) = equal_halves(chunks[4]);
-    render_top_models(frame, codex_models, state, &codex, false);
-    render_top_models(frame, claude_models, state, &claude, true);
-    if let Some(hover) = reset_hover.or(codex_hover).or(claude_hover) {
+    let (left_models, right_models) = equal_halves(chunks[4]);
+    render_top_models(frame, left_models, state, &left, false);
+    render_top_models(frame, right_models, state, &right, true);
+    if let Some(hover) = reset_hover.or(left_hover).or(right_hover) {
         render_weekly_pace_tooltip(frame, area, hover.mouse, &hover.text);
     }
 }
@@ -2511,23 +2574,24 @@ fn labeled_usage_panel(state: &AppState, harness: Harness) -> UsagePanel {
         label: Some(match harness {
             Harness::Codex => "CODEX",
             Harness::Claude => "CLAUDE",
+            Harness::Antigravity => "ANTIGRAVITY",
+            Harness::Grok => "GROK",
         }),
         ..usage_panel(state, harness)
     }
 }
 
 /// The harnesses a view covers, in display order.
-fn view_harnesses(view: HarnessView) -> &'static [Harness] {
-    match view {
-        HarnessView::Combined => &[Harness::Codex, Harness::Claude],
-        HarnessView::Codex => &[Harness::Codex],
-        HarnessView::Claude => &[Harness::Claude],
+fn view_harnesses(view: HarnessView, page: crate::harness::HarnessPage) -> &'static [Harness] {
+    match view.harness() {
+        None => page.slice(),
+        Some(harness) => harness.only(),
     }
 }
 
 /// The usage snapshots of the selected view's harnesses that have one.
 fn view_snapshots(state: &AppState) -> Vec<(Harness, Arc<crate::usage::LocalUsageSnapshot>)> {
-    view_harnesses(state.harness_view)
+    view_harnesses(state.harness_view, state.harness_page)
         .iter()
         .filter_map(|harness| {
             state
@@ -2616,11 +2680,7 @@ fn render_range_controls(
 /// The harness of a single-harness USAGE view, or `None` for the combined
 /// view.
 fn usage_view_harness(view: HarnessView) -> Option<Harness> {
-    match view {
-        HarnessView::Combined => None,
-        HarnessView::Codex => Some(Harness::Codex),
-        HarnessView::Claude => Some(Harness::Claude),
-    }
+    view.harness()
 }
 
 /// Card columns of a panel: a labeled (combined view) panel keeps all six
@@ -2757,8 +2817,9 @@ fn render_activity(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     // same controls height so the views line up.
     let codex_reset_summary = reset_summary_text(state);
     let controls_height = activity_controls_height(codex_reset_summary.as_deref(), area.width);
-    let reset_summary = codex_reset_summary
-        .filter(|_| view_harnesses(state.harness_view).contains(&Harness::Codex));
+    let reset_summary = codex_reset_summary.filter(|_| {
+        view_harnesses(state.harness_view, state.harness_page).contains(&Harness::Codex)
+    });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -3793,6 +3854,12 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
         }
         Harness::Claude => {
             let input = claude_limits_card_input(state, now_unix_secs());
+            let (value, captions) =
+                limits_card_lines(&input, uses_compact_limit_lines(card_width), formatter);
+            CardSpec::limits(value, captions)
+        }
+        Harness::Antigravity | Harness::Grok => {
+            let input = no_limits_card_input(panel.harness);
             let (value, captions) =
                 limits_card_lines(&input, uses_compact_limit_lines(card_width), formatter);
             CardSpec::limits(value, captions)
@@ -5323,7 +5390,7 @@ type TokenColumns = [u64; 4];
 fn token_column_count(harness: Harness) -> usize {
     match harness {
         Harness::Codex => 3,
-        Harness::Claude => 4,
+        Harness::Claude | Harness::Antigravity | Harness::Grok => 4,
     }
 }
 
@@ -5332,8 +5399,10 @@ fn token_column_labels(harness: Harness, short: bool) -> [&'static str; 4] {
     match (harness, short) {
         (Harness::Codex, false) => ["INPUT", "NON-CACHED", "OUTPUT", ""],
         (Harness::Codex, true) => ["IN", "NC", "OUT", ""],
-        (Harness::Claude, false) => ["INPUT", "CACHE-WRITE", "CACHE-READ", "OUTPUT"],
-        (Harness::Claude, true) => ["IN", "CW", "CR", "OUT"],
+        (Harness::Claude | Harness::Antigravity | Harness::Grok, false) => {
+            ["INPUT", "CACHE-WRITE", "CACHE-READ", "OUTPUT"]
+        }
+        (Harness::Claude | Harness::Antigravity | Harness::Grok, true) => ["IN", "CW", "CR", "OUT"],
     }
 }
 
@@ -5635,7 +5704,7 @@ fn usage_day_token_columns(day: &UsageDay, harness: Harness) -> TokenColumns {
         }
         // INPUT includes cache writes and reads, as Codex's does; the uncached
         // remainder is a few tokens per request.
-        Harness::Claude => [
+        Harness::Claude | Harness::Antigravity | Harness::Grok => [
             day.prompt_tokens().max(0) as u64,
             day.cache_write_tokens.max(0) as u64,
             day.cache_read_tokens.max(0) as u64,
@@ -8007,6 +8076,20 @@ fn codex_limits_card_input(state: &AppState) -> LimitsCardInput {
     }
 }
 
+/// The LIMITS card of a harness whose account limits llmon cannot read.
+fn no_limits_card_input(harness: Harness) -> LimitsCardInput {
+    let name = match harness {
+        Harness::Antigravity => "Antigravity",
+        Harness::Grok => "Grok",
+        Harness::Codex => "Codex",
+        Harness::Claude => "Claude Code",
+    };
+    LimitsCardInput::Message {
+        head: "Not available".to_string(),
+        detail: vec![format!("{name} limits are not read")],
+    }
+}
+
 fn claude_limits_card_input(state: &AppState, now: i64) -> LimitsCardInput {
     let message = |head: &str, detail: &[&str]| LimitsCardInput::Message {
         head: head.to_string(),
@@ -8303,6 +8386,7 @@ fn render_panel_limits_card(
     let input = match panel.harness {
         Harness::Codex => codex_limits_card_input(state),
         Harness::Claude => claude_limits_card_input(state, now_unix_secs()),
+        Harness::Antigravity | Harness::Grok => no_limits_card_input(panel.harness),
     };
     render_limits_card(frame, area, state, &input, &title, compact)
 }
@@ -8320,9 +8404,13 @@ fn render_limits_card(
         limits_card_paragraph(input, title, compact, content_width, state.formatter());
     frame.render_widget(paragraph, area);
 
-    let gauge = limit_usage_gauge(input.limits(), now_unix_secs());
-    if let Some(gauge_area) = limit_gauge_line_rect(area, gauge_line_index) {
-        render_limit_usage_gauge(frame.buffer_mut(), gauge_area, gauge);
+    // A message or a loading card has no gauge: it would be drawn over its
+    // first line.
+    if input.limits().is_some() {
+        let gauge = limit_usage_gauge(input.limits(), now_unix_secs());
+        if let Some(gauge_area) = limit_gauge_line_rect(area, gauge_line_index) {
+            render_limit_usage_gauge(frame.buffer_mut(), gauge_area, gauge);
+        }
     }
 
     let mouse = state.mouse_position?;
@@ -10211,7 +10299,11 @@ mod tests {
 
     #[test]
     fn navigation_tabs_are_clickable_on_the_outer_border() {
-        let (title, targets) = navigation_title(Rect::new(4, 2, 80, 20), ActiveScreen::Activity);
+        let (title, targets) = navigation_title(
+            Rect::new(4, 2, 80, 20),
+            ActiveScreen::Activity,
+            HarnessPage::First,
+        );
 
         assert_eq!(title.width(), 58);
         let expected = [
@@ -10236,8 +10328,11 @@ mod tests {
             app_title(),
             format!(" llmon :: {} ", env!("CARGO_PKG_VERSION"))
         );
-        let (navigation, targets) =
-            navigation_title(Rect::new(0, 0, 80, 24), ActiveScreen::ApiStat);
+        let (navigation, targets) = navigation_title(
+            Rect::new(0, 0, 80, 24),
+            ActiveScreen::ApiStat,
+            HarnessPage::First,
+        );
         assert_eq!(navigation.width(), 58);
         assert_eq!(targets.len(), 7);
     }
@@ -10439,8 +10534,47 @@ mod tests {
     }
 
     #[test]
+    fn the_second_page_shows_its_two_harnesses_and_hides_account_screens() {
+        let mut state = AppState::for_tests();
+        state.active_screen = ActiveScreen::Usage;
+        state.set_harness_page(HarnessPage::Second);
+        let text = render_screen_text(&mut state, 160, 44);
+        assert!(text.contains("COMBINED"), "{text}");
+        assert!(text.contains("ANTIGRAVITY LIMITS"), "{text}");
+        assert!(text.contains("GROK LIMITS"), "{text}");
+        assert!(text.contains("GROK :: Usage by day"), "{text}");
+        assert!(!text.contains("CODEX LIMITS"), "{text}");
+        assert!(!text.contains("APISTAT"), "{text}");
+        // The limits cards say so, with their text visible.
+        assert!(text.contains("Not available"), "{text}");
+
+        // The page pills are clickable, and the harness pills follow the page.
+        assert!(state.ui_hit_targets.iter().any(|target| matches!(
+            target.action,
+            UiClickAction::SetHarnessPage(HarnessPage::First)
+        )));
+        assert!(state.ui_hit_targets.iter().any(|target| matches!(
+            target.action,
+            UiClickAction::SetHarnessView(HarnessView::Grok)
+        )));
+        assert!(!state.ui_hit_targets.iter().any(|target| matches!(
+            target.action,
+            UiClickAction::SetHarnessView(HarnessView::Codex)
+        )));
+
+        state.set_harness_page(HarnessPage::First);
+        let text = render_screen_text(&mut state, 160, 44);
+        assert!(text.contains("CODEX LIMITS"), "{text}");
+        assert!(text.contains("APISTAT"), "{text}");
+    }
+
+    #[test]
     fn navigation_title_hides_tabs_before_they_touch_the_version() {
-        let (title, targets) = navigation_title(Rect::new(0, 0, 52, 10), ActiveScreen::Usage);
+        let (title, targets) = navigation_title(
+            Rect::new(0, 0, 52, 10),
+            ActiveScreen::Usage,
+            HarnessPage::First,
+        );
         assert!(title.spans.is_empty());
         assert!(targets.is_empty());
     }

@@ -2,7 +2,7 @@ pub(crate) mod archive;
 
 use crate::harness::{Harness, ALL_HARNESSES};
 use crate::locale::{DisplayFormatter, DisplayStyle};
-use crate::providers::{claude, codex};
+use crate::providers::{antigravity, claude, codex, grok};
 use anyhow::{Context, Result};
 use archive::{ArchivedUsage, UsageArchive, USAGE_ARCHIVE_DB_FILE_NAME};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc, Weekday};
@@ -34,6 +34,8 @@ const CODEX_CACHE_SCHEMA_VERSION: i64 = 2;
 /// `schema_version.claude`). 2: a response counts the largest usage of its
 /// repeated lines, not the first.
 const CLAUDE_CACHE_SCHEMA_VERSION: i64 = 2;
+const ANTIGRAVITY_CACHE_SCHEMA_VERSION: i64 = 1;
+const GROK_CACHE_SCHEMA_VERSION: i64 = 1;
 pub const DEFAULT_SCAN_CACHE_MAX_ENTRIES: usize = 50_000;
 pub const SCAN_CACHE_DB_FILE_NAME: &str = "llmon.db";
 pub const ACTIVITY_TIMELINE_WEEKS: usize = 54;
@@ -590,20 +592,22 @@ pub(crate) struct ScanCacheStore {
 pub(crate) enum HarnessParserState {
     Codex(codex::usage::ParserState),
     Claude(claude::usage::ParserState),
+    Antigravity(antigravity::usage::ParserState),
+    Grok(grok::usage::ParserState),
 }
 
 impl HarnessParserState {
     pub(crate) fn as_codex(&self) -> Option<&codex::usage::ParserState> {
         match self {
             HarnessParserState::Codex(state) => Some(state),
-            HarnessParserState::Claude(_) => None,
+            _ => None,
         }
     }
 
     pub(crate) fn as_claude(&self) -> Option<&claude::usage::ParserState> {
         match self {
             HarnessParserState::Claude(state) => Some(state),
-            HarnessParserState::Codex(_) => None,
+            _ => None,
         }
     }
 
@@ -611,6 +615,8 @@ impl HarnessParserState {
         match harness {
             Harness::Codex => serde_json::from_str(json).map(HarnessParserState::Codex),
             Harness::Claude => serde_json::from_str(json).map(HarnessParserState::Claude),
+            Harness::Antigravity => serde_json::from_str(json).map(HarnessParserState::Antigravity),
+            Harness::Grok => serde_json::from_str(json).map(HarnessParserState::Grok),
         }
     }
 
@@ -618,6 +624,8 @@ impl HarnessParserState {
         match self {
             HarnessParserState::Codex(state) => serde_json::to_string(state),
             HarnessParserState::Claude(state) => serde_json::to_string(state),
+            HarnessParserState::Antigravity(state) => serde_json::to_string(state),
+            HarnessParserState::Grok(state) => serde_json::to_string(state),
         }
     }
 }
@@ -627,6 +635,8 @@ enum HarnessParsePlan {
     /// Parent baselines of forked Codex sessions, by candidate path.
     Codex(HashMap<String, codex::usage::ForkResolution>),
     Claude,
+    Antigravity,
+    Grok,
 }
 
 #[derive(Debug, Clone)]
@@ -963,6 +973,8 @@ pub fn compute_snapshot_with(
     let sessions_root = match harness {
         Harness::Codex => codex::sessions_root(harness_home),
         Harness::Claude => claude::projects_root(harness_home),
+        Harness::Antigravity => antigravity::sessions_root(harness_home),
+        Harness::Grok => grok::sessions_root(harness_home),
     };
     // The configured window controls summary cards and model shares. Charts are
     // expanded to the complete indexed history after cached rows are applied.
@@ -1159,6 +1171,8 @@ pub fn compute_snapshot_with(
             limits.max_jsonl_line_bytes,
         )),
         Harness::Claude => HarnessParsePlan::Claude,
+        Harness::Antigravity => HarnessParsePlan::Antigravity,
+        Harness::Grok => HarnessParsePlan::Grok,
     };
     // Parent baseline discovery is bounded by the planned fork set and runs in
     // the background usage worker. Start the incremental file-parse budget only
@@ -1430,6 +1444,12 @@ fn parse_candidate(
         ),
         HarnessParsePlan::Claude => {
             claude::usage::parse_file_summary(path, max_jsonl_line_bytes, existing, deadline)
+        }
+        HarnessParsePlan::Antigravity => {
+            antigravity::usage::parse_file_summary(path, max_jsonl_line_bytes, existing, deadline)
+        }
+        HarnessParsePlan::Grok => {
+            grok::usage::parse_file_summary(path, max_jsonl_line_bytes, existing, deadline)
         }
     }
 }
@@ -2276,6 +2296,8 @@ fn harness_cache_schema_version(harness: Harness) -> i64 {
     match harness {
         Harness::Codex => CODEX_CACHE_SCHEMA_VERSION,
         Harness::Claude => CLAUDE_CACHE_SCHEMA_VERSION,
+        Harness::Antigravity => ANTIGRAVITY_CACHE_SCHEMA_VERSION,
+        Harness::Grok => GROK_CACHE_SCHEMA_VERSION,
     }
 }
 

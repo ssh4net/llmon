@@ -75,9 +75,16 @@ same layout; differences are noted per module.
   each refresh and sends `UsageUpdated(harness, snapshot)`; a separate worker
   polls the Claude limits (status-line snapshot every 10 s, or OAuth at most
   once a minute).
-- `harness.rs` - `Harness` enum (Codex, Claude) with the stable `key()` used
-  in the cache and config. Per-harness behavior is dispatched with `match`,
-  not trait objects.
+- `harness.rs` - `Harness` enum (Codex, Claude, Antigravity, Grok) with the
+  stable `key()` used in the cache and config. Per-harness behavior is
+  dispatched with `match`, not trait objects. `HarnessPage` groups the
+  harnesses in two pairs (page 1 Codex and Claude, page 2 Antigravity and
+  Grok); every screen shows one page (`AppState::harness_page`, keys `1` /
+  `2` / F3, `set_harness_page`), and the combined view is always the two
+  harnesses of the page, left and right (`HarnessView::next` and `on_page`
+  keep the position when the page changes). A third harness on a page would
+  need a three-way combined layout. APISTAT and LIMITS exist on page 1 only
+  (`page_has_screen`).
 - `providers/<harness>/` - everything specific to one CLI: home resolution,
   log parser and its `ParserState`, session owner resolution, history
   summary/detail parsing (`history.rs`), and (Codex) fork replay baselines. Shared code reaches it through

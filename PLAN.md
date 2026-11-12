@@ -16,13 +16,14 @@ Reference sources: `_handoff/sources/CoMon` (HEAD `c24855d`, comon 0.5.8) and
 | D3 | Claude limits | ClaudeMon's APISTAT LIMITS view becomes the Claude LIMITS card | decided |
 | D4 | Cost | COST for every harness, combined and per harness | decided |
 | D5 | Activity, History | Combined and per harness | decided |
-| D6 | More harnesses | Gemini CLI, Grok CLI, GitHub Copilot CLI, after Codex + Claude ship | decided |
+| D6 | More harnesses | Antigravity CLI and Grok CLI first (page 2, D13), then Gemini CLI (API-only now) and GitHub Copilot CLI | decided |
 | D7 | Git history | Build on CoMon's history (86 commits) | decided |
 | D8 | Deleted logs | Keep stats of deleted or moved logs for every harness (`llmon-archive.db`) | decided |
 | D9 | APISTAT tab | Keep CoMon's APISTAT as the Codex server-history screen, or fold it into cards | open |
 | D10 | Copilot | Needs a machine with Copilot CLI to capture fixtures | open |
 | D11 | Retention | How long to keep usage history; until decided, forever (each archived row records when its log disappeared) | open |
 | D12 | Several machines | Distributed mode: llmon instances exchange usage, projects, and sessions through a shared folder; opt-in (off unless `sync.dir` or `--sync-dir`); see section 10 | decided |
+| D13 | Pages | Each page of screens shows two harnesses side by side: page 1 Codex and Claude, page 2 Antigravity and Grok. Keys `1` / `2` / F3. Gemini CLI is left out for now (it is API-only); a third harness on a page needs a three-way combined view | decided |
 
 Why D1: ClaudeMon is CoMon 0.5.5 renamed. CoMon added only 2 commits since
 the fork, both UI work. The history browser (`read/catalog.rs`,
