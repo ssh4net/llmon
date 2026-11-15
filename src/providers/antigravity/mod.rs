@@ -1,6 +1,7 @@
 //! Antigravity CLI (`agy`): conversations under `~/.gemini/antigravity-cli`.
 
 pub(crate) mod history;
+mod proto;
 pub(crate) mod usage;
 
 use std::path::{Path, PathBuf};

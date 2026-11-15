@@ -1039,7 +1039,7 @@ pub fn compute_snapshot_with(
     }
 
     // Build a full candidate list (metadata-only).
-    let mut candidates = collect_session_file_candidates(&sessions_root);
+    let mut candidates = collect_session_file_candidates(harness, &sessions_root);
     if harness == Harness::Grok {
         // Only `updates.jsonl` of a session has usage; the session's other
         // logs (chat, events, rewind points) and the group's prompt history
@@ -1477,7 +1477,18 @@ pub(crate) struct SessionFileCandidate {
     pub(crate) modified_epoch_secs: Option<u64>,
 }
 
-fn collect_session_file_candidates(sessions_root: &Path) -> Vec<SessionFileCandidate> {
+/// The log files of a harness's directory. Antigravity's are SQLite files, and
+/// a live conversation's latest rows sit in the write-ahead log next to the
+/// file: its size and time count with the file's, so a change of either one
+/// makes the cached row stale.
+fn collect_session_file_candidates(
+    harness: Harness,
+    sessions_root: &Path,
+) -> Vec<SessionFileCandidate> {
+    let extension = match harness {
+        Harness::Antigravity => "db",
+        _ => "jsonl",
+    };
     let mut out: Vec<SessionFileCandidate> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![sessions_root.to_path_buf()];
 
@@ -1504,19 +1515,35 @@ fn collect_session_file_candidates(sessions_root: &Path) -> Vec<SessionFileCandi
             if !ft.is_file() {
                 continue;
             }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            if path.extension().and_then(|ext| ext.to_str()) != Some(extension) {
                 continue;
             }
 
-            let len = meta.len();
+            let mut len = meta.len();
             if len == 0 {
                 continue;
             }
 
-            let modified = meta.modified().ok();
-            let modified_epoch_secs = modified
+            let mut modified_epoch_secs = meta
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs());
+            if harness == Harness::Antigravity {
+                let mut wal = path.as_os_str().to_owned();
+                wal.push("-wal");
+                if let Ok(wal_meta) = std::fs::symlink_metadata(&wal) {
+                    if wal_meta.file_type().is_file() {
+                        len = len.saturating_add(wal_meta.len());
+                        let wal_modified = wal_meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs());
+                        modified_epoch_secs = modified_epoch_secs.max(wal_modified);
+                    }
+                }
+            }
             out.push(SessionFileCandidate {
                 path,
                 len,

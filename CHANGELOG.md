@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.20
+
+- Antigravity usage. Page 2 now reads the Antigravity CLI's conversations
+  (`~/.gemini/antigravity-cli/conversations/*.db`, `--antigravity-dir`):
+  tokens per day, model, and project, runs (the user's inputs), and the time
+  the calls took, from the per-call usage inside each conversation's SQLite
+  file (protobuf, decoded by field number). The context checkpoints that the
+  CLI asks the model for are counted too (about a third of the input in the
+  sample). The files are opened read-only, and a live conversation's
+  write-ahead log is read with it; one without a log is opened `immutable`, so
+  nothing is created next to the user's data. A changed conversation is read
+  again in full. llmon never starts `agy`. No prices yet (the models are
+  listed unpriced), no quota, and HISTORY for Antigravity comes later.
+
 ## 0.5.19
 
 - Grok usage. Page 2 now reads the Grok CLI's sessions (`~/.grok/sessions`,

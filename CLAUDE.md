@@ -269,6 +269,13 @@ that tools touched. See `history_refactoring.md` for why.
   prunes old sessions and rewrites credentials when it starts, so llmon (and
   any research) only reads the files and never runs `grok` or `agy`.
   Field notes: `docs/sources.md`.
+- **Antigravity (`agy`):** conversations are SQLite files of protobuf blobs
+  (`providers/antigravity/proto.rs` reads them by field number, tolerantly).
+  A call is a `gen_metadata` row (usage at `1/4`) or a type 23 checkpoint step
+  (`28/2`); type 15 steps repeat their call's usage and are never counted.
+  Input excludes the cache. A changed file is read again in full; its `-wal`
+  counts in the candidate's size and time. The scan opens files read-only and
+  never starts `agy`. Field notes: `docs/sources.md`.
 - Neither format is documented. Parsers must tolerate changes and ignore
   unknown record types.
 - Token columns differ between the two; INPUT includes cached input in both:

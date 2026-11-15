@@ -180,3 +180,47 @@ older than its `max_age_days`, so keep an archive of aggregates (llmon's
 - Limits: none. Grok has no usage or limits command, and the status-line JSON
   has no rate limits.
 - Resume: `grok -r <id>` (`--continue`, `--fork-session`).
+
+# Antigravity data source
+
+Observed 2026-11 with Antigravity CLI (`agy`) 1.5.3: 9 conversations, 377 model
+calls. There is no published schema: the field numbers below come from
+decoding the protobuf blobs and from the Go struct tags and enum descriptors in
+the `agy` binary (read as text, never run). llmon only reads the files and
+never starts `agy`: a start updates the program, rewrites the login, and
+rebuilds the summaries database.
+
+- Files: `~/.gemini/antigravity-cli/conversations/<id>.db`, one SQLite file per
+  conversation (WAL mode; the newest rows can sit in `<id>.db-wal`, so llmon
+  adds the log's size and time to the file's for change detection, and opens
+  a file that has a log normally, read-only, and one without `immutable`, so
+  that no `-wal` or `-shm` is created next to the user's data). Sub-agents are
+  conversations of their own: sum all files. `conversation_summaries.db` has
+  titles, workspaces, and parent links (HISTORY); its FTS tables hold prompt
+  text and are never read.
+- A model call is a row of `gen_metadata` (`data` is a protobuf with the
+  prompt text in it; skip what is not needed). Its usage message is field
+  `1/4`: `1` model enum (1417 = gemini-4-argon, 1318 = gemini-3.8-flash,
+  1402 = claude-opus-5-5), `2` uncached input tokens, `3` output tokens
+  (thinking included; `9` thinking and `10` response add up to it), `4` cache
+  writes (never seen), `5` cache reads, `6` API provider (24 Gemini, 26 Claude
+  on Vertex), `11` response id (the dedupe key). Input excludes the cache:
+  the prompt is `2 + 5 + 4`. `1/11` and `1/12` are the time to first token and
+  the streaming time (`{1 seconds, 2 nanos}`). No cost and no timestamp.
+- Context checkpoints (the CLI asks the model to summarise the context) are not
+  in `gen_metadata`: they are the `steps` of type 23, with the same usage
+  message at `metadata` field `28/2` and no model enum (36% of the uncached
+  input of the sample). The model of the call before it is used. Steps of
+  type 15 (planner response) carry a copy of their call's usage at field `9`:
+  not counted.
+- Time: `steps.metadata` field `1/1` is the start (Unix seconds) of a step.
+  A call is dated by the type 15 step whose link `20/3` (omitted when 0) is its
+  `gen_metadata` index; a call without one takes its neighbour's, then the
+  conversation's creation time (`trajectory_metadata_blob` field `2/1`).
+  Steps of type 14 are the user's inputs (runs).
+- Project: `trajectory_metadata_blob` (id `main`) field `7` is the workspace
+  (`file:///...`).
+- Quota: nothing is stored on disk. `agy -p "/usage"` (and `/quota`) print
+  quota in print mode, which needs a login and the network; llmon does not
+  run it.
+- Resume: `agy --conversation <id>`, `agy -c`.

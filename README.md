@@ -35,9 +35,9 @@ the pills next to the title) switch the page. Each page has the same USAGE,
 MODELS, COST, ACTIVITY, and HISTORY screens and its own COMBINED / left /
 right view switch; APISTAT and LIMITS (Codex account screens) are on page 1
 only. The tools are found by their folders (`~/.gemini/antigravity-cli`,
-`~/.grok`). Grok usage, models, and cost are read; Grok HISTORY and
-Antigravity come in later versions, and neither tool has limits llmon can
-read.
+`~/.grok`). Grok and Antigravity usage and models are read (cost for Grok
+only: Antigravity has no prices yet); their HISTORY comes in a later version,
+and neither tool has limits llmon can read.
 
 Claude Code support is being added. The USAGE screen has three views (`h`
 switches them):
