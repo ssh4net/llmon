@@ -611,6 +611,13 @@ impl HarnessParserState {
         }
     }
 
+    pub(crate) fn as_grok(&self) -> Option<&grok::usage::ParserState> {
+        match self {
+            HarnessParserState::Grok(state) => Some(state),
+            _ => None,
+        }
+    }
+
     fn from_json(harness: Harness, json: &str) -> serde_json::Result<Self> {
         match harness {
             Harness::Codex => serde_json::from_str(json).map(HarnessParserState::Codex),
@@ -1033,6 +1040,15 @@ pub fn compute_snapshot_with(
 
     // Build a full candidate list (metadata-only).
     let mut candidates = collect_session_file_candidates(&sessions_root);
+    if harness == Harness::Grok {
+        // Only `updates.jsonl` of a session has usage; the session's other
+        // logs (chat, events, rewind points) and the group's prompt history
+        // would be read for nothing.
+        candidates.retain(|candidate| {
+            candidate.path.file_name().and_then(|name| name.to_str())
+                == Some(grok::usage::USAGE_LOG_NAME)
+        });
+    }
     // Newest activity first.
     candidates.sort_by(|a, b| {
         b.modified_epoch_secs
@@ -1838,6 +1854,28 @@ fn daily_has_activity(totals: DailyTotals) -> bool {
 
 fn fallback_project_identity(session_cwd: Option<&str>) -> Option<String> {
     session_cwd.and_then(session_cwd_identity)
+}
+
+/// Adds one response's tokens to the day and to the day's model totals, in
+/// both zones.
+pub(crate) fn add_token_usage(
+    daily: &mut HashMap<String, DailyTotals>,
+    model_totals_by_day: &mut HashMap<String, HashMap<String, TokenBreakdown>>,
+    timestamp_ms: i64,
+    model: &str,
+    usage: TokenBreakdown,
+) {
+    for zone in [UsageZone::Local, UsageZone::Utc] {
+        let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) else {
+            continue;
+        };
+        daily.entry(day_key.clone()).or_default().tokens.add(usage);
+        add_model_tokens_limited(
+            model_totals_by_day.entry(day_key).or_default(),
+            model.to_string(),
+            usage,
+        );
+    }
 }
 
 pub(crate) fn add_model_tokens_limited(

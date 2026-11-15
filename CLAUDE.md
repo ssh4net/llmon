@@ -261,6 +261,14 @@ that tools touched. See `history_refactoring.md` for why.
   breakpoint (API prompt-caching docs: total input = `input_tokens +
   cache_creation_input_tokens + cache_read_input_tokens`). Claude Code caches
   almost every prompt, so it is a few tokens per request.
+- **Grok:** sessions are `~/.grok/sessions/<url-encoded cwd>/<id>/`; only
+  `updates.jsonl` has usage, in `turn_completed` records (a delta per turn,
+  `inputTokens` includes cached reads). A parent turn also contains the usage
+  of the subagents that finished during it, and those have their own logs, so
+  `providers/grok/usage.rs` takes the children's recorded totals off it. Grok
+  prunes old sessions and rewrites credentials when it starts, so llmon (and
+  any research) only reads the files and never runs `grok` or `agy`.
+  Field notes: `docs/sources.md`.
 - Neither format is documented. Parsers must tolerate changes and ignore
   unknown record types.
 - Token columns differ between the two; INPUT includes cached input in both:

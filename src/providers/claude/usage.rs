@@ -3,7 +3,7 @@
 //! the recorded turn durations.
 
 use crate::usage::{
-    add_agent_run, add_model_tokens_limited, cache_day_key_for_timestamp_ms, read_timestamp_ms,
+    add_agent_run, add_token_usage, cache_day_key_for_timestamp_ms, read_timestamp_ms,
     unterminated_tail_is_final, CachedFileScanEntry, DailyTotals, FileScanSummary,
     HarnessParserState, TokenBreakdown, UsageZone, MAX_ACTIVITY_GAP_MS,
 };
@@ -261,26 +261,6 @@ fn extract_assistant_usage(value: &Value) -> Option<(String, String, TokenBreakd
         format!("{message_id}:{request_id}")
     };
     Some((key, model.to_string(), tokens))
-}
-
-fn add_token_usage(
-    daily: &mut HashMap<String, DailyTotals>,
-    model_totals_by_day: &mut HashMap<String, HashMap<String, TokenBreakdown>>,
-    timestamp_ms: i64,
-    model: &str,
-    usage: TokenBreakdown,
-) {
-    for zone in [UsageZone::Local, UsageZone::Utc] {
-        let Some(day_key) = cache_day_key_for_timestamp_ms(timestamp_ms, zone) else {
-            continue;
-        };
-        daily.entry(day_key.clone()).or_default().tokens.add(usage);
-        add_model_tokens_limited(
-            model_totals_by_day.entry(day_key).or_default(),
-            model.to_string(),
-            usage,
-        );
-    }
 }
 
 fn track_turn_activity(

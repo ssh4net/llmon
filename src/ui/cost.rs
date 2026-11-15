@@ -306,9 +306,10 @@ fn source_line(harness: Harness, table: &PriceTable) -> String {
         Harness::Antigravity => {
             format!("Antigravity: no price table yet{overrides}; usage is listed unpriced.")
         }
-        Harness::Grok => {
-            format!("Grok: no price table yet{overrides}; usage is listed unpriced.")
-        }
+        Harness::Grok => format!(
+            "Grok: rates fitted to the costs Grok recorded, long-context turns (over ~200k prompt per request) cost twice as much there (table {}{overrides}).",
+            table.updated
+        ),
     }
 }
 

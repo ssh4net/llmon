@@ -138,3 +138,45 @@ cost, context-window usage, and `prompt_cache` health.
 S5 needs no credentials, so it is the default source; S1 is opt-in and adds
 per-model weekly limits, extra usage, and the by-surface breakdown. S6 fills
 in for S5 when the snapshot is stale.
+
+# Grok data source
+
+Observed 2026-09 to 2026-11 with Grok CLI 1.0.13 (7 sessions, 19 turns). Field
+names and types only; every example is synthetic. llmon reads these files and
+never starts `grok`: its start-up refreshes credentials and deletes sessions
+older than its `max_age_days`, so keep an archive of aggregates (llmon's
+`llmon-archive.db` does).
+
+- Layout: `~/.grok/sessions/<url-encoded cwd>/<session id>/` (`/` is `%2F`),
+  with `summary.json`, `updates.jsonl`, `chat_history.jsonl`, `events.jsonl`,
+  and more. Only `updates.jsonl` has usage. `prompt_history.jsonl` sits in the
+  group directory. The owner of a session is `summary.json` `info.cwd` (the
+  decoded group name is the fallback).
+- `updates.jsonl` is one JSON object per line:
+  `{"timestamp": <epoch seconds>, "method": ..., "params": {"update":
+  {"sessionUpdate": "<type>", ...}}}`. Only two types matter:
+  `turn_completed` (the spend of a turn, written once at its end, also when
+  it was cancelled) and `subagent_finished` (`child_session_id`).
+- `turn_completed.params.update.usage` is a delta per turn: `inputTokens`
+  (cached reads included), `outputTokens` (reasoning included),
+  `cachedReadTokens`, `cacheCreationTokens` (always 0 so far), `modelCalls`,
+  `numTurns` (main-agent requests only), `apiDurationMs`, optional
+  `costUsdTicks` and `usageIsIncomplete`, and `modelUsage.<model>` with the same
+  fields. Models are named `grok-4.6-build` there and `grok-4.6` elsewhere.
+- A parent turn includes the usage of the subagents that finished during it
+  (`modelCalls` > `numTurns`), and every subagent is a full session in the same
+  group directory with its own `updates.jsonl`. llmon takes the children's
+  recorded totals (per model) off the parent turn, reading the child logs next
+  to it by the ids of the `subagent_finished` records before the turn. A child
+  whose log is gone stays in the parent's turn. The one parent turn seen
+  (57 calls against 25 turns) matched: 224 recorded calls less 32 rolled up
+  equalled the 192 assistant messages of all chat logs.
+- Cost: `costUsdTicks` is 1e10 per USD. On 17 complete turns it equals
+  `3400 * uncached input + 850 * cached input + 10200 * output` exactly, that
+  is $0.34 / $0.085 / $1.02 per million tokens for `grok-4.6`; llmon's price
+  table uses these inferred rates. A turn whose requests average over about
+  200k prompt tokens was recorded at twice that, which the table cannot show.
+  No list price exists on disk.
+- Limits: none. Grok has no usage or limits command, and the status-line JSON
+  has no rate limits.
+- Resume: `grok -r <id>` (`--continue`, `--fork-session`).

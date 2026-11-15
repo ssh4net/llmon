@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.19
+
+- Grok usage. Page 2 now reads the Grok CLI's sessions (`~/.grok/sessions`,
+  `$GROK_HOME`, `--grok-dir`): tokens per day, model, and project, runs, and
+  API time, from the `turn_completed` records of each session's
+  `updates.jsonl` (one record per turn, resumed incrementally like the other
+  logs). Input is split into uncached input and cache reads. A subagent's
+  usage is in both the parent's turn and its own log, so the children's
+  recorded totals are taken off the parent's turn. The model names lose Grok's
+  `-build` suffix. COST uses rates fitted to the costs Grok recorded
+  (`grok-4.6`: $0.34 uncached, $0.085 cached, $1.02 output per million
+  tokens); turns of more than about 200k prompt tokens per request were
+  recorded at twice that and are priced at the normal rate. Grok shows no
+  limits. HISTORY for Grok comes in a later version.
+
 ## 0.5.18
 
 - A second page of screens for more tools. Keys `1` and `2` (or F3, or the 1

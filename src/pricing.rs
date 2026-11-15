@@ -26,6 +26,8 @@ use std::collections::BTreeMap;
 pub const CLAUDE_PRICES_UPDATED: &str = "2026-10-05";
 /// Date the built-in Codex table was checked against the official pages.
 pub const CODEX_PRICES_UPDATED: &str = "2026-10-05";
+/// Date the built-in Grok table was fitted to the costs Grok recorded.
+pub const GROK_PRICES_UPDATED: &str = "2026-11-15";
 /// USD value of one Codex credit: the credit rate card is the API price
 /// table divided by this.
 pub const CODEX_USD_PER_CREDIT: f64 = 0.04;
@@ -156,8 +158,9 @@ impl PriceTable {
         let (prices, updated) = match harness {
             Harness::Codex => (codex_prices(), CODEX_PRICES_UPDATED),
             Harness::Claude => (claude_prices(), CLAUDE_PRICES_UPDATED),
+            Harness::Grok => (grok_prices(), GROK_PRICES_UPDATED),
             // No built-in prices yet: such usage is listed as unpriced.
-            Harness::Antigravity | Harness::Grok => (Vec::new(), "none"),
+            Harness::Antigravity => (Vec::new(), "none"),
         };
         Self {
             prices: prices
@@ -257,6 +260,16 @@ impl Pricing {
     }
 }
 
+/// Grok prices. xAI does not list them where Grok's logs can be matched, and
+/// the logs record each turn's cost (`costUsdTicks`, 1e10 ticks per USD): the
+/// rates below reproduce 17 recorded turns of `grok-4.6` exactly (uncached
+/// input, cached input, and output per million tokens, no cache writes).
+/// Turns whose requests carry more than about 200k prompt tokens were recorded
+/// at twice that, which a per-model price cannot show.
+fn grok_prices() -> Vec<(&'static str, ModelPrice)> {
+    vec![("grok-4.6", ModelPrice::openai(0.34, 0.085, 1.02))]
+}
+
 /// Anthropic API list prices.
 fn claude_prices() -> Vec<(&'static str, ModelPrice)> {
     let opus_4 = ModelPrice::claude(15.0, 75.0);
@@ -334,6 +347,36 @@ fn strip_date_suffix(model: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grok_rates_reproduce_the_costs_grok_recorded() {
+        // A turn Grok recorded as 186,660,000 ticks (1e10 per USD): 30,000
+        // uncached and 90,000 cached prompt tokens, and 800 output tokens.
+        let pricing = Pricing::default();
+        let tokens = TokenBreakdown {
+            input: 30_000,
+            cache_write: 0,
+            cache_write_1h: 0,
+            cache_read: 90_000,
+            output: 800,
+        };
+        let cost = pricing
+            .table(Harness::Grok)
+            .cost("grok-4.6", tokens)
+            .expect("priced");
+        let recorded_usd = 186_660_000.0 / 1e10;
+        assert!((cost.total() - recorded_usd).abs() < 1e-9, "{cost:?}");
+        // The `-build` model id is the same model.
+        assert!(pricing
+            .table(Harness::Grok)
+            .cost("grok-4.6-build", tokens)
+            .is_some());
+        // A model that was never seen is unpriced, not guessed.
+        assert!(pricing
+            .table(Harness::Grok)
+            .cost("grok-9", tokens)
+            .is_none());
+    }
+
     use super::*;
 
     fn tokens(
