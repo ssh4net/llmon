@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.22
+
+- Fix the failing CI (Rust workflow): the newer clippy of the stable toolchain
+  (1.100) reports `unnecessary_sort_by` for the two newest-file-first sorts in
+  `sync/mod.rs`, and stopped every run before its tests. They use
+  `sort_by_key` with `Reverse` now (same order). Also for Windows: the SQLite
+  URI of an Antigravity file has forward slashes and `/C:/` before a drive,
+  and the tests of the Grok and Antigravity owners no longer expect a Unix
+  path to be absolute there.
+
 ## 0.5.21
 
 - The two pages no longer jump: the cards of page 2 are drawn at the same

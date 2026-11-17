@@ -39,7 +39,10 @@ bash scripts/check-ascii.sh --staged         # staged files; scripts/install-pre
 ```
 
 CI (`.github/workflows/`) runs the ASCII check, plus rustfmt, clippy, and tests on
-Linux, macOS, and Windows. Run the binary against a scratch state dir with
+Linux, macOS, and Windows, on the latest stable toolchain: a newer clippy can
+fail CI on code that passes locally, so check with the same one (`rustup
+toolchain install stable`, or `cargo +<version> clippy --locked --all-targets
+-- -D warnings`). Run the binary against a scratch state dir with
 `LLMON_HOME=<dir> cargo run` to avoid touching `~/.llmon`.
 
 Requirements: Rust 1.88+ and a C compiler (`rusqlite` builds bundled SQLite).

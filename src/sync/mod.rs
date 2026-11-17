@@ -610,7 +610,7 @@ pub(crate) fn read_peers(settings: &SyncSettings, cache: &mut PeerCache) -> Resu
     cache.entries.retain(|path, _| seen.contains(path));
     // Two files with one machine id (a copy): the newer one wins.
     scan.peers
-        .sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+        .sort_by_key(|peer| std::cmp::Reverse(peer.generated_at));
     let mut ids = HashSet::new();
     scan.peers
         .retain(|peer| ids.insert(peer.machine.id.clone()));
@@ -797,7 +797,7 @@ fn sanitize_session(session: &mut ExportSession) {
 /// report belongs to the one with the newer file.
 pub(crate) fn remote_sessions(peers: &[Arc<SyncFile>]) -> Vec<SessionSummary> {
     let mut ordered: Vec<&Arc<SyncFile>> = peers.iter().collect();
-    ordered.sort_by(|left, right| right.generated_at.cmp(&left.generated_at));
+    ordered.sort_by_key(|peer| std::cmp::Reverse(peer.generated_at));
     let mut seen: HashSet<(Harness, String)> = HashSet::new();
     let mut sessions = Vec::new();
     for peer in ordered {

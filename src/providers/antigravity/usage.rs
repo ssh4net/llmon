@@ -181,7 +181,7 @@ fn open_read_only(path: &Path) -> Result<Connection> {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
     } else {
-        let uri = format!("file:{}?immutable=1&mode=ro", uri_path(path));
+        let uri = format!("file://{}?immutable=1&mode=ro", uri_path(path));
         Connection::open_with_flags(
             uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -194,12 +194,20 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-/// The path escaped for a SQLite URI.
+/// The path of a SQLite URI (`file://` + this): forward slashes, a leading
+/// slash before a Windows drive (`/C:/...`), and everything else but plain
+/// path characters escaped.
 fn uri_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = if text.as_bytes().get(1) == Some(&b':') {
+        format!("/{text}")
+    } else {
+        text
+    };
     let mut out = String::new();
-    for byte in path.to_string_lossy().bytes() {
+    for byte in text.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' | b':' => {
                 out.push(char::from(byte));
             }
             other => out.push_str(&format!("%{other:02X}")),
@@ -692,7 +700,8 @@ mod tests {
             STEP_PLANNER_RESPONSE,
             &step_metadata(now, 0, None),
         );
-        assert_eq!(read_workspace(&connection).as_deref(), Some(WORKSPACE));
+        // (A Unix path has no drive, so it is not an absolute path on Windows.)
+        assert_eq!(read_workspace(&connection), session_cwd_identity(WORKSPACE));
         drop(connection);
         assert_eq!(totals(&snapshot(&root, None)).input, 100);
         let _ = std::fs::remove_dir_all(root);
@@ -824,6 +833,11 @@ mod tests {
         assert_eq!(
             uri_path(Path::new("/a/b-c_d.e/f g?h#i%")),
             "/a/b-c_d.e/f%20g%3Fh%23i%25"
+        );
+        // A Windows path gets forward slashes and a slash before the drive.
+        assert_eq!(
+            uri_path(Path::new("C:\\Users\\a b\\x.db")),
+            "/C:/Users/a%20b/x.db"
         );
     }
 }

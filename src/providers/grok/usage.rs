@@ -622,15 +622,17 @@ mod tests {
     fn the_session_belongs_to_the_cwd_of_its_summary() {
         let root = make_temp_dir("owner");
         let dir = make_session(&root, "sess-a");
+        // (A Unix path has no drive, so it is not an absolute path on Windows
+        // and neither side has a cwd there.)
         assert_eq!(
-            resolve_session_cwd(&dir.join(USAGE_LOG_NAME)).as_deref(),
-            Some(CWD)
+            resolve_session_cwd(&dir.join(USAGE_LOG_NAME)),
+            session_cwd_identity(CWD)
         );
         // Without a summary the decoded group name is used.
         std::fs::remove_file(dir.join("summary.json")).expect("remove summary");
         assert_eq!(
-            resolve_session_cwd(&dir.join(USAGE_LOG_NAME)).as_deref(),
-            Some(CWD)
+            resolve_session_cwd(&dir.join(USAGE_LOG_NAME)),
+            session_cwd_identity(CWD)
         );
         assert_eq!(percent_decode("%2Fa%2Fb").as_deref(), Some("/a/b"));
         assert_eq!(percent_decode("%2"), None);
