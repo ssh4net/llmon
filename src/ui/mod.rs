@@ -2368,20 +2368,12 @@ fn render_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     }
 }
 
-/// The limit reset line of the controls: Codex has it, so only page one.
-fn reset_summary_for_page(state: &AppState) -> Option<String> {
-    if state.harness_page != crate::harness::HarnessPage::First {
-        return None;
-    }
-    reset_summary_text(state)
-}
-
 fn render_single_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, harness: Harness) {
     let panel = usage_panel(state, harness);
     let cards_height = usage_cards_height(state, &panel, area.width);
     // Limit reset credits exist only for Codex, but the Claude view keeps
     // the same controls height so the two views line up.
-    let codex_reset_summary = reset_summary_for_page(state);
+    let codex_reset_summary = reset_summary_text(state);
     let codex_reset_button = codex_reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
@@ -2448,7 +2440,9 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
     let right = labeled_usage_panel(state, right_harness);
     let left_cards_height = usage_cards_height(state, &left, area.width);
     let right_cards_height = usage_cards_height(state, &right, area.width);
-    let reset_summary = reset_summary_for_page(state);
+    // Codex's limit reset line sizes the controls on both pages, so the cards
+    // are at the same level on page 2; only page 1 shows it.
+    let reset_summary = reset_summary_text(state);
     let reset_button = reset_summary
         .as_ref()
         .map(|_| limit_reset_button_view(state));
@@ -2457,6 +2451,7 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         area.width,
         reset_button.as_ref().map(LimitResetButtonView::width),
     );
+    let shows_resets = state.harness_page == HarnessPage::First;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2474,8 +2469,8 @@ fn render_combined_usage(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         frame,
         chunks[0],
         state,
-        reset_summary.as_deref(),
-        reset_button.as_ref(),
+        reset_summary.as_deref().filter(|_| shows_resets),
+        reset_button.as_ref().filter(|_| shows_resets),
     );
     let left_hover = render_usage_cards(frame, chunks[1], state, &left);
     let right_hover = render_usage_cards(frame, chunks[2], state, &right);
@@ -4098,7 +4093,37 @@ fn usage_card_specs(state: &AppState, panel: &UsagePanel, card_width: u16) -> Ve
     cards
 }
 
+/// The heights of a panel's card rows. The harness in the same position on the
+/// other page is measured too and the taller of the two is used, so the cards
+/// are drawn at the same level on both pages and the screen does not jump when
+/// the page is switched.
 fn usage_card_row_heights(state: &AppState, panel: &UsagePanel, width: u16) -> Vec<u16> {
+    let mut heights = own_card_row_heights(state, panel, width);
+    let page = panel.harness.page();
+    let position = page
+        .harnesses()
+        .iter()
+        .position(|harness| *harness == panel.harness)
+        .unwrap_or(0);
+    let counterpart = page.other().harnesses()[position];
+    let other = UsagePanel {
+        harness: counterpart,
+        snapshot: state.usage_snapshot(counterpart),
+        label: panel.label.map(|_| harness_pill_label(counterpart)),
+    };
+    for (index, height) in own_card_row_heights(state, &other, width)
+        .into_iter()
+        .enumerate()
+    {
+        match heights.get_mut(index) {
+            Some(own) => *own = (*own).max(height),
+            None => heights.push(height),
+        }
+    }
+    heights
+}
+
+fn own_card_row_heights(state: &AppState, panel: &UsagePanel, width: u16) -> Vec<u16> {
     let layout = panel_card_layout(panel, width);
     let card_width = layout.min_card_width.max(1);
     let cards = usage_card_specs(state, panel, card_width);
@@ -8380,6 +8405,8 @@ fn render_panel_limits_card(
     compact: bool,
 ) -> Option<WeeklyPaceHover> {
     let title = match panel.label {
+        // The longest name gives way to its short form before it is cut.
+        Some("ANTIGRAVITY") if area.width < 24 => "AGY LIMITS".to_string(),
         Some(label) => format!("{label} LIMITS"),
         None => "LIMITS".to_string(),
     };
@@ -10566,6 +10593,87 @@ mod tests {
         let text = render_screen_text(&mut state, 160, 44);
         assert!(text.contains("CODEX LIMITS"), "{text}");
         assert!(text.contains("APISTAT"), "{text}");
+    }
+
+    /// The rows where cards and charts start: the page switch must not move them.
+    fn usage_layout_rows(text: &str) -> Vec<usize> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let card_top = line.contains("LIMI") && line.contains('\u{250c}');
+                (card_top && !line.contains("llmon ::")) || line.contains("Usage by day")
+            })
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    #[test]
+    fn the_cards_are_at_the_same_level_on_both_pages() {
+        for (width, height) in [(120, 40), (150, 44), (200, 50)] {
+            for view in [
+                HarnessView::Combined,
+                HarnessView::Codex,
+                HarnessView::Claude,
+            ] {
+                let mut state = AppState::for_tests();
+                state.active_screen = ActiveScreen::Usage;
+                // Codex has a limit reset line; the other tools have no limits.
+                state.limits = Some(synthetic_codex_limits());
+                state.claude_limits = Some(synthetic_claude_limits());
+                state.codex_usage = Some(Arc::new(synthetic_codex_snapshot(45)));
+                state.claude_usage = Some(Arc::new(synthetic_claude_snapshot(12)));
+                state.antigravity_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+                state.grok_usage = Some(Arc::new(synthetic_claude_snapshot(8)));
+                state.harness_view = view;
+                let first = render_screen_text(&mut state, width, height);
+                state.set_harness_page(HarnessPage::Second);
+                let second = render_screen_text(&mut state, width, height);
+                let first_rows = usage_layout_rows(&first);
+                assert!(first_rows.len() >= 2, "{view:?} {width}x{height}\n{first}");
+                assert_eq!(
+                    first_rows,
+                    usage_layout_rows(&second),
+                    "{view:?} {width}x{height}\n{first}\n{second}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_other_screens_do_not_move_when_the_page_changes() {
+        // COST is left out: its tables follow the priced models, which differ.
+        for screen in [ActiveScreen::Models, ActiveScreen::Activity] {
+            for view in [HarnessView::Combined, HarnessView::Codex] {
+                let mut state = AppState::for_tests();
+                state.active_screen = screen;
+                // The same usage on every harness, so only the page differs.
+                for slot in 0..4 {
+                    let snapshot = Some(Arc::new(synthetic_claude_snapshot(12)));
+                    match slot {
+                        0 => state.codex_usage = snapshot,
+                        1 => state.claude_usage = snapshot,
+                        2 => state.antigravity_usage = snapshot,
+                        _ => state.grok_usage = snapshot,
+                    }
+                }
+                state.harness_view = view;
+                let rows = |text: &str| -> Vec<usize> {
+                    text.lines()
+                        .enumerate()
+                        .filter(|(_, line)| line.contains('\u{250c}') && !line.contains("llmon ::"))
+                        .map(|(row, _)| row)
+                        .collect()
+                };
+                let first = render_screen_text(&mut state, 150, 46);
+                state.set_harness_page(HarnessPage::Second);
+                let second = render_screen_text(&mut state, 150, 46);
+                assert_eq!(
+                    rows(&first),
+                    rows(&second),
+                    "{screen:?} {view:?}\n{first}\n{second}"
+                );
+            }
+        }
     }
 
     #[test]

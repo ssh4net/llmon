@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.5.21
+
+- The two pages no longer jump: the cards of page 2 are drawn at the same
+  level as those of page 1. Page 1 keeps a line for Codex's limit reset
+  summary that page 2 had dropped, and the cards of page 2 were shorter (a
+  limits card that only says "Not available"). The controls line is now the
+  same on both pages (only page 1 fills it), and each card row takes the
+  height of the taller of the two harnesses in the same position, so the
+  rows and the charts under them stay where they are when `1` / `2` is
+  pressed. The LIMITS title of Antigravity is "AGY LIMITS" when the card is
+  too narrow for the whole name.
+
 ## 0.5.20
 
 - Antigravity usage. Page 2 now reads the Antigravity CLI's conversations

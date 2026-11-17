@@ -84,7 +84,11 @@ same layout; differences are noted per module.
   harnesses of the page, left and right (`HarnessView::next` and `on_page`
   keep the position when the page changes). A third harness on a page would
   need a three-way combined layout. APISTAT and LIMITS exist on page 1 only
-  (`page_has_screen`).
+  (`page_has_screen`). Switching the page must not move anything on the
+  USAGE screen: the controls line is sized by Codex's reset summary on both
+  pages, and `usage_card_row_heights` takes the taller of a harness and the
+  one in the same position on the other page (tests
+  `the_cards_are_at_the_same_level_on_both_pages`).
 - `providers/<harness>/` - everything specific to one CLI: home resolution,
   log parser and its `ParserState`, session owner resolution, history
   summary/detail parsing (`history.rs`), and (Codex) fork replay baselines. Shared code reaches it through
